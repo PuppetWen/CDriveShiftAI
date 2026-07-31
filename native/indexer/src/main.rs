@@ -105,6 +105,11 @@ struct SearchIndex {
     // a hash table. Live watcher additions remain in a small hash map.
     path_positions: Vec<(u64, u32)>,
     delta_positions: HashMap<u64, u32>,
+    // Directory removals are represented as compact prefix tombstones. The
+    // previous eager implementation scanned all entries for every ambiguous
+    // Windows remove event, which could peg one core and page the full cache
+    // back into memory. Search results still exclude the complete subtree.
+    removed_trees: Vec<String>,
     live_count: usize,
 }
 
@@ -136,6 +141,12 @@ struct SharedState {
     delta_lock: Mutex<()>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct PendingWatchChange {
+    new_tree: bool,
+    folder_hint: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Request {
@@ -155,6 +166,7 @@ struct Request {
     match_path: Option<bool>,
     regex: Option<bool>,
     background: Option<bool>,
+    process_id: Option<u32>,
     force_rebuild: Option<bool>,
     rebuild_reason: Option<String>,
     mouse_button: Option<String>,
@@ -494,9 +506,15 @@ fn normalized_path_hash(value: &str) -> u64 {
     // compact, and sufficient for local path identity. Exact paths are still
     // verified against Entry when an unlikely collision is encountered.
     let mut hash = 14_695_981_039_346_656_037u64;
-    for byte in normalized(value).bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(1_099_511_628_211);
+    for character in value.chars() {
+        let separator_normalized = if character == '/' { '\\' } else { character };
+        for lowered in separator_normalized.to_lowercase() {
+            let mut encoded = [0u8; 4];
+            for byte in lowered.encode_utf8(&mut encoded).bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(1_099_511_628_211);
+            }
+        }
     }
     hash
 }
@@ -520,6 +538,111 @@ fn trim_process_working_set() {
 
 #[cfg(not(windows))]
 fn trim_process_working_set() {}
+
+#[cfg(windows)]
+fn trim_process_tree_working_sets(root_pid: u32) {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, SetProcessWorkingSetSize, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA,
+    };
+
+    if root_pid == 0 {
+        return;
+    }
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return;
+    }
+    let mut processes = Vec::new();
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut available = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while available {
+        let name_end = entry
+            .szExeFile
+            .iter()
+            .position(|character| *character == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let executable_name = String::from_utf16_lossy(&entry.szExeFile[..name_end]);
+        let owned_process = executable_name.eq_ignore_ascii_case("CDriveShiftAI.exe")
+            || executable_name.eq_ignore_ascii_case("cshift-indexer.exe");
+        processes.push((
+            entry.th32ProcessID,
+            entry.th32ParentProcessID,
+            owned_process,
+        ));
+        available = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe {
+        CloseHandle(snapshot);
+    }
+
+    let mut tree = HashSet::new();
+    tree.insert(root_pid);
+    loop {
+        let before = tree.len();
+        for (pid, parent_pid, owned_process) in &processes {
+            if *owned_process && tree.contains(parent_pid) {
+                tree.insert(*pid);
+            }
+        }
+        if tree.len() == before {
+            break;
+        }
+    }
+
+    // EmptyWorkingSet only removes inactive resident pages. Virtual mappings,
+    // indexes and process state stay intact and are paged back by Windows on
+    // demand, so tray/global-shortcut accuracy is unaffected.
+    let process_count = tree.len();
+    let mut opened = 0usize;
+    let mut trimmed = 0usize;
+    for pid in tree {
+        let handle =
+            unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, 0, pid) };
+        if handle == 0 {
+            continue;
+        }
+        opened += 1;
+        unsafe {
+            if SetProcessWorkingSetSize(handle, usize::MAX, usize::MAX) != 0 {
+                trimmed += 1;
+            }
+            CloseHandle(handle);
+        }
+    }
+    if env::var_os("CDRIVESHIFTAI_TRIM_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "tray working-set trim: root={}, processes={}, opened={}, trimmed={}",
+            root_pid, process_count, opened, trimmed
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn trim_process_tree_working_sets(_root_pid: u32) {}
+
+#[cfg(windows)]
+fn set_indexing_priority(active: bool) {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+    };
+    unsafe {
+        let priority = if active {
+            BELOW_NORMAL_PRIORITY_CLASS
+        } else {
+            NORMAL_PRIORITY_CLASS
+        };
+        let _ = SetPriorityClass(GetCurrentProcess(), priority);
+    }
+}
+
+#[cfg(not(windows))]
+fn set_indexing_priority(_active: bool) {}
 
 fn file_name(value: &str) -> &str {
     value
@@ -579,27 +702,44 @@ fn contains_whole_word(target: &str, needle: &str) -> bool {
     })
 }
 
-fn trigram_hash(chars: &[char]) -> u32 {
+fn trigram_hash(chars: [char; 3]) -> u32 {
     let mut hash = 2_166_136_261u32;
     for character in chars {
-        hash ^= *character as u32;
+        hash ^= character as u32;
         hash = hash.wrapping_mul(16_777_619);
     }
     hash
 }
 
-fn name_signature(value: &str) -> u64 {
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() < 3 {
-        return 0;
-    }
+fn name_signature_from_chars(chars: impl Iterator<Item = char>) -> u64 {
     let mut signature = 0u64;
-    for window in chars.windows(3) {
+    let mut window = ['\0'; 3];
+    let mut seen = 0usize;
+    for character in chars {
+        if seen < 3 {
+            window[seen] = character;
+            seen += 1;
+            if seen < 3 {
+                continue;
+            }
+        } else {
+            window[0] = window[1];
+            window[1] = window[2];
+            window[2] = character;
+        }
         let hash = trigram_hash(window);
         signature |= 1u64 << (hash & 63);
         signature |= 1u64 << ((hash >> 6) & 63);
     }
     signature
+}
+
+fn name_signature(value: &str) -> u64 {
+    name_signature_from_chars(value.chars())
+}
+
+fn lowercase_name_signature(value: &str) -> u64 {
+    name_signature_from_chars(value.chars().flat_map(char::to_lowercase))
 }
 
 impl SearchIndex {
@@ -632,6 +772,7 @@ impl SearchIndex {
             live: vec![true; entries.len()],
             path_positions: Vec::with_capacity(entries.len()),
             delta_positions: HashMap::new(),
+            removed_trees: Vec::new(),
             live_count: entries.len(),
             entries,
         };
@@ -642,7 +783,7 @@ impl SearchIndex {
             let (signature, path_hash) = {
                 let path_value = index.path(entry_index)?;
                 (
-                    name_signature(&file_name(path_value).to_lowercase()),
+                    lowercase_name_signature(file_name(path_value)),
                     normalized_path_hash(path_value),
                 )
             };
@@ -718,6 +859,25 @@ impl SearchIndex {
         None
     }
 
+    fn path_is_directory(&self, path_value: &str) -> Option<bool> {
+        self.find_path(path_value)
+            .and_then(|index| self.entries.get(index))
+            .map(|entry| entry.is_directory())
+    }
+
+    fn path_is_removed(&self, path_value: &str) -> bool {
+        if self.removed_trees.is_empty() {
+            return false;
+        }
+        let candidate = normalized(path_value);
+        self.removed_trees.iter().any(|tree| {
+            candidate == *tree
+                || candidate
+                    .strip_prefix(tree)
+                    .is_some_and(|suffix| suffix.starts_with('\\'))
+        })
+    }
+
     fn remove_path(&mut self, path_value: &str) {
         let hash = normalized_path_hash(path_value);
         if let Some(index) = self.find_path(path_value) {
@@ -739,35 +899,19 @@ impl SearchIndex {
 
     fn remove_tree(&mut self, path_value: &str) {
         let key = normalized(path_value);
-        let prefix = format!("{}\\", key);
-        let removed: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(index, _entry)| {
-                self.live.get(*index).copied().unwrap_or(false) && {
-                    let candidate = normalized(self.path(*index).unwrap_or_default());
-                    candidate == key || candidate.starts_with(&prefix)
-                }
-            })
-            .map(|(index, _)| index)
-            .collect();
-        for index in removed {
-            if self
-                .entries
-                .get(index)
-                .is_some_and(|entry| entry.is_delta())
-            {
-                if let Some(path_value) = self.path(index) {
-                    let hash = normalized_path_hash(path_value);
-                    self.delta_positions.remove(&hash);
-                }
-            }
-            if let Some(live) = self.live.get_mut(index) {
-                *live = false;
-            }
-            self.live_count = self.live_count.saturating_sub(1);
+        let covered = self.removed_trees.iter().any(|tree| {
+            key == *tree
+                || key
+                    .strip_prefix(tree)
+                    .is_some_and(|suffix| suffix.starts_with('\\'))
+        });
+        if !covered {
+            let prefix = format!("{key}\\");
+            self.removed_trees
+                .retain(|tree| tree != &key && !tree.starts_with(&prefix));
+            self.removed_trees.push(key);
         }
+        self.remove_path(path_value);
     }
 
     fn len(&self) -> usize {
@@ -775,6 +919,10 @@ impl SearchIndex {
     }
 
     fn upsert(&mut self, entry: Entry) {
+        if entry.is_directory && !self.removed_trees.is_empty() {
+            let key = normalized(&entry.path);
+            self.removed_trees.retain(|tree| tree != &key);
+        }
         self.remove_path(&entry.path);
         let index = self.entries.len() as u32;
         let offset = self.delta_paths.len() as u64;
@@ -787,7 +935,7 @@ impl SearchIndex {
             entry.size,
         ));
         self.name_signatures
-            .push(name_signature(&file_name(&entry.path).to_lowercase()));
+            .push(lowercase_name_signature(file_name(&entry.path)));
         self.live.push(true);
         self.delta_positions
             .insert(normalized_path_hash(&entry.path), index);
@@ -872,6 +1020,9 @@ impl SearchIndex {
                 Some(value) => value,
                 None => continue,
             };
+            if self.path_is_removed(path_value) {
+                continue;
+            }
             let is_directory = entry.is_directory();
             if kind == "folder" && !is_directory {
                 continue;
@@ -977,6 +1128,7 @@ impl SearchIndex {
             if !self.live.get(index).copied().unwrap_or(false)
                 || entry.is_directory()
                 || extension_name(path_value) != "exe"
+                || self.path_is_removed(path_value)
             {
                 continue;
             }
@@ -2200,196 +2352,239 @@ fn collect_subtree(root: &Path, maximum: usize, state: &SharedState) -> Vec<Entr
 }
 
 fn start_watchers(state: Arc<SharedState>, output: Output) {
+    if env::var_os("CDRIVESHIFTAI_DISABLE_WATCHERS").is_some() {
+        return;
+    }
     if state.watching.swap(true, Ordering::SeqCst) {
         return;
     }
-    thread::spawn(move || {
-        let (sender, receiver) = mpsc::channel();
-        let mut watchers = Vec::new();
-        for root in &state.roots {
-            let event_sender = sender.clone();
-            let watcher = RecommendedWatcher::new(
-                move |result| {
-                    let _ = event_sender.send(result);
-                },
-                NotifyConfig::default(),
-            );
-            match watcher {
-                Ok(mut value) => {
-                    if value
-                        .watch(Path::new(root), RecursiveMode::Recursive)
-                        .is_ok()
-                    {
-                        watchers.push(value);
+    let _ = thread::Builder::new()
+        .name("cshift change coalescer".to_string())
+        .spawn(move || {
+            // ReadDirectoryChangesW can emit many repeated attribute/write
+            // notifications for one path. Keep only the final path state and
+            // wake the worker once until the batch is drained.
+            let pending = Arc::new(Mutex::new(HashMap::<PathBuf, PendingWatchChange>::new()));
+            let watcher_error = Arc::new(Mutex::new(None::<String>));
+            let overflowed = Arc::new(AtomicBool::new(false));
+            let (wake_sender, wake_receiver) = mpsc::sync_channel::<()>(1);
+            let mut watchers = Vec::new();
+            let application_data_path = state.cache_path.parent().map(Path::to_path_buf);
+
+            for root in &state.roots {
+                let pending = Arc::clone(&pending);
+                let watcher_error = Arc::clone(&watcher_error);
+                let overflowed = Arc::clone(&overflowed);
+                let wake_sender = wake_sender.clone();
+                let application_data_path = application_data_path.clone();
+                let watcher = RecommendedWatcher::new(
+                    move |result: notify::Result<notify::Event>| {
+                        match result {
+                            Ok(event) => {
+                                let new_tree = matches!(
+                                    event.kind,
+                                    EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))
+                                );
+                                let folder_hint =
+                                    matches!(event.kind, EventKind::Remove(RemoveKind::Folder));
+                                let mut items =
+                                    pending.lock().unwrap_or_else(|error| error.into_inner());
+                                for changed_path in event.paths {
+                                    // The index, state and content databases
+                                    // live below this directory. Never feed
+                                    // our own writes back into the watcher.
+                                    if application_data_path
+                                        .as_ref()
+                                        .is_some_and(|root| changed_path.starts_with(root))
+                                    {
+                                        continue;
+                                    }
+                                    if items.len() >= 250_000 && !items.contains_key(&changed_path)
+                                    {
+                                        overflowed.store(true, Ordering::Relaxed);
+                                        continue;
+                                    }
+                                    let item = items.entry(changed_path).or_default();
+                                    item.new_tree |= new_tree;
+                                    item.folder_hint |= folder_hint;
+                                }
+                            }
+                            Err(error) => {
+                                *watcher_error
+                                    .lock()
+                                    .unwrap_or_else(|item| item.into_inner()) =
+                                    Some(error.to_string());
+                            }
+                        }
+                        let _ = wake_sender.try_send(());
+                    },
+                    NotifyConfig::default(),
+                );
+                match watcher {
+                    Ok(mut value) => {
+                        if value
+                            .watch(Path::new(root), RecursiveMode::Recursive)
+                            .is_ok()
+                        {
+                            watchers.push(value);
+                        }
                     }
+                    Err(_) => continue,
                 }
-                Err(_) => continue,
             }
-        }
-        drop(sender);
-        if watchers.is_empty() {
-            output.status(&Status {
-                mode: state
+            drop(wake_sender);
+
+            if watchers.is_empty() {
+                let mut status = state
                     .status
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .mode
-                    .clone(),
-                state: "ready".to_string(),
-                entries: state
-                    .index
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .entries
-                    .len(),
-                progress: 1.0,
-                root: state.display_root.clone(),
-                updated_at: Some(now_iso_like()),
-                message: Some("实时变更监听不可用，可手动刷新索引".to_string()),
-            });
-            state.watching.store(false, Ordering::SeqCst);
-            return;
-        }
-
-        while !state.stopping.load(Ordering::Relaxed) {
-            if wait_while_backgrounded(&state.backgrounded, &state.stopping) {
-                break;
+                    .clone();
+                status.message = Some("实时变更监听不可用，可手动刷新索引。".to_string());
+                update_status(&state, &output, status);
+                state.watching.store(false, Ordering::SeqCst);
+                return;
             }
-            let event = match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(Ok(value)) => value,
-                Ok(Err(error)) => {
-                    output.status(&Status {
-                        mode: "hybrid".to_string(),
-                        state: "ready".to_string(),
-                        entries: state
+
+            while !state.stopping.load(Ordering::Relaxed) {
+                let backgrounded = state.backgrounded.load(Ordering::Relaxed);
+                let timeout = if backgrounded {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_secs(1)
+                };
+                match wake_receiver.recv_timeout(timeout) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                if state.stopping.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(if backgrounded {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::from_millis(350)
+                });
+
+                if let Some(error) = watcher_error
+                    .lock()
+                    .unwrap_or_else(|item| item.into_inner())
+                    .take()
+                {
+                    let mut status = state
+                        .status
+                        .lock()
+                        .unwrap_or_else(|item| item.into_inner())
+                        .clone();
+                    status.message = Some(format!("实时变更监听提示：{error}"));
+                    update_status(&state, &output, status);
+                }
+                if overflowed.swap(false, Ordering::Relaxed) {
+                    let mut status = state
+                        .status
+                        .lock()
+                        .unwrap_or_else(|item| item.into_inner())
+                        .clone();
+                    status.message = Some("短时间内的文件变更过多，请手动刷新索引。".to_string());
+                    update_status(&state, &output, status);
+                }
+
+                let changes = {
+                    let mut items = pending.lock().unwrap_or_else(|error| error.into_inner());
+                    if items.is_empty() {
+                        continue;
+                    }
+                    std::mem::take(&mut *items)
+                };
+                let mut deltas = Vec::with_capacity(changes.len());
+                for (changed_path, change) in changes {
+                    if !changed_path.exists() {
+                        let path_text = changed_path.to_string_lossy().to_string();
+                        // RemoveKind::Any is also used for ordinary files. A
+                        // blind remove_tree here scans every indexed entry and
+                        // was the source of sustained single-core CPU and an
+                        // 800+ MB working set. Resolve the existing indexed
+                        // type in O(log n) and only scan descendants for a
+                        // directory that really existed.
+                        let tree = state
                             .index
                             .read()
-                            .unwrap_or_else(|item| item.into_inner())
-                            .entries
-                            .len(),
-                        progress: 1.0,
-                        root: state.display_root.clone(),
-                        updated_at: Some(now_iso_like()),
-                        message: Some(format!("变更监听提示：{}", error)),
-                    });
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            };
-            let event_kind = event.kind;
-            let is_new_tree = matches!(
-                &event_kind,
-                EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))
-            );
-            let remove_kind = match &event_kind {
-                EventKind::Remove(kind) => Some(kind.clone()),
-                _ => None,
-            };
-            for changed_path in event.paths {
-                let changed_key = normalized(&changed_path.to_string_lossy());
-                let cache_key = normalized(&state.cache_path.to_string_lossy());
-                let delta_key = normalized(&delta_path(&state.cache_path).to_string_lossy());
-                let content_cache_key = normalized(&state.content_cache_dir.to_string_lossy());
-                if changed_key == cache_key
-                    || changed_key == delta_key
-                    || changed_key == content_cache_key
-                    || changed_key.starts_with(&format!("{}\\", content_cache_key))
-                {
-                    continue;
-                }
-                if remove_kind.is_some() || !changed_path.exists() {
-                    let path_text = changed_path.to_string_lossy().to_string();
-                    let remove_tree = !changed_path.exists()
-                        && matches!(
-                            remove_kind,
-                            Some(RemoveKind::Folder | RemoveKind::Any | RemoveKind::Other) | None
-                        );
-                    let delta_guard = state
-                        .delta_lock
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    let delta_error = append_deltas(
-                        &state.cache_path,
-                        &[IndexDelta::Remove {
-                            path: path_text.clone(),
-                            tree: remove_tree,
-                        }],
-                    )
-                    .err();
-                    if remove_tree {
-                        state
-                            .index
-                            .write()
                             .unwrap_or_else(|error| error.into_inner())
-                            .remove_tree(&path_text);
-                    } else {
-                        state
-                            .index
-                            .write()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .remove_path(&path_text);
+                            .path_is_directory(&path_text)
+                            .unwrap_or(change.folder_hint);
+                        deltas.push(IndexDelta::Remove {
+                            path: path_text,
+                            tree,
+                        });
+                        continue;
                     }
-                    drop(delta_guard);
-                    if let Some(error) = delta_error {
-                        let mut status = state
-                            .status
-                            .lock()
-                            .unwrap_or_else(|item| item.into_inner())
-                            .clone();
-                        status.message = Some(format!("索引增量日志写入失败：{}", error));
-                        update_status(&state, &output, status);
-                    }
-                    continue;
-                }
-                if let Some(entry) = entry_from_path(&changed_path) {
-                    let is_directory = entry.is_directory;
-                    let mut additions = vec![entry];
-                    if is_directory && is_new_tree {
-                        // Walking a newly created tree performs filesystem I/O. Do it without
-                        // holding the index writer lock, then merge in responsive chunks.
-                        additions.extend(collect_subtree(&changed_path, 250_000, &state));
-                    }
-                    let deltas: Vec<IndexDelta> = additions
-                        .iter()
-                        .map(|item| IndexDelta::Upsert {
-                            path: item.path.clone(),
+                    if let Some(entry) = entry_from_path(&changed_path) {
+                        let is_directory = entry.is_directory;
+                        let mut additions = vec![entry];
+                        if is_directory && change.new_tree {
+                            additions.extend(collect_subtree(&changed_path, 250_000, &state));
+                        }
+                        deltas.extend(additions.into_iter().map(|item| IndexDelta::Upsert {
+                            path: item.path,
                             is_directory: item.is_directory,
                             size: item.size,
-                        })
-                        .collect();
-                    let delta_guard = state
-                        .delta_lock
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    let delta_error = append_deltas(&state.cache_path, &deltas).err();
-                    for entries in additions.chunks(2_048) {
-                        let mut index = state
-                            .index
-                            .write()
-                            .unwrap_or_else(|error| error.into_inner());
-                        for entry in entries {
-                            index.upsert(entry.clone());
-                        }
-                        drop(index);
-                        thread::yield_now();
-                    }
-                    drop(delta_guard);
-                    if let Some(error) = delta_error {
-                        let mut status = state
-                            .status
-                            .lock()
-                            .unwrap_or_else(|item| item.into_inner())
-                            .clone();
-                        status.message = Some(format!("索引增量日志写入失败：{}", error));
-                        update_status(&state, &output, status);
+                        }));
                     }
                 }
+                if deltas.is_empty() {
+                    continue;
+                }
+
+                // One durable append and one writer-lock sequence per batch
+                // replaces thousands of tiny opens/locks under write-heavy
+                // workloads.
+                let delta_guard = state
+                    .delta_lock
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let delta_error = append_deltas(&state.cache_path, &deltas).err();
+                for mutations in deltas.chunks(2_048) {
+                    let mut index = state
+                        .index
+                        .write()
+                        .unwrap_or_else(|error| error.into_inner());
+                    for mutation in mutations {
+                        match mutation {
+                            IndexDelta::Remove { path, tree } => {
+                                if *tree {
+                                    index.remove_tree(path);
+                                } else {
+                                    index.remove_path(path);
+                                }
+                            }
+                            IndexDelta::Upsert {
+                                path,
+                                is_directory,
+                                size,
+                            } => index.upsert(Entry {
+                                path: path.clone(),
+                                is_directory: *is_directory,
+                                size: *size,
+                            }),
+                        }
+                    }
+                    drop(index);
+                    thread::yield_now();
+                }
+                drop(delta_guard);
+                if let Some(error) = delta_error {
+                    let mut status = state
+                        .status
+                        .lock()
+                        .unwrap_or_else(|item| item.into_inner())
+                        .clone();
+                    status.message = Some(format!("索引增量日志写入失败：{error}"));
+                    update_status(&state, &output, status);
+                }
             }
-        }
-        drop(watchers);
-        state.watching.store(false, Ordering::SeqCst);
-    });
+            drop(watchers);
+            state.watching.store(false, Ordering::SeqCst);
+        });
 }
 
 fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
@@ -2397,6 +2592,7 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
         return;
     }
     thread::spawn(move || {
+        set_indexing_priority(true);
         let loaded = (|| -> io::Result<(SearchIndex, usize, String)> {
             let (cached_root, mut index) =
                 load_cache_index(&state.cache_path, &state.backgrounded, &state.stopping)?;
@@ -2458,8 +2654,13 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
             Err(error) if state.stopping.load(Ordering::Relaxed) => {
                 let _ = error;
             }
-            Err(_) => start_scan(Arc::clone(&state), output.clone()),
+            Err(_) => {
+                set_indexing_priority(false);
+                start_scan(Arc::clone(&state), output.clone());
+                return;
+            }
         }
+        set_indexing_priority(false);
     });
 }
 
@@ -2468,8 +2669,10 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
         return;
     }
     thread::spawn(move || {
+        set_indexing_priority(true);
         if wait_while_backgrounded(&state.backgrounded, &state.stopping) {
             state.scanning.store(false, Ordering::SeqCst);
+            set_indexing_priority(false);
             return;
         }
         let reset_result = {
@@ -2498,6 +2701,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                 },
             );
             state.scanning.store(false, Ordering::SeqCst);
+            set_indexing_priority(false);
             return;
         }
         update_status(
@@ -2583,6 +2787,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
             Ok(entries) => {
                 if state.stopping.load(Ordering::Relaxed) {
                     state.scanning.store(false, Ordering::SeqCst);
+                    set_indexing_priority(false);
                     return;
                 }
                 let scanned_count = entries.len();
@@ -2615,6 +2820,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                         Ok((_cached_root, index)) => index,
                         Err(_) => {
                             state.scanning.store(false, Ordering::SeqCst);
+                            set_indexing_priority(false);
                             return;
                         }
                     }
@@ -2625,6 +2831,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                         &state.stopping,
                     ) else {
                         state.scanning.store(false, Ordering::SeqCst);
+                        set_indexing_priority(false);
                         return;
                     };
                     index
@@ -2685,6 +2892,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
             }
         }
         state.scanning.store(false, Ordering::SeqCst);
+        set_indexing_priority(false);
     });
 }
 
@@ -2785,6 +2993,7 @@ fn run_server() -> io::Result<()> {
             "setBackground" => {
                 if let Some(shared) = &state {
                     let background = request.background.unwrap_or(false);
+                    let process_id = request.process_id.unwrap_or(0);
                     shared.backgrounded.store(background, Ordering::SeqCst);
                     if background {
                         trim_process_working_set();
@@ -2794,6 +3003,15 @@ fn run_server() -> io::Result<()> {
                         "ok": true,
                         "background": background
                     }));
+                    if background && process_id != 0 {
+                        thread::spawn(move || {
+                            // The renderer is destroyed shortly after the close
+                            // event. Delay the trim so Chromium has first
+                            // released its renderer/GPU resources naturally.
+                            thread::sleep(Duration::from_millis(750));
+                            trim_process_tree_working_sets(process_id);
+                        });
+                    }
                 } else {
                     output.send(
                         &json!({ "id": request.id, "ok": false, "error": "not initialized" }),
@@ -2968,5 +3186,98 @@ fn main() {
     if let Err(error) = run_server() {
         eprintln!("{}", error);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        lowercase_name_signature, name_signature, normalized_path_hash, Entry, SearchIndex,
+    };
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn streaming_name_signature_preserves_case_folded_matches() {
+        assert_eq!(
+            lowercase_name_signature("RedScope-AI"),
+            name_signature("redscope-ai")
+        );
+        assert_ne!(lowercase_name_signature("redscope"), 0);
+        assert_eq!(lowercase_name_signature("ab"), 0);
+    }
+
+    #[test]
+    fn streaming_path_hash_normalizes_case_and_separators() {
+        assert_eq!(
+            normalized_path_hash("C:/Users/Puppet/AppData"),
+            normalized_path_hash("c:\\users\\puppet\\appdata")
+        );
+    }
+
+    #[test]
+    fn directory_tombstone_hides_descendants_without_eager_full_scan() {
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let mut index = SearchIndex::from_entries_controlled(
+            vec![
+                Entry {
+                    path: r"C:\Apps\RedScope".to_string(),
+                    is_directory: true,
+                    size: 0,
+                },
+                Entry {
+                    path: r"C:\Apps\RedScope\redscope.exe".to_string(),
+                    is_directory: false,
+                    size: 42,
+                },
+                Entry {
+                    path: r"C:\Apps\Other\other.exe".to_string(),
+                    is_directory: false,
+                    size: 7,
+                },
+            ],
+            &backgrounded,
+            &stopping,
+        )
+        .expect("test index");
+
+        index.remove_tree(r"C:\Apps\RedScope");
+        assert!(index.path_is_removed(r"C:\Apps\RedScope\redscope.exe"));
+        assert_eq!(
+            index
+                .query(
+                    "redscope",
+                    "all",
+                    &[],
+                    &[],
+                    &[],
+                    false,
+                    false,
+                    false,
+                    false,
+                    20,
+                )
+                .expect("query")
+                .len(),
+            0
+        );
+        assert_eq!(
+            index
+                .query(
+                    "other",
+                    "all",
+                    &[],
+                    &[],
+                    &[],
+                    false,
+                    false,
+                    false,
+                    false,
+                    20,
+                )
+                .expect("query")
+                .len(),
+            1
+        );
     }
 }

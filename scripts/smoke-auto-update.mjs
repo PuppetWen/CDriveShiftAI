@@ -18,6 +18,9 @@ if (process.platform !== "win32") {
 }
 
 const workspace = path.resolve(import.meta.dirname, "..");
+const currentVersion = JSON.parse(
+  await readFile(path.join(workspace, "package.json"), "utf8")
+).version;
 const tamperPackage = process.argv.includes("--tamper");
 const invalidStartupPackage = process.argv.includes("--invalid-start");
 const suppliedOldPortable = process.argv
@@ -27,14 +30,21 @@ const testRoot = path.join(
   workspace,
   ".cdriveshiftai-data",
   "test-temp",
-  "update-smoke-0.0.2"
+  `update-smoke-${currentVersion}`
 );
 const oldPortable =
   suppliedOldPortable ??
-  path.join(testRoot, "download", "CDriveShiftAI-x64-portable.exe");
+  path.join(
+    workspace,
+    ".cdriveshiftai-data",
+    "test-temp",
+    "update-smoke-0.0.2",
+    "download",
+    "CDriveShiftAI-x64-portable.exe"
+  );
 const distribution = path.join(testRoot, "distribution");
 const target = path.join(distribution, "CDriveShiftAI-update-smoke.exe");
-const staging = path.join(distribution, ".cdriveshiftai-update", "0.0.2");
+const staging = path.join(distribution, ".cdriveshiftai-update", currentVersion);
 const packagePath = path.join(staging, "CDriveShiftAI-x64-portable.exe");
 const helperPath = path.join(staging, "cshift-updater.exe");
 const planPath = path.join(staging, "update-plan.json");
@@ -152,7 +162,7 @@ await writeFile(
       stagingDir: staging,
       backupPath,
       successMarker,
-      expectedVersion: "0.0.2",
+      expectedVersion: currentVersion,
       expectedSha512,
       logPath
     },
@@ -244,7 +254,7 @@ try {
     );
   } else {
     const afterVersion = await fileVersion(target);
-    if (afterVersion !== "0.0.2") {
+    if (afterVersion !== currentVersion) {
       throw new Error(`Portable target was not replaced: ${afterVersion}`);
     }
     for (let attempt = 0; attempt < 40; attempt += 1) {

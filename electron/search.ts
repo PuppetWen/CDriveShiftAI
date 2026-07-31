@@ -1,5 +1,6 @@
 import { app } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { once } from "node:events";
 import { createInterface } from "node:readline";
 import { access, lstat, opendir, stat } from "node:fs/promises";
 import { uptime } from "node:os";
@@ -53,6 +54,8 @@ export class SearchService {
   private executableCatalogCache?: { at: number; paths: string[] };
   private cachePath?: string;
   private dailyRefreshTimer?: NodeJS.Timeout;
+  private restartTimer?: NodeJS.Timeout;
+  private stopPromise?: Promise<void>;
   private lastFullRefreshRequestedAt = 0;
   private backgroundMode = false;
   private mouseShortcutStatus: MouseShortcutStatus;
@@ -72,6 +75,7 @@ export class SearchService {
   }
 
   async start(): Promise<void> {
+    if (this.stopping || this.child) return;
     const executable = app.isPackaged
       ? path.join(process.resourcesPath, "bin", "cshift-indexer.exe")
       : path.resolve(__dirname, "..", "native", "indexer", "target", "release", "cshift-indexer.exe");
@@ -87,27 +91,42 @@ export class SearchService {
       return;
     }
 
-    this.child = spawn(executable, ["--serve"], {
+    const child = spawn(executable, ["--serve"], {
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
-    const lines = createInterface({ input: this.child.stdout, crlfDelay: Infinity });
+    this.child = child;
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => this.handleLine(line));
-    this.child.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
       const message = chunk.toString("utf8").trim();
       if (message) this.status.message = message.slice(-300);
-    });
-    this.child.on("exit", (code) => {
-      this.child = undefined;
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error(`索引进程已退出（${code ?? "unknown"}）`));
+      if (message && process.env.CDRIVESHIFTAI_TRIM_DIAGNOSTICS === "1") {
+        process.stderr.write(`${message}\n`);
       }
-      this.pending.clear();
+    });
+    // A pipe can close between the writable-state check and write(). Node emits
+    // an "error" event in addition to invoking the write callback; without a
+    // listener that EPIPE becomes an uncaught main-process exception.
+    child.stdin.on("error", (error) => {
+      if (this.child === child) this.rejectPending(error);
+    });
+    child.on("error", (error) => {
+      if (this.child === child) this.rejectPending(error);
+    });
+    child.on("exit", (code) => {
+      lines.close();
+      if (this.child === child) this.child = undefined;
+      this.rejectPending(new Error(`索引进程已退出（${code ?? "unknown"}）`));
       if (!this.stopping && this.restartCount < 2) {
         this.restartCount += 1;
         this.updateStatus({ ...this.status, state: "error", message: "索引核心意外退出，正在重启" });
-        setTimeout(() => void this.start(), 1_500 * this.restartCount);
+        this.restartTimer = setTimeout(() => {
+          this.restartTimer = undefined;
+          void this.start().catch(() => {
+            // The child lifecycle handlers already publish the degraded state.
+          });
+        }, 1_500 * this.restartCount);
       } else if (!this.stopping) {
         this.updateStatus({
           ...this.status,
@@ -154,17 +173,42 @@ export class SearchService {
   }
 
   async stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
-    if (this.dailyRefreshTimer) {
-      clearTimeout(this.dailyRefreshTimer);
-      this.dailyRefreshTimer = undefined;
-    }
-    if (!this.child) return;
-    try {
-      await this.request({ op: "quit" }, 2_000);
-    } catch {
-      this.child.kill();
-    }
+    this.stopPromise = (async () => {
+      if (this.dailyRefreshTimer) {
+        clearTimeout(this.dailyRefreshTimer);
+        this.dailyRefreshTimer = undefined;
+      }
+      if (this.restartTimer) {
+        clearTimeout(this.restartTimer);
+        this.restartTimer = undefined;
+      }
+      const child = this.child;
+      if (!child || child.exitCode != null) return;
+      const exited = once(child, "exit").then(() => true).catch(() => true);
+      try {
+        await this.requestWithChild(child, { op: "quit" }, 1_500);
+      } catch {
+        // The process may already be closing. The exit wait and bounded kill
+        // below complete shutdown without surfacing a JavaScript error dialog.
+      }
+      if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+      const graceful = await Promise.race([
+        exited,
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 1_500))
+      ]);
+      if (!graceful && child.exitCode == null && !child.killed) {
+        child.kill();
+        await Promise.race([
+          exited,
+          new Promise<void>((resolve) => setTimeout(resolve, 500))
+        ]);
+      }
+      if (this.child === child) this.child = undefined;
+      this.rejectPending(new Error("索引服务已停止"));
+    })();
+    return this.stopPromise;
   }
 
   getStatus(): IndexerStatus {
@@ -206,11 +250,14 @@ export class SearchService {
     return this.getMouseShortcutStatus();
   }
 
-  setBackgroundMode(background: boolean): void {
-    if (this.backgroundMode === background) return;
+  setBackgroundMode(background: boolean, force = false): void {
+    if (!force && this.backgroundMode === background) return;
     this.backgroundMode = background;
     if (!this.child) return;
-    void this.request({ op: "setBackground", background }, 3_000).catch(() => {
+    void this.request(
+      { op: "setBackground", background, processId: process.pid },
+      3_000
+    ).catch(() => {
       // The process may be between a crash and its automatic restart. start()
       // includes the current mode in init, so no retry loop is needed here.
     });
@@ -553,7 +600,25 @@ export class SearchService {
     payload: Record<string, unknown>,
     timeout = 10_000
   ): Promise<NativeResponse> {
-    if (!this.child) return Promise.reject(new Error("索引核心未运行"));
+    const child = this.child;
+    if (!child) return Promise.reject(new Error("索引核心未运行"));
+    return this.requestWithChild(child, payload, timeout);
+  }
+
+  private requestWithChild(
+    child: ChildProcessWithoutNullStreams,
+    payload: Record<string, unknown>,
+    timeout: number
+  ): Promise<NativeResponse> {
+    if (
+      child.exitCode != null ||
+      child.killed ||
+      child.stdin.destroyed ||
+      child.stdin.writableEnded ||
+      !child.stdin.writable
+    ) {
+      return Promise.reject(new Error("索引通信管道已关闭"));
+    }
     const id = ++this.requestId;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -561,14 +626,27 @@ export class SearchService {
         reject(new Error("索引请求超时"));
       }, timeout);
       this.pending.set(id, { resolve, reject, timer });
-      this.child!.stdin.write(`${JSON.stringify({ id, ...payload })}\n`, (error) => {
-        if (error) {
+      try {
+        child.stdin.write(`${JSON.stringify({ id, ...payload })}\n`, (error) => {
+          if (!error) return;
           clearTimeout(timer);
           this.pending.delete(id);
           reject(error);
-        }
-      });
+        });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
+  }
+
+  private rejectPending(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 
   private handleLine(line: string): void {

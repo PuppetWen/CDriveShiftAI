@@ -33,11 +33,22 @@ export function BackgroundFX({ mode }: { mode: EffectMode }) {
     if (!context) return;
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const particles = createParticles(56);
+    const particles = createParticles(48);
     let width = 0;
     let height = 0;
     let animation = 0;
-    let lastDraw = 0;
+    let timer = 0;
+    let activeUntil = performance.now() + 6_000;
+
+    const markInteractive = () => {
+      const wasIdle = performance.now() >= activeUntil;
+      activeUntil = performance.now() + 6_000;
+      if (wasIdle && !document.hidden && !animation) {
+        if (timer) window.clearTimeout(timer);
+        timer = 0;
+        animation = requestAnimationFrame(draw);
+      }
+    };
 
     const resize = () => {
       width = window.innerWidth;
@@ -423,14 +434,16 @@ export function BackgroundFX({ mode }: { mode: EffectMode }) {
     const draw = (time: number) => {
       animation = 0;
       if (document.hidden) return;
-      if (time - lastDraw >= (reducedMotion ? 120 : 32)) {
-        const visualTime = reducedMotion ? 0 : time;
-        if (mode === "aurora") drawBlockWorld(visualTime);
-        else if (mode === "matrix") drawTechnology(visualTime);
-        else drawCrystal(visualTime);
-        lastDraw = time;
-      }
-      animation = requestAnimationFrame(draw);
+      const interactive = document.hasFocus() && time < activeUntil;
+      const frameInterval = reducedMotion ? 2_000 : interactive ? 40 : 2_000;
+      const visualTime = reducedMotion ? 0 : time;
+      if (mode === "aurora") drawBlockWorld(visualTime);
+      else if (mode === "matrix") drawTechnology(visualTime);
+      else drawCrystal(visualTime);
+      timer = window.setTimeout(() => {
+        timer = 0;
+        animation = requestAnimationFrame(draw);
+      }, frameInterval);
     };
 
     const updateVisibility = () => {
@@ -438,22 +451,32 @@ export function BackgroundFX({ mode }: { mode: EffectMode }) {
       document.documentElement.classList.toggle("background-suspended", hidden);
       if (hidden) {
         if (animation) cancelAnimationFrame(animation);
+        if (timer) window.clearTimeout(timer);
         animation = 0;
+        timer = 0;
         return;
       }
-      lastDraw = performance.now();
       if (!animation) animation = requestAnimationFrame(draw);
     };
 
     resize();
     window.addEventListener("resize", resize);
+    window.addEventListener("focus", markInteractive);
+    window.addEventListener("pointermove", markInteractive, { passive: true });
+    window.addEventListener("pointerdown", markInteractive, { passive: true });
+    window.addEventListener("keydown", markInteractive);
     document.addEventListener("visibilitychange", updateVisibility);
     updateVisibility();
     return () => {
       window.removeEventListener("resize", resize);
+      window.removeEventListener("focus", markInteractive);
+      window.removeEventListener("pointermove", markInteractive);
+      window.removeEventListener("pointerdown", markInteractive);
+      window.removeEventListener("keydown", markInteractive);
       document.removeEventListener("visibilitychange", updateVisibility);
       document.documentElement.classList.remove("background-suspended");
       if (animation) cancelAnimationFrame(animation);
+      if (timer) window.clearTimeout(timer);
     };
   }, [mode]);
 

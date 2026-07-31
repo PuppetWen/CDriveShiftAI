@@ -740,7 +740,7 @@ export function SettingsView({
         <div className="update-status-panel">
           <div>
             <small>当前版本</small>
-            <strong>v{updateInfo?.currentVersion ?? "0.0.2"}</strong>
+            <strong>v{updateInfo?.currentVersion ?? "0.0.3"}</strong>
           </div>
           <div>
             <small>最新版本</small>
