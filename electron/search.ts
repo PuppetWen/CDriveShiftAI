@@ -9,6 +9,8 @@ import type {
   ContentSearchResult,
   DirectorySizeResult,
   IndexerStatus,
+  MouseShortcutButton,
+  MouseShortcutStatus,
   NativeResponse,
   SearchFilters,
   SearchResult
@@ -53,11 +55,21 @@ export class SearchService {
   private dailyRefreshTimer?: NodeJS.Timeout;
   private lastFullRefreshRequestedAt = 0;
   private backgroundMode = false;
+  private mouseShortcutStatus: MouseShortcutStatus;
 
   constructor(
     private readonly onStatus: (status: IndexerStatus) => void,
-    private readonly onContentStatus: (status: ContentIndexerStatus) => void
-  ) {}
+    private readonly onContentStatus: (status: ContentIndexerStatus) => void,
+    private readonly onMouseShortcutHold: () => void,
+    initialMouseShortcut: { button: MouseShortcutButton; holdMs: number }
+  ) {
+    this.mouseShortcutStatus = {
+      available: false,
+      button: initialMouseShortcut.button,
+      holdMs: initialMouseShortcut.holdMs,
+      message: "鼠标全局监听正在启动"
+    };
+  }
 
   async start(): Promise<void> {
     const executable = app.isPackaged
@@ -133,7 +145,9 @@ export class SearchService {
         contentCacheDir,
         background: this.backgroundMode,
         forceRebuild,
-        rebuildReason
+        rebuildReason,
+        mouseButton: this.mouseShortcutStatus.button,
+        mouseHoldMs: this.mouseShortcutStatus.holdMs
       },
       90_000
     );
@@ -155,6 +169,41 @@ export class SearchService {
 
   getStatus(): IndexerStatus {
     return structuredClone(this.status);
+  }
+
+  getMouseShortcutStatus(): MouseShortcutStatus {
+    return structuredClone(this.mouseShortcutStatus);
+  }
+
+  async configureMouseShortcut(
+    button: MouseShortcutButton,
+    holdMs: number
+  ): Promise<MouseShortcutStatus> {
+    this.mouseShortcutStatus = {
+      ...this.mouseShortcutStatus,
+      button,
+      holdMs,
+      message:
+        button === "disabled"
+          ? "鼠标快捷操作已关闭"
+          : this.mouseShortcutStatus.available
+            ? "全局鼠标监听可用；短按不会被拦截"
+            : "鼠标监听暂不可用"
+    };
+    if (this.child) {
+      const response = (await this.request(
+        { op: "setMouseShortcut", mouseButton: button, mouseHoldMs: holdMs },
+        3_000
+      )) as NativeResponse & { available?: boolean };
+      this.mouseShortcutStatus.available = response.available === true;
+      this.mouseShortcutStatus.message =
+        button === "disabled"
+          ? "鼠标快捷操作已关闭"
+          : response.available
+            ? "全局鼠标监听可用；短按不会被拦截"
+            : "Windows Raw Input 监听不可用";
+    }
+    return this.getMouseShortcutStatus();
   }
 
   setBackgroundMode(background: boolean): void {
@@ -541,6 +590,25 @@ export class SearchService {
       this.onContentStatus(
         (response as NativeResponse & { status: ContentIndexerStatus }).status
       );
+      return;
+    }
+    if (response.event === "mouseShortcutHold") {
+      this.onMouseShortcutHold();
+      return;
+    }
+    if (response.event === "mouseShortcutStatus") {
+      const event = response as NativeResponse & {
+        available?: boolean;
+        errorCode?: number;
+      };
+      this.mouseShortcutStatus.available = event.available === true;
+      this.mouseShortcutStatus.message = event.available
+        ? this.mouseShortcutStatus.button === "disabled"
+          ? "鼠标快捷操作已关闭"
+          : "全局鼠标监听可用；短按不会被拦截"
+        : `Windows Raw Input 监听不可用${
+            event.errorCode ? `（错误 ${event.errorCode}）` : ""
+          }`;
       return;
     }
     if (response.id == null) return;

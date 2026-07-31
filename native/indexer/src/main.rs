@@ -1,8 +1,8 @@
+use memmap2::{Mmap, MmapOptions};
 use notify::{
     event::{ModifyKind, RemoveKind},
     Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use memmap2::{Mmap, MmapOptions};
 use regex::RegexBuilder;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,8 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -157,6 +157,8 @@ struct Request {
     background: Option<bool>,
     force_rebuild: Option<bool>,
     rebuild_reason: Option<String>,
+    mouse_button: Option<String>,
+    mouse_hold_ms: Option<u64>,
     limit: Option<usize>,
 }
 
@@ -211,6 +213,270 @@ impl Output {
     }
 }
 
+#[cfg(windows)]
+struct MouseShortcutState {
+    output: Output,
+    pressed: AtomicBool,
+    sequence: AtomicU64,
+    button: AtomicU64,
+    hold_ms: AtomicU64,
+}
+
+#[cfg(windows)]
+static MOUSE_SHORTCUT_STATE: OnceLock<MouseShortcutState> = OnceLock::new();
+
+#[cfg(windows)]
+fn mouse_button_code(button: &str) -> u64 {
+    match button {
+        "back" => 1,
+        "forward" => 2,
+        "middle" => 3,
+        _ => 0,
+    }
+}
+
+#[cfg(windows)]
+fn mouse_button_name(button: u64) -> &'static str {
+    match button {
+        1 => "back",
+        2 => "forward",
+        3 => "middle",
+        _ => "disabled",
+    }
+}
+
+#[cfg(windows)]
+fn configure_mouse_shortcut(button: &str, hold_ms: u64) {
+    let Some(state) = MOUSE_SHORTCUT_STATE.get() else {
+        return;
+    };
+    state.pressed.store(false, Ordering::SeqCst);
+    state.sequence.fetch_add(1, Ordering::SeqCst);
+    state
+        .button
+        .store(mouse_button_code(button), Ordering::SeqCst);
+    state
+        .hold_ms
+        .store(hold_ms.clamp(500, 10_000), Ordering::SeqCst);
+}
+
+#[cfg(not(windows))]
+fn configure_mouse_shortcut(_button: &str, _hold_ms: u64) {}
+
+#[cfg(windows)]
+fn begin_mouse_shortcut_hold(button: u64) {
+    let Some(state) = MOUSE_SHORTCUT_STATE.get() else {
+        return;
+    };
+    if button == 0 || state.button.load(Ordering::SeqCst) != button {
+        return;
+    }
+    if state.pressed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let sequence = state.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+    let hold_ms = state.hold_ms.load(Ordering::SeqCst);
+    let output = state.output.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(hold_ms));
+        let Some(current) = MOUSE_SHORTCUT_STATE.get() else {
+            return;
+        };
+        if current.pressed.load(Ordering::SeqCst)
+            && current.sequence.load(Ordering::SeqCst) == sequence
+            && current.button.load(Ordering::SeqCst) == button
+        {
+            output.send(&json!({
+                "event": "mouseShortcutHold",
+                "button": mouse_button_name(button),
+                "holdMs": hold_ms
+            }));
+            current.pressed.store(false, Ordering::SeqCst);
+        }
+    });
+}
+
+#[cfg(windows)]
+fn end_mouse_shortcut_hold(button: u64) {
+    let Some(state) = MOUSE_SHORTCUT_STATE.get() else {
+        return;
+    };
+    if state.button.load(Ordering::SeqCst) != button {
+        return;
+    }
+    state.pressed.store(false, Ordering::SeqCst);
+    state.sequence.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn mouse_shortcut_window_proc(
+    window: windows_sys::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::Input::{
+        GetRawInputData, RAWINPUT, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DefWindowProcW, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
+        RI_MOUSE_BUTTON_5_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, WM_INPUT,
+    };
+
+    if message == WM_INPUT {
+        let mut raw = std::mem::MaybeUninit::<RAWINPUT>::zeroed();
+        let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+        let copied = GetRawInputData(
+            lparam,
+            RID_INPUT,
+            raw.as_mut_ptr().cast(),
+            &mut size,
+            std::mem::size_of::<RAWINPUTHEADER>() as u32,
+        );
+        if copied != u32::MAX {
+            let raw = raw.assume_init();
+            if raw.header.dwType == RIM_TYPEMOUSE {
+                let flags = raw.data.mouse.Anonymous.Anonymous.usButtonFlags;
+                if flags & RI_MOUSE_BUTTON_4_DOWN as u16 != 0 {
+                    begin_mouse_shortcut_hold(1);
+                }
+                if flags & RI_MOUSE_BUTTON_4_UP as u16 != 0 {
+                    end_mouse_shortcut_hold(1);
+                }
+                if flags & RI_MOUSE_BUTTON_5_DOWN as u16 != 0 {
+                    begin_mouse_shortcut_hold(2);
+                }
+                if flags & RI_MOUSE_BUTTON_5_UP as u16 != 0 {
+                    end_mouse_shortcut_hold(2);
+                }
+                if flags & RI_MOUSE_MIDDLE_BUTTON_DOWN as u16 != 0 {
+                    begin_mouse_shortcut_hold(3);
+                }
+                if flags & RI_MOUSE_MIDDLE_BUTTON_UP as u16 != 0 {
+                    end_mouse_shortcut_hold(3);
+                }
+            }
+        }
+    }
+    DefWindowProcW(window, message, wparam, lparam)
+}
+
+#[cfg(windows)]
+fn start_mouse_shortcut_listener(output: Output) {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
+        HWND_MESSAGE, MSG, WNDCLASSW,
+    };
+
+    let listener_output = output.clone();
+    if MOUSE_SHORTCUT_STATE
+        .set(MouseShortcutState {
+            output,
+            pressed: AtomicBool::new(false),
+            sequence: AtomicU64::new(0),
+            button: AtomicU64::new(1),
+            hold_ms: AtomicU64::new(3_000),
+        })
+        .is_err()
+    {
+        return;
+    }
+
+    thread::spawn(move || unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        let class_name: Vec<u16> = "CDriveShiftAI.MouseBackListener\0".encode_utf16().collect();
+        let window_class = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(mouse_shortcut_window_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: module,
+            hIcon: 0,
+            hCursor: 0,
+            hbrBackground: 0,
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+        };
+        if RegisterClassW(&window_class) == 0 {
+            listener_output.send(&json!({
+                "event": "mouseShortcutStatus",
+                "available": false,
+                "errorCode": GetLastError()
+            }));
+            return;
+        }
+
+        let window = CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            class_name.as_ptr(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            0,
+            module,
+            std::ptr::null(),
+        );
+        if window == 0 {
+            listener_output.send(&json!({
+                "event": "mouseShortcutStatus",
+                "available": false,
+                "errorCode": GetLastError()
+            }));
+            return;
+        }
+
+        let mouse = RAWINPUTDEVICE {
+            usUsagePage: 0x01,
+            usUsage: 0x02,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: window,
+        };
+        if RegisterRawInputDevices(&mouse, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32) == 0 {
+            listener_output.send(&json!({
+                "event": "mouseShortcutStatus",
+                "available": false,
+                "errorCode": GetLastError()
+            }));
+            return;
+        }
+
+        listener_output.send(&json!({
+            "event": "mouseShortcutStatus",
+            "available": true,
+            "button": "back",
+            "holdMs": 3000
+        }));
+        let mut message: MSG = std::mem::zeroed();
+        loop {
+            let result = GetMessageW(&mut message, 0, 0, 0);
+            if result > 0 {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+                continue;
+            }
+            if result <= 0 {
+                listener_output.send(&json!({
+                    "event": "mouseShortcutStatus",
+                    "available": false,
+                    "errorCode": if result < 0 { GetLastError() } else { 0 },
+                    "messageLoopResult": result
+                }));
+                break;
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn start_mouse_shortcut_listener(_output: Output) {}
+
 fn now_iso_like() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -244,9 +510,7 @@ fn wait_while_backgrounded(backgrounded: &AtomicBool, stopping: &AtomicBool) -> 
 
 #[cfg(windows)]
 fn trim_process_working_set() {
-    use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, SetProcessWorkingSetSize,
-    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
     unsafe {
         // usize::MAX asks Windows to discard reclaimable working-set pages.
         // The mapped cache stays valid and pages back on demand.
@@ -372,9 +636,7 @@ impl SearchIndex {
             entries,
         };
         for entry_index in 0..index.entries.len() {
-            if entry_index % 4_096 == 0
-                && wait_while_backgrounded(backgrounded, stopping)
-            {
+            if entry_index % 4_096 == 0 && wait_while_backgrounded(backgrounded, stopping) {
                 return None;
             }
             let (signature, path_hash) = {
@@ -385,9 +647,7 @@ impl SearchIndex {
                 )
             };
             index.name_signatures.push(signature);
-            index
-                .path_positions
-                .push((path_hash, entry_index as u32));
+            index.path_positions.push((path_hash, entry_index as u32));
         }
         index
             .path_positions
@@ -407,9 +667,7 @@ impl SearchIndex {
         let mut paths = Vec::with_capacity(capacity);
         let mut indexed_entries = Vec::with_capacity(entries.len());
         for (entry_index, entry) in entries.into_iter().enumerate() {
-            if entry_index % 4_096 == 0
-                && wait_while_backgrounded(backgrounded, stopping)
-            {
+            if entry_index % 4_096 == 0 && wait_while_backgrounded(backgrounded, stopping) {
                 return None;
             }
             let offset = paths.len() as u64;
@@ -468,7 +726,11 @@ impl SearchIndex {
                     *live = false;
                 }
                 self.live_count = self.live_count.saturating_sub(1);
-                if self.entries.get(index).is_some_and(|entry| entry.is_delta()) {
+                if self
+                    .entries
+                    .get(index)
+                    .is_some_and(|entry| entry.is_delta())
+                {
                     self.delta_positions.remove(&hash);
                 }
             }
@@ -491,7 +753,11 @@ impl SearchIndex {
             .map(|(index, _)| index)
             .collect();
         for index in removed {
-            if self.entries.get(index).is_some_and(|entry| entry.is_delta()) {
+            if self
+                .entries
+                .get(index)
+                .is_some_and(|entry| entry.is_delta())
+            {
                 if let Some(path_value) = self.path(index) {
                     let hash = normalized_path_hash(path_value);
                     self.delta_positions.remove(&hash);
@@ -579,14 +845,12 @@ impl SearchIndex {
         };
 
         let first_token_lower = tokens[0].to_lowercase();
-        let query_signature = if !regex_mode
-            && !match_path
-            && first_token_lower.chars().count() >= 3
-        {
-            name_signature(&first_token_lower)
-        } else {
-            0
-        };
+        let query_signature =
+            if !regex_mode && !match_path && first_token_lower.chars().count() >= 3 {
+                name_signature(&first_token_lower)
+            } else {
+                0
+            };
 
         let mut matches = Vec::with_capacity(limit.saturating_mul(2));
         for index in 0..self.entries.len() {
@@ -594,10 +858,9 @@ impl SearchIndex {
                 continue;
             }
             if query_signature != 0
-                && self
-                    .name_signatures
-                    .get(index)
-                    .map_or(true, |candidate| candidate & query_signature != query_signature)
+                && self.name_signatures.get(index).map_or(true, |candidate| {
+                    candidate & query_signature != query_signature
+                })
             {
                 continue;
             }
@@ -2135,11 +2398,8 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
     }
     thread::spawn(move || {
         let loaded = (|| -> io::Result<(SearchIndex, usize, String)> {
-            let (cached_root, mut index) = load_cache_index(
-                &state.cache_path,
-                &state.backgrounded,
-                &state.stopping,
-            )?;
+            let (cached_root, mut index) =
+                load_cache_index(&state.cache_path, &state.backgrounded, &state.stopping)?;
             if normalized(&cached_root) != normalized(&state.roots.join("|")) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -2350,11 +2610,8 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                 let cache_error = save_result.err();
                 let mut index = if cache_error.is_none() {
                     drop(entries);
-                    match load_cache_index(
-                        &state.cache_path,
-                        &state.backgrounded,
-                        &state.stopping,
-                    ) {
+                    match load_cache_index(&state.cache_path, &state.backgrounded, &state.stopping)
+                    {
                         Ok((_cached_root, index)) => index,
                         Err(_) => {
                             state.scanning.store(false, Ordering::SeqCst);
@@ -2435,6 +2692,7 @@ fn run_server() -> io::Result<()> {
     let output = Output {
         lock: Arc::new(Mutex::new(())),
     };
+    start_mouse_shortcut_listener(output.clone());
     let stdin = io::stdin();
     let mut state: Option<Arc<SharedState>> = None;
 
@@ -2452,6 +2710,10 @@ fn run_server() -> io::Result<()> {
         };
         match request.op.as_str() {
             "init" => {
+                configure_mouse_shortcut(
+                    request.mouse_button.as_deref().unwrap_or("back"),
+                    request.mouse_hold_ms.unwrap_or(3_000),
+                );
                 let requested_root = request.root.unwrap_or_else(|| "*".to_string());
                 #[cfg(windows)]
                 let roots = if requested_root == "*" {
@@ -2501,9 +2763,7 @@ fn run_server() -> io::Result<()> {
                     content_scanning: AtomicBool::new(false),
                     watching: AtomicBool::new(false),
                     loading: AtomicBool::new(false),
-                    backgrounded: Arc::new(AtomicBool::new(
-                        request.background.unwrap_or(false),
-                    )),
+                    backgrounded: Arc::new(AtomicBool::new(request.background.unwrap_or(false))),
                     stopping: Arc::new(AtomicBool::new(false)),
                     delta_lock: Mutex::new(()),
                 });
@@ -2539,6 +2799,18 @@ fn run_server() -> io::Result<()> {
                         &json!({ "id": request.id, "ok": false, "error": "not initialized" }),
                     );
                 }
+            }
+            "setMouseShortcut" => {
+                let button = request.mouse_button.as_deref().unwrap_or("disabled");
+                let hold_ms = request.mouse_hold_ms.unwrap_or(3_000).clamp(500, 10_000);
+                configure_mouse_shortcut(button, hold_ms);
+                output.send(&json!({
+                    "id": request.id,
+                    "ok": true,
+                    "available": cfg!(windows),
+                    "button": button,
+                    "holdMs": hold_ms
+                }));
             }
             "query" => {
                 let Some(shared) = &state else {

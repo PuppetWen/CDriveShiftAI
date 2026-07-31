@@ -14,6 +14,7 @@ import {
   Laptop,
   LockKeyhole,
   MessageSquareText,
+  MousePointer2,
   Palette,
   PlugZap,
   RefreshCw,
@@ -34,6 +35,8 @@ import type {
   AppUpdateInfo,
   EffectMode,
   IndexerStatus,
+  MouseShortcutButton,
+  MouseShortcutStatus,
   ShortcutCheckResult,
   ShortcutTarget
 } from "../types";
@@ -65,6 +68,33 @@ function captureShortcut(event: React.KeyboardEvent<HTMLInputElement>): string |
         : event.key;
   if (!parts.length || !key) return undefined;
   return [...parts, key].join("+");
+}
+
+function formatUpdateBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const exponent = Math.min(
+    units.length - 1,
+    Math.floor(Math.log(value) / Math.log(1024))
+  );
+  return `${(value / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${
+    units[exponent]
+  }`;
+}
+
+function updateStageIndex(phase: AppUpdateInfo["phase"]): number {
+  switch (phase) {
+    case "downloading":
+      return 0;
+    case "verifying":
+      return 1;
+    case "ready":
+      return 2;
+    case "installing":
+      return 3;
+    default:
+      return -1;
+  }
 }
 
 const shortcutKeyLabels: Record<string, string> = {
@@ -265,6 +295,9 @@ export function SettingsView({
     "idle" | "saving" | "saved" | "error"
   >("idle");
   const [testingShortcut, setTestingShortcut] = useState<ShortcutTarget>();
+  const [testingMouseShortcut, setTestingMouseShortcut] = useState(false);
+  const [mouseShortcutStatus, setMouseShortcutStatus] =
+    useState<MouseShortcutStatus>();
   const [showApiKey, setShowApiKey] = useState(false);
   const [aiTest, setAiTest] = useState<AiTestResult>();
   const effectRequest = useRef(0);
@@ -276,9 +309,13 @@ export function SettingsView({
     main: 0,
     "quick-search": 0
   });
+  const mouseShortcutRequest = useRef(0);
   const aiDraftRequest = useRef(0);
   const apiKeyDirty = useRef(false);
   const persistedSettingsRef = useRef(settings);
+  const updateBusy = ["downloading", "verifying", "ready", "installing"].includes(
+    updateInfo?.phase ?? ""
+  );
 
   useEffect(() => {
     const previous = persistedSettingsRef.current;
@@ -296,6 +333,14 @@ export function SettingsView({
       if (previous.quickSearchShortcut !== settings.quickSearchShortcut) {
         next.quickSearchShortcut = settings.quickSearchShortcut;
       }
+      if (
+        previous.mouseQuickSearchButton !== settings.mouseQuickSearchButton
+      ) {
+        next.mouseQuickSearchButton = settings.mouseQuickSearchButton;
+      }
+      if (previous.mouseQuickSearchHoldMs !== settings.mouseQuickSearchHoldMs) {
+        next.mouseQuickSearchHoldMs = settings.mouseQuickSearchHoldMs;
+      }
       if (JSON.stringify(previous.indexRoots) !== JSON.stringify(settings.indexRoots)) {
         next.indexRoots = settings.indexRoots;
       }
@@ -312,6 +357,19 @@ export function SettingsView({
     });
     persistedSettingsRef.current = settings;
   }, [settings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getMouseShortcutStatus()
+      .then((status) => {
+        if (!cancelled) setMouseShortcutStatus(status);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.mouseQuickSearchButton, settings.mouseQuickSearchHoldMs]);
 
   const chooseEffect = async (effectMode: EffectMode) => {
     const request = ++effectRequest.current;
@@ -394,6 +452,48 @@ export function SettingsView({
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
       setTestingShortcut(undefined);
+    }
+  };
+
+  const commitMouseShortcut = async (
+    patch: Partial<
+      Pick<AppSettings, "mouseQuickSearchButton" | "mouseQuickSearchHoldMs">
+    >
+  ) => {
+    const request = ++mouseShortcutRequest.current;
+    const previous = persistedSettingsRef.current;
+    setDraft((current) => ({ ...current, ...patch }));
+    try {
+      const updated = await api.updateSettings(patch);
+      if (request !== mouseShortcutRequest.current) return;
+      onSettings(updated);
+      setDraft((current) => ({
+        ...current,
+        mouseQuickSearchButton: updated.mouseQuickSearchButton,
+        mouseQuickSearchHoldMs: updated.mouseQuickSearchHoldMs
+      }));
+      setMouseShortcutStatus(await api.getMouseShortcutStatus());
+      notify("success", "鼠标快捷操作已自动保存并立即生效");
+    } catch (error) {
+      if (request !== mouseShortcutRequest.current) return;
+      setDraft((current) => ({
+        ...current,
+        mouseQuickSearchButton: previous.mouseQuickSearchButton,
+        mouseQuickSearchHoldMs: previous.mouseQuickSearchHoldMs
+      }));
+      notify("error", error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const testMouseShortcut = async () => {
+    setTestingMouseShortcut(true);
+    try {
+      await api.testMouseShortcut();
+      notify("success", "鼠标快捷操作测试成功，独立极速搜索已打开");
+    } catch (error) {
+      notify("error", error instanceof Error ? error.message : String(error));
+    } finally {
+      setTestingMouseShortcut(false);
     }
   };
 
@@ -627,7 +727,7 @@ export function SettingsView({
           </div>
           <div>
             <h2>应用更新</h2>
-            <p>通过 CDriveShiftAI 官方 GitHub Release 检查正式版本。</p>
+            <p>自动续传、SHA-512 双重校验；失败时保留并恢复旧版本。</p>
           </div>
           <span
             className={
@@ -640,7 +740,7 @@ export function SettingsView({
         <div className="update-status-panel">
           <div>
             <small>当前版本</small>
-            <strong>v{updateInfo?.currentVersion ?? "0.0.1"}</strong>
+            <strong>v{updateInfo?.currentVersion ?? "0.0.2"}</strong>
           </div>
           <div>
             <small>最新版本</small>
@@ -655,7 +755,12 @@ export function SettingsView({
             </strong>
             {updateInfo?.publishedAt && (
               <span>
-                发布于 {new Date(updateInfo.publishedAt).toLocaleString()}
+                {updateInfo.distribution === "portable"
+                  ? "便携版原路径替换"
+                  : updateInfo.distribution === "installed"
+                    ? "安装版静默更新"
+                    : "开发模式"}{" "}
+                · 发布于 {new Date(updateInfo.publishedAt).toLocaleString()}
               </span>
             )}
           </div>
@@ -663,7 +768,7 @@ export function SettingsView({
             <button
               type="button"
               className="secondary-button"
-              disabled={checkingUpdate}
+              disabled={checkingUpdate || updateBusy}
               onClick={() => {
                 setCheckingUpdate(true);
                 void onCheckForUpdates()
@@ -679,33 +784,136 @@ export function SettingsView({
               <RefreshCw size={15} className={checkingUpdate ? "spin" : ""} />
               {checkingUpdate ? "检查中…" : "重新检查"}
             </button>
-            {updateInfo?.releaseUrl && (
+            {updateInfo?.canAutoUpdate &&
+              updateInfo.updateAvailable &&
+              !["downloading", "verifying", "ready", "installing"].includes(
+                updateInfo.phase
+              ) && (
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => {
+                    void api.startUpdate().catch((error) =>
+                      notify(
+                        "error",
+                        error instanceof Error ? error.message : String(error)
+                      )
+                    );
+                  }}
+                >
+                  <Download size={15} />
+                  {updateInfo.phase === "error" ||
+                  updateInfo.phase === "cancelled"
+                    ? "续传并重试"
+                    : "下载并自动更新"}
+                </button>
+              )}
+            {updateInfo?.phase === "downloading" && (
               <button
                 type="button"
-                className={updateInfo.updateAvailable ? "primary-button" : "secondary-button"}
+                className="secondary-button"
+                onClick={() => void api.cancelUpdate()}
+              >
+                <X size={15} />
+                暂停下载
+              </button>
+            )}
+            {updateInfo?.releaseUrl && !updateInfo.canAutoUpdate && (
+              <button
+                type="button"
+                className="secondary-button"
                 onClick={() => void api.openExternal(updateInfo.releaseUrl!)}
               >
                 <ExternalLink size={15} />
-                {updateInfo.updateAvailable ? "前往下载更新" : "查看 Release"}
+                {updateInfo.updateAvailable ? "手动下载" : "查看 Release"}
               </button>
             )}
           </div>
         </div>
-        {updateInfo?.updateAvailable && updateInfo.assets.length > 0 && (
-          <div className="update-assets">
-            {updateInfo.assets
-              .filter((asset) => asset.name.toLocaleLowerCase().endsWith(".exe"))
-              .map((asset) => (
-                <button
-                  type="button"
-                  onClick={() => void api.openExternal(asset.downloadUrl)}
-                  key={asset.downloadUrl}
-                >
-                  <Download size={14} />
-                  <span>{asset.name}</span>
-                  <small>{(asset.size / 1024 ** 2).toFixed(1)} MB</small>
-                </button>
-              ))}
+        {updateInfo &&
+          ["downloading", "verifying", "ready", "installing", "error", "cancelled"].includes(
+            updateInfo.phase
+          ) && (
+          <div
+            className={`update-progress-card phase-${updateInfo.phase}`}
+            aria-live="polite"
+          >
+            <div className="update-progress-head">
+              <span>
+                <strong>
+                  {updateInfo.phase === "downloading"
+                    ? "下载更新包"
+                    : updateInfo.phase === "verifying"
+                      ? "验证更新包"
+                      : updateInfo.phase === "ready"
+                        ? "准备替换"
+                        : updateInfo.phase === "installing"
+                          ? "安全更新"
+                          : updateInfo.phase === "cancelled"
+                            ? "下载已暂停"
+                            : "更新未完成"}
+                </strong>
+                <small>{updateInfo.selectedAsset?.name ?? "CDriveShiftAI 更新包"}</small>
+              </span>
+              <strong>
+                {updateInfo.progress
+                  ? `${updateInfo.progress.percent.toFixed(1)}%`
+                  : updateInfo.phase === "installing"
+                    ? "即将重启"
+                    : "—"}
+              </strong>
+            </div>
+            <div className="update-progress-track">
+              <i
+                style={{
+                  width: `${
+                    updateInfo.phase === "verifying"
+                      ? 100
+                      : updateInfo.phase === "ready" ||
+                          updateInfo.phase === "installing"
+                        ? 100
+                        : updateInfo.progress?.percent ?? 0
+                  }%`
+                }}
+              />
+            </div>
+            <div className="update-progress-stages">
+              {["下载", "校验", "备份", "替换", "清理"].map((stage, index) => {
+                const phaseIndex = updateStageIndex(updateInfo.phase);
+                return (
+                  <span className={index <= phaseIndex ? "active" : ""} key={stage}>
+                    <i />
+                    {stage}
+                  </span>
+                );
+              })}
+            </div>
+            <div className="update-progress-meta">
+              <span>
+                {updateInfo.progress
+                  ? `${formatUpdateBytes(
+                      updateInfo.progress.transferred
+                    )} / ${formatUpdateBytes(updateInfo.progress.total)}`
+                  : updateInfo.message}
+              </span>
+              {updateInfo.progress && updateInfo.phase === "downloading" && (
+                <>
+                  <span>
+                    {formatUpdateBytes(updateInfo.progress.bytesPerSecond)}/s
+                  </span>
+                  <span>
+                    尝试 {updateInfo.progress.retryAttempt}/
+                    {updateInfo.progress.maxRetries}
+                  </span>
+                </>
+              )}
+              {updateInfo.phase === "verifying" && (
+                <span className="update-verifying">
+                  <ShieldCheck size={13} />
+                  正在执行 SHA-512 校验
+                </span>
+              )}
+            </div>
           </div>
         )}
       </section>
@@ -844,7 +1052,7 @@ export function SettingsView({
             />
             <ShortcutRecorder
               label="独立极速搜索"
-              description="直接打开完整搜索工作区"
+              description="全局组合键唤起完整功能的独立搜索窗口"
               target="quick-search"
               value={draft.quickSearchShortcut}
               otherValue={draft.globalShortcut}
@@ -855,6 +1063,109 @@ export function SettingsView({
               onCommit={(value) => void commitShortcut("quick-search", value)}
               onTest={() => void testShortcut("quick-search")}
             />
+            <article className="mouse-shortcut-card">
+              <header>
+                <span>
+                  <MousePointer2 size={15} />
+                  <span>
+                    <strong>鼠标快捷操作</strong>
+                    <small>选择鼠标按键和长按时长，达到阈值后唤起极速搜索</small>
+                  </span>
+                </span>
+                <em
+                  className={
+                    draft.mouseQuickSearchButton === "disabled"
+                      ? "disabled"
+                      : mouseShortcutStatus?.available
+                        ? "active"
+                        : "conflict"
+                  }
+                >
+                  {draft.mouseQuickSearchButton === "disabled"
+                    ? "已关闭"
+                    : mouseShortcutStatus?.available
+                      ? "监听可用"
+                      : "监听不可用"}
+                </em>
+              </header>
+              <div className="mouse-shortcut-controls">
+                <label>
+                  <span>触发按键</span>
+                  <select
+                    value={draft.mouseQuickSearchButton}
+                    onChange={(event) =>
+                      void commitMouseShortcut({
+                        mouseQuickSearchButton: event.target
+                          .value as MouseShortcutButton
+                      })
+                    }
+                  >
+                    <option value="disabled">关闭鼠标触发</option>
+                    <option value="back">后退侧键</option>
+                    <option value="forward">前进侧键</option>
+                    <option value="middle">中键</option>
+                  </select>
+                </label>
+                <label>
+                  <span>长按时长</span>
+                  <div className="mouse-hold-input">
+                    <input
+                      type="number"
+                      min="0.5"
+                      max="10"
+                      step="0.5"
+                      value={(draft.mouseQuickSearchHoldMs / 1_000).toFixed(1)}
+                      disabled={draft.mouseQuickSearchButton === "disabled"}
+                      onChange={(event) => {
+                        const seconds = event.target.valueAsNumber;
+                        if (!Number.isFinite(seconds)) return;
+                        setDraft((current) => ({
+                          ...current,
+                          mouseQuickSearchHoldMs: Math.round(
+                            Math.min(10, Math.max(0.5, seconds)) * 1_000
+                          )
+                        }));
+                      }}
+                      onBlur={() =>
+                        void commitMouseShortcut({
+                          mouseQuickSearchHoldMs: draft.mouseQuickSearchHoldMs
+                        })
+                      }
+                    />
+                    <span>秒</span>
+                  </div>
+                </label>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={
+                    testingMouseShortcut ||
+                    draft.mouseQuickSearchButton === "disabled" ||
+                    !mouseShortcutStatus?.available
+                  }
+                  onClick={() => void testMouseShortcut()}
+                >
+                  {testingMouseShortcut ? (
+                    <span className="spinner" />
+                  ) : (
+                    <PlugZap size={13} />
+                  )}
+                  测试唤起
+                </button>
+              </div>
+              <footer>
+                <span>
+                  {mouseShortcutStatus?.available ? (
+                    <CheckCircle2 size={12} />
+                  ) : (
+                    <AlertCircle size={12} />
+                  )}
+                  {mouseShortcutStatus?.message ??
+                    "正在检查 Windows Raw Input 全局监听"}
+                </span>
+                <small>被动监听不会拦截短按，原有前进、后退或中键功能保持不变。</small>
+              </footer>
+            </article>
             <p>点击录入框后直接按下组合键；离开输入框时自动检查、保存并注册。Backspace 或右侧清除按钮可禁用。</p>
           </div>
         </article>

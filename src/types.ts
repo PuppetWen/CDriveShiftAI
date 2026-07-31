@@ -352,6 +352,8 @@ export interface AppSettings {
   minimizeToTray: boolean;
   globalShortcut: string;
   quickSearchShortcut: string;
+  mouseQuickSearchButton: MouseShortcutButton;
+  mouseQuickSearchHoldMs: number;
   indexRoots: string[];
   excludedPaths: string[];
   ai: {
@@ -441,6 +443,15 @@ export interface AppNavigationEvent {
   focus?: "ai-settings" | "search-input";
 }
 
+export type MouseShortcutButton = "disabled" | "back" | "forward" | "middle";
+
+export interface MouseShortcutStatus {
+  available: boolean;
+  button: MouseShortcutButton;
+  holdMs: number;
+  message: string;
+}
+
 export type ShortcutTarget = "main" | "quick-search";
 
 export interface ShortcutCheckResult {
@@ -456,22 +467,53 @@ export interface AppUpdateAsset {
   downloadUrl: string;
 }
 
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "current"
+  | "available"
+  | "downloading"
+  | "verifying"
+  | "ready"
+  | "installing"
+  | "cancelled"
+  | "error"
+  | "unavailable";
+
+export interface AppUpdateProgress {
+  transferred: number;
+  total: number;
+  percent: number;
+  bytesPerSecond: number;
+  retryAttempt: number;
+  maxRetries: number;
+}
+
 export interface AppUpdateInfo {
   status: "current" | "available" | "unavailable";
+  phase: UpdatePhase;
+  distribution: "installed" | "portable" | "development";
   currentVersion: string;
   latestVersion?: string;
   updateAvailable: boolean;
+  canAutoUpdate: boolean;
   releaseName?: string;
   releaseUrl?: string;
   publishedAt?: string;
   assets: AppUpdateAsset[];
+  selectedAsset?: AppUpdateAsset;
+  progress?: AppUpdateProgress;
   message: string;
   checkedAt: string;
+  errorCode?: string;
 }
 
 export interface CDriveShiftApi {
   getOverview(): Promise<SystemOverview>;
   checkForUpdates(force?: boolean): Promise<AppUpdateInfo>;
+  getUpdateState(): Promise<AppUpdateInfo>;
+  startUpdate(): Promise<AppUpdateInfo>;
+  cancelUpdate(): Promise<AppUpdateInfo>;
   getSettings(): Promise<AppSettings>;
   updateSettings(patch: Partial<Omit<AppSettings, "ai">>): Promise<AppSettings>;
   checkGlobalShortcut(
@@ -479,6 +521,8 @@ export interface CDriveShiftApi {
     target: ShortcutTarget
   ): Promise<ShortcutCheckResult>;
   testGlobalShortcut(target: ShortcutTarget): Promise<boolean>;
+  getMouseShortcutStatus(): Promise<MouseShortcutStatus>;
+  testMouseShortcut(): Promise<boolean>;
   listAiModels(input: AiConnectionInput): Promise<AiModelListResult>;
   testAiConnection(input: AiConnectionInput): Promise<AiTestResult>;
   saveAiDraft(input: AiDraftSaveInput): Promise<AppSettings>;
@@ -535,6 +579,7 @@ export interface CDriveShiftApi {
   onMigrationProgress(listener: (event: MigrationProgressEvent) => void): () => void;
   onAppNavigation(listener: (event: AppNavigationEvent) => void): () => void;
   onSettingsChanged(listener: (settings: AppSettings) => void): () => void;
+  onUpdateStatus(listener: (status: AppUpdateInfo) => void): () => void;
 }
 
 declare global {

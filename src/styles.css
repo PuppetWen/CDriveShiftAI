@@ -339,6 +339,85 @@ input:disabled {
   letter-spacing: -0.3px;
 }
 
+.brand-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.brand-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.brand-title-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-update-button {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.brand-update-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #39b982;
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, #39b982 13%, transparent),
+    0 0 10px color-mix(in srgb, #39b982 48%, transparent);
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.brand-update-button:hover .brand-update-dot,
+.brand-update-button:focus-visible .brand-update-dot {
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, #39b982 15%, transparent),
+    0 0 14px color-mix(in srgb, #39b982 62%, transparent);
+}
+
+.brand-update-button.available .brand-update-dot {
+  background: #ef5f64;
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, #ef5f64 14%, transparent),
+    0 0 12px color-mix(in srgb, #ef5f64 58%, transparent);
+  animation: update-dot-alert 1.8s ease-in-out infinite;
+}
+
+.brand-update-button.unavailable .brand-update-dot {
+  background: #d69b3f;
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, #d69b3f 14%, transparent),
+    0 0 10px color-mix(in srgb, #d69b3f 48%, transparent);
+}
+
+.brand-update-button.checking .brand-update-dot {
+  animation: update-dot-checking 1.1s ease-in-out infinite;
+}
+
+@keyframes update-dot-alert {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.22); }
+}
+
+@keyframes update-dot-checking {
+  0%, 100% { opacity: .45; transform: scale(.82); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
 .brand small {
   display: block;
   margin-top: 1px;
@@ -403,22 +482,6 @@ input:disabled {
   border-radius: 50%;
   background: var(--mint);
   box-shadow: 0 0 8px var(--mint);
-}
-
-.nav-item i.settings-update-dot {
-  right: 11px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #39b982;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #39b982 13%, transparent),
-    0 0 10px color-mix(in srgb, #39b982 48%, transparent);
-}
-
-.nav-item i.settings-update-dot.update-available {
-  background: #ef5f64;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #ef5f64 14%, transparent),
-    0 0 12px color-mix(in srgb, #ef5f64 58%, transparent);
 }
 
 .sidebar-bottom {
@@ -4224,6 +4287,172 @@ input:checked + .toggle::after { transform: translateX(13px); }
 .update-assets button small {
   color: var(--muted);
 }
+.update-progress-card {
+  position: relative;
+  overflow: hidden;
+  margin-top: 12px;
+  border: 1px solid color-mix(in srgb, var(--mint) 28%, var(--border));
+  border-radius: calc(var(--radius) * .72);
+  padding: 13px 14px 11px;
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--mint) 6%, transparent), transparent 55%),
+    color-mix(in srgb, var(--surface) 82%, transparent);
+}
+.update-progress-card::before {
+  position: absolute;
+  inset: 0;
+  opacity: .18;
+  pointer-events: none;
+  content: "";
+  background: linear-gradient(105deg, transparent 30%, color-mix(in srgb, var(--mint) 25%, transparent), transparent 68%);
+  transform: translateX(-100%);
+  animation: update-card-scan 2.4s ease-in-out infinite;
+}
+.update-progress-card.phase-error {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+}
+.update-progress-card.phase-cancelled::before,
+.update-progress-card.phase-error::before {
+  animation: none;
+}
+.update-progress-head,
+.update-progress-meta {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.update-progress-head > span {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.update-progress-head strong { font-size: 11px; }
+.update-progress-head > strong {
+  color: var(--mint-bright);
+  font: 700 13px "Cascadia Code", monospace;
+}
+.update-progress-head small,
+.update-progress-meta {
+  color: var(--muted);
+  font-size: 8px;
+}
+.update-progress-track {
+  position: relative;
+  overflow: hidden;
+  height: 9px;
+  margin: 11px 0 9px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  box-shadow: inset 0 2px 5px color-mix(in srgb, #000 20%, transparent);
+}
+.update-progress-track > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), var(--mint), var(--mint-bright));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--mint) 46%, transparent);
+  transition: width 160ms ease;
+}
+.phase-verifying .update-progress-track > i,
+.phase-installing .update-progress-track > i {
+  background-size: 220% 100%;
+  animation: update-progress-shimmer 1.1s linear infinite;
+}
+.phase-error .update-progress-track > i {
+  background: var(--danger);
+}
+.update-progress-stages {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  margin: 0 3px 9px;
+}
+.update-progress-stages span {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dim);
+  font-size: 7px;
+}
+.update-progress-stages span:not(:last-child)::after {
+  position: absolute;
+  right: 5px;
+  width: calc(100% - 33px);
+  height: 1px;
+  background: var(--border);
+  content: "";
+}
+.update-progress-stages span > i {
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--dim);
+  border-radius: 50%;
+}
+.update-progress-stages span.active {
+  color: var(--text);
+}
+.update-progress-stages span.active > i {
+  border-color: var(--mint);
+  background: var(--mint);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--mint) 54%, transparent);
+}
+.update-progress-meta {
+  justify-content: flex-end;
+}
+.update-progress-meta > span:first-child {
+  margin-right: auto;
+}
+.update-verifying {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--good);
+}
+:root[data-effect="aurora"] .update-progress-card {
+  border-width: 2px;
+  border-radius: 3px;
+  box-shadow: 4px 4px 0 color-mix(in srgb, #061316 54%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #86bec0 10%, transparent), transparent 46%),
+    color-mix(in srgb, var(--surface-solid) 90%, transparent);
+}
+:root[data-effect="aurora"] .update-progress-track {
+  height: 12px;
+  border-radius: 2px;
+}
+:root[data-effect="aurora"] .update-progress-track > i {
+  border-radius: 1px;
+  background:
+    repeating-linear-gradient(90deg, var(--mint) 0 12px, var(--blue) 12px 24px);
+  image-rendering: pixelated;
+}
+:root[data-effect="aurora"] .update-progress-stages span > i {
+  border-radius: 1px;
+}
+:root[data-effect="matrix"] .update-progress-card {
+  box-shadow:
+    inset 0 0 34px rgba(52, 195, 255, .05),
+    0 18px 45px rgba(0, 2, 12, .26);
+}
+:root[data-effect="matrix"] .update-progress-track > i {
+  background:
+    repeating-linear-gradient(90deg, #4c7eff 0 22px, #55edfa 22px 25px);
+}
+:root[data-effect="calm"] .update-progress-card::before {
+  opacity: .08;
+  animation-duration: 3.8s;
+}
+@keyframes update-progress-shimmer {
+  to { background-position: -220% 0; }
+}
+@keyframes update-card-scan {
+  50%, 100% { transform: translateX(100%); }
+}
 .effect-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .effect-card { display: flex; align-items: center; gap: 11px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: color-mix(in srgb, var(--bg) 20%, transparent); padding: 9px; cursor: pointer; text-align: left; transition: transform 160ms ease, border-color 160ms ease, background 160ms ease; }
 .effect-card:hover { border-color: var(--border-strong); background: color-mix(in srgb, var(--surface-hover) 74%, transparent); transform: translateY(-1px); }
@@ -5065,6 +5294,137 @@ input:checked + .toggle::after { transform: translateX(13px); }
   flex: 0 0 auto;
   padding: 5px 8px;
   font-size: 7px;
+}
+
+.mouse-shortcut-card {
+  display: grid;
+  gap: 9px;
+  border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--border));
+  border-radius: 11px;
+  background:
+    linear-gradient(120deg, color-mix(in srgb, var(--blue) 5%, transparent), transparent 60%),
+    color-mix(in srgb, var(--surface-solid) 48%, transparent);
+  padding: 10px;
+}
+.mouse-shortcut-card > header,
+.mouse-shortcut-card > header > span,
+.mouse-shortcut-card > header > span > span,
+.mouse-shortcut-card > footer,
+.mouse-shortcut-card > footer > span {
+  display: flex;
+  align-items: center;
+}
+.mouse-shortcut-card > header {
+  justify-content: space-between;
+  gap: 10px;
+}
+.mouse-shortcut-card > header > span {
+  gap: 7px;
+  color: var(--blue);
+}
+.mouse-shortcut-card > header > span > span {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 1px;
+}
+.mouse-shortcut-card > header strong {
+  color: var(--text);
+  font-size: 8px;
+}
+.mouse-shortcut-card > header small,
+.mouse-shortcut-card > footer {
+  color: var(--dim);
+  font-size: 7px;
+}
+.mouse-shortcut-card > header em {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--dim);
+  padding: 3px 7px;
+  font-size: 7px;
+  font-style: normal;
+}
+.mouse-shortcut-card > header em.active {
+  border-color: color-mix(in srgb, var(--mint) 36%, var(--border));
+  color: var(--mint);
+}
+.mouse-shortcut-card > header em.conflict {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--border));
+  color: var(--danger);
+}
+.mouse-shortcut-controls {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(120px, .72fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+.mouse-shortcut-controls > label {
+  display: grid;
+  align-items: stretch;
+  justify-content: initial;
+  gap: 5px;
+}
+.mouse-shortcut-controls select,
+.mouse-hold-input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: 0;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface-solid) 74%, transparent);
+  padding: 0 9px;
+  font-size: 8px;
+}
+.mouse-shortcut-controls select:focus,
+.mouse-hold-input:focus-within {
+  border-color: var(--border-strong);
+}
+.mouse-shortcut-controls select option {
+  color: var(--text);
+  background: var(--surface-solid);
+}
+.mouse-hold-input {
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
+}
+.mouse-hold-input input {
+  width: 100%;
+  height: 30px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+.mouse-hold-input > span {
+  color: var(--dim);
+  font-size: 7px;
+}
+.mouse-shortcut-controls > .secondary-button {
+  min-height: 34px;
+  white-space: nowrap;
+}
+.mouse-shortcut-card > footer {
+  justify-content: space-between;
+  gap: 12px;
+}
+.mouse-shortcut-card > footer > span {
+  gap: 5px;
+  color: var(--mint);
+}
+.mouse-shortcut-card > footer > small {
+  text-align: right;
+}
+:root[data-effect="aurora"] .mouse-shortcut-card {
+  border-width: 2px;
+  border-radius: 3px;
+  box-shadow: 3px 3px 0 color-mix(in srgb, #061316 48%, transparent);
+}
+:root[data-effect="aurora"] .mouse-shortcut-controls select,
+:root[data-effect="aurora"] .mouse-hold-input {
+  border-radius: 2px;
 }
 
 /* Standalone global-shortcut search window */

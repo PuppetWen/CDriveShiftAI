@@ -31,7 +31,11 @@ import { MigrationService } from "./migration";
 import { SearchService } from "./search";
 import { AppStore } from "./store";
 import { createTrayMenuIcon, type TrayIconKind } from "./tray-icons";
-import { checkForUpdates } from "./update";
+import {
+  completePendingUpdate,
+  UpdateService,
+  type AppUpdateInfo
+} from "./update";
 import {
   getDriveInfo,
   getLocalDriveRoots,
@@ -63,6 +67,7 @@ let mainWindow: BrowserWindow | undefined;
 let quickSearchWindow: BrowserWindow | undefined;
 let uninstallRestoreWindow: BrowserWindow | undefined;
 let searchService: SearchService | undefined;
+let updateService: UpdateService | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
 const store = new AppStore();
@@ -348,6 +353,31 @@ function emitSettingsChanged(settings: AppSettings): void {
       applyNativeEffect(settings.effectMode, window);
     }
   }
+}
+
+function emitUpdateState(state: AppUpdateInfo): void {
+  for (const window of [mainWindow, quickSearchWindow]) {
+    if (window && !window.isDestroyed()) {
+      window.webContents.send("app:update-status", state);
+    }
+  }
+}
+
+function assertUpdateCanInstall(): Promise<void> {
+  const busyStages = new Set([
+    "preflight",
+    "copying",
+    "verifying",
+    "switching",
+    "rolling-back"
+  ]);
+  const busy = store.listMigrations().find((record) => busyStages.has(record.stage));
+  if (busy) {
+    return Promise.reject(
+      new Error("当前有迁移或恢复事务正在执行；完成后才能更新程序")
+    );
+  }
+  return Promise.resolve();
 }
 
 function sendNavigation(
@@ -885,8 +915,11 @@ function registerIpc(): void {
 
   ipcMain.handle("settings:get", () => store.getSettings());
   ipcMain.handle("app:update-check", (_event, force?: unknown) =>
-    checkForUpdates(force === true)
+    updateService?.check(force === true)
   );
+  ipcMain.handle("app:update-state", () => updateService?.getState());
+  ipcMain.handle("app:update-start", () => updateService?.downloadAndInstall());
+  ipcMain.handle("app:update-cancel", () => updateService?.cancel());
   ipcMain.handle("settings:update", async (_event, patch: unknown) => {
     if (!patch || typeof patch !== "object") throw new Error("设置内容无效");
     const { ai: _ignoredAi, apiKey: _ignoredApiKey, ...safePatch } = patch as Record<
@@ -907,6 +940,15 @@ function registerIpc(): void {
       const settings = await store.updateSettings(
         safePatch as Partial<Omit<AppSettings, "ai">>
       );
+      if (
+        previous.mouseQuickSearchButton !== settings.mouseQuickSearchButton ||
+        previous.mouseQuickSearchHoldMs !== settings.mouseQuickSearchHoldMs
+      ) {
+        await searchService?.configureMouseShortcut(
+          settings.mouseQuickSearchButton,
+          settings.mouseQuickSearchHoldMs
+        );
+      }
       emitSettingsChanged(settings);
       createTray();
       return settings;
@@ -942,6 +984,25 @@ function registerIpc(): void {
     } else {
       createQuickSearchWindow();
     }
+    return true;
+  });
+  ipcMain.handle("shortcut:mouse-status", () =>
+    searchService?.getMouseShortcutStatus() ?? {
+      available: false,
+      button: store.getSettings().mouseQuickSearchButton,
+      holdMs: store.getSettings().mouseQuickSearchHoldMs,
+      message: "鼠标监听尚未启动"
+    }
+  );
+  ipcMain.handle("shortcut:mouse-test", () => {
+    const status = searchService?.getMouseShortcutStatus();
+    if (!status || !status.available) {
+      throw new Error(status?.message ?? "鼠标监听尚未启动");
+    }
+    if (status.button === "disabled") {
+      throw new Error("请先选择一个鼠标按键");
+    }
+    createQuickSearchWindow();
     return true;
   });
 
@@ -1574,7 +1635,9 @@ if (!singleInstance) {
     await store.init();
     applyNativeEffect(store.getSettings().effectMode);
     mainWindow = createWindow();
+    await completePendingUpdate();
     createTray();
+    const currentSettings = store.getSettings();
     searchService = new SearchService(
       (status) => {
         for (const window of [mainWindow, quickSearchWindow]) {
@@ -1589,6 +1652,11 @@ if (!singleInstance) {
             window.webContents.send("content-indexer:status", status);
           }
         }
+      },
+      () => createQuickSearchWindow(),
+      {
+        button: currentSettings.mouseQuickSearchButton,
+        holdMs: currentSettings.mouseQuickSearchHoldMs
       }
     );
     syncSearchBackgroundMode();
@@ -1597,6 +1665,7 @@ if (!singleInstance) {
         mainWindow.webContents.send("migration:progress", { record, message });
       }
     });
+    updateService = new UpdateService(emitUpdateState, assertUpdateCanInstall);
     registerIpc();
     const shortcutFailures = applyGlobalShortcuts(store.getSettings());
     if (shortcutFailures.length > 0) {

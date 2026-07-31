@@ -12,7 +12,8 @@ import {
   Sparkles
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { IndexerStatus, ViewId } from "../types";
+import type { AppUpdateInfo, IndexerStatus, ViewId } from "../types";
+import { ThemedTooltip } from "./ThemedTooltip";
 
 const items: Array<{ id: ViewId; label: string; icon: LucideIcon }> = [
   { id: "overview", label: "空间总览", icon: LayoutDashboard },
@@ -29,7 +30,7 @@ interface SidebarProps {
   indexer: IndexerStatus;
   collapsed: boolean;
   onToggle: () => void;
-  updateAvailable: boolean;
+  updateInfo?: AppUpdateInfo;
 }
 
 export function Sidebar({
@@ -38,9 +39,19 @@ export function Sidebar({
   indexer,
   collapsed,
   onToggle,
-  updateAvailable
+  updateInfo
 }: SidebarProps) {
   const ready = indexer.state === "ready";
+  const updateStatus = updateInfo?.status ?? "checking";
+  const updateTooltip =
+    updateStatus === "available"
+      ? `发现新版本 v${updateInfo?.latestVersion ?? "未知"}；当前为 v${updateInfo?.currentVersion ?? "未知"}。点击进入设置更新。`
+      : updateStatus === "unavailable"
+        ? `暂时无法检查版本：${updateInfo?.message ?? "请稍后重试"}。点击进入设置查看。`
+        : updateStatus === "current"
+          ? `当前版本 v${updateInfo?.currentVersion ?? "未知"}，已是最新版本。`
+          : "正在检查 GitHub Release 版本…";
+
   return (
     <aside className={collapsed ? "sidebar collapsed" : "sidebar"}>
       <div className="brand">
@@ -48,8 +59,20 @@ export function Sidebar({
           <Sparkles size={19} strokeWidth={2.2} />
           <span />
         </div>
-        <div>
-          <strong>CDriveShiftAI</strong>
+        <div className="brand-copy">
+          <div className="brand-title-row">
+            <strong>CDriveShiftAI</strong>
+            <ThemedTooltip content={updateTooltip} delay={180}>
+              <button
+                type="button"
+                className={`brand-update-button ${updateStatus}`}
+                aria-label={updateTooltip}
+                onClick={() => onChange("settings")}
+              >
+                <span className="brand-update-dot" />
+              </button>
+            </ThemedTooltip>
+          </div>
           <small>全盘 AI 智迁</small>
         </div>
         <button
@@ -89,12 +112,7 @@ export function Sidebar({
         >
           <Settings2 size={18} />
           <span>设置</span>
-          <i
-            className={
-              updateAvailable ? "settings-update-dot update-available" : "settings-update-dot"
-            }
-            aria-label={updateAvailable ? "发现新版本" : "当前版本状态正常"}
-          />
+          {active === "settings" && <i />}
         </button>
         <div className={`index-mini ${ready ? "is-ready" : ""}`}>
           <div className="index-mini-icon">

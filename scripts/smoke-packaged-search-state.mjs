@@ -58,6 +58,7 @@ let migrationReapplyVerified = false;
 let migrationRoundTripVerified = false;
 let basicSettingsAutoSaveVerified = false;
 let shortcutBlurAutoSaveVerified = false;
+let mouseShortcutConfigurationVerified = false;
 let aiSettingsAutoSaveVerified = false;
 let windowBoundsRestoredVerified = false;
 let expectedWindowBounds;
@@ -473,6 +474,54 @@ async function runApplication(debugPort, verifyRestored) {
       }
       shortcutBlurAutoSaveVerified = true;
 
+      const mouseButtonChanged = await evaluate(`(() => {
+        const select = document.querySelector(".mouse-shortcut-controls select");
+        if (!(select instanceof HTMLSelectElement)) return false;
+        select.value = "forward";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      })()`);
+      if (!mouseButtonChanged) {
+        throw new Error("Mouse shortcut button selector was unavailable");
+      }
+      await waitFor(
+        'window.cDriveShiftAI.getSettings().then((settings) => settings.mouseQuickSearchButton === "forward")'
+      );
+      const mouseHoldChanged = await evaluate(`(() => {
+        const input = document.querySelector(".mouse-hold-input input");
+        if (!(input instanceof HTMLInputElement)) return false;
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value"
+        )?.set;
+        setter?.call(input, "1.5");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.focus();
+        input.blur();
+        return true;
+      })()`);
+      if (!mouseHoldChanged) {
+        throw new Error("Mouse shortcut hold input was unavailable");
+      }
+      await waitFor(
+        'window.cDriveShiftAI.getSettings().then((settings) => settings.mouseQuickSearchHoldMs === 1500)'
+      );
+      const mouseStatus = await evaluate(
+        "window.cDriveShiftAI.getMouseShortcutStatus()"
+      );
+      if (
+        mouseStatus?.available !== true ||
+        mouseStatus?.button !== "forward" ||
+        mouseStatus?.holdMs !== 1_500
+      ) {
+        throw new Error(
+          `Mouse shortcut configuration did not reach the native listener: ${JSON.stringify(
+            mouseStatus
+          )}`
+        );
+      }
+      mouseShortcutConfigurationVerified = true;
+
       const pickerOpened = await evaluate(`(() => {
         const trigger = document.querySelector(".provider-picker-trigger");
         if (!(trigger instanceof HTMLButtonElement)) return false;
@@ -779,6 +828,7 @@ try {
       migrationRoundTripVerified,
       basicSettingsAutoSaveVerified,
       shortcutBlurAutoSaveVerified,
+      mouseShortcutConfigurationVerified,
       aiSettingsAutoSaveVerified,
       windowBoundsRestoredVerified
     }, null, 2)

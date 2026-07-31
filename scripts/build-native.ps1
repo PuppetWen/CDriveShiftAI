@@ -16,7 +16,10 @@ if (-not $visualStudioPath) {
 }
 
 $developerCommand = Join-Path $visualStudioPath "Common7\Tools\VsDevCmd.bat"
-$manifestPath = Join-Path $workspacePath "native\indexer\Cargo.toml"
+$manifestPaths = @(
+  (Join-Path $workspacePath "native\indexer\Cargo.toml"),
+  (Join-Path $workspacePath "native\updater\Cargo.toml")
+)
 $cargoPath = (Get-Command cargo.exe -ErrorAction Stop).Source
 
 & cmd.exe /d /c "`"$developerCommand`" -arch=x64 -host_arch=x64 >nul 2>nul && set" |
@@ -50,13 +53,15 @@ if ($sdkPath) {
   $env:INCLUDE = (($sdkIncludes + @($env:INCLUDE)) | Where-Object { $_ }) -join ";"
 }
 
-$cargoArguments = if ($Test) {
-  @("test", "--manifest-path", $manifestPath)
-} else {
-  @("build", "--manifest-path", $manifestPath, "--release")
-}
+foreach ($manifestPath in $manifestPaths) {
+  $cargoArguments = if ($Test) {
+    @("test", "--manifest-path", $manifestPath)
+  } else {
+    @("build", "--manifest-path", $manifestPath, "--release")
+  }
 
-& $cargoPath +1.75.0 @cargoArguments
-if ($LASTEXITCODE -ne 0) {
-  exit $LASTEXITCODE
+  & $cargoPath +1.75.0 @cargoArguments
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
 }
