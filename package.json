@@ -1,0 +1,100 @@
+{
+  "name": "cdriveshiftai",
+  "version": "0.0.1",
+  "private": true,
+  "description": "CDriveShiftAI - AI-assisted Windows disk organizer and safe cross-drive directory migration tool",
+  "main": "dist-electron/main.js",
+  "author": "CDriveShiftAI",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"tsc -p tsconfig.electron.json --watch --preserveWatchOutput\" \"wait-on tcp:5173 file:dist-electron/main.js && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "dev:web": "vite --host 127.0.0.1",
+    "prepare:electron": "node node_modules/electron/install.js",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1",
+    "test:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1 -Test",
+    "build:main": "tsc -p tsconfig.electron.json",
+    "build:web": "tsc --noEmit && vite build",
+    "build:app": "npm run build:native && npm run build:main && npm run build:web",
+    "dist": "npm run prepare:electron && npm run build:app && electron-builder --win nsis",
+    "dist:portable": "npm run prepare:electron && npm run build:app && electron-builder --win portable",
+    "dist:all": "npm run prepare:electron && npm run build:app && electron-builder --win nsis portable",
+    "test": "vitest run",
+    "test:indexer": "node scripts/smoke-indexer.mjs",
+    "test:index-cache": "node scripts/smoke-index-cache-restart.mjs",
+    "test:packaged-index-cache": "node scripts/smoke-packaged-index-cache.mjs",
+    "test:background-cpu": "node scripts/smoke-background-cpu.mjs",
+    "test:portable": "node scripts/smoke-portable-distribution.mjs",
+    "test:ownership-map": "npm run build:main && node scripts/smoke-ownership-map.mjs",
+    "test:ownership-state": "node scripts/smoke-ownership-persistence.mjs",
+    "test:analysis-state": "node scripts/smoke-analysis-persistence.mjs",
+    "test:search-state": "node scripts/smoke-packaged-search-state.mjs",
+    "test:visual": "node scripts/visual-smoke.mjs",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "^0.536.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.1.0",
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^6.0.4",
+    "concurrently": "^9.2.0",
+    "cross-env": "^10.0.0",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^7.0.0",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.0",
+    "wait-on": "^9.0.0"
+  },
+  "build": {
+    "appId": "ai.cdriveshift.desktop",
+    "productName": "CDriveShiftAI",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "directories": {
+      "output": "release-ready"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/indexer/target/release/cshift-indexer.exe",
+        "to": "bin/cshift-indexer.exe"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "assets/icon.png"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-${arch}.${ext}",
+      "include": "build/installer.nsh",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "${productName}-${arch}-portable.${ext}"
+    }
+  }
+}

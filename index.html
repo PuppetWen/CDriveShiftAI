@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#183841" />
+    <script>
+      (() => {
+        const requested = new URLSearchParams(location.search).get("effect");
+        const effect = ["aurora", "matrix", "calm"].includes(requested)
+          ? requested
+          : "aurora";
+        const colors = {
+          aurora: "#183841",
+          matrix: "#050815",
+          calm: "#edf4f5"
+        };
+        document.documentElement.dataset.effect = effect;
+        document.documentElement.style.background = colors[effect];
+        document.documentElement.style.colorScheme = effect === "calm" ? "light" : "dark";
+        document
+          .querySelector('meta[name="theme-color"]')
+          ?.setAttribute("content", colors[effect]);
+      })();
+    </script>
+    <meta
+      name="description"
+      content="CDriveShiftAI — AI 辅助的 Windows 全盘文件归属分析与安全跨盘迁移工具"
+    />
+    <title>CDriveShiftAI · 全盘 AI 智迁</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

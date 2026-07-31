@@ -1,0 +1,187 @@
+import { useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowLeftRight,
+  CheckCircle2,
+  DatabaseBackup,
+  HardDrive,
+  ShieldCheck
+} from "lucide-react";
+import { api } from "../lib/api";
+import { formatBytes } from "../lib/format";
+import type { MigrationRecord } from "../types";
+
+export function UninstallRestoreView() {
+  const [records, setRecords] = useState<MigrationRecord[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [restoring, setRestoring] = useState(false);
+  const [currentPath, setCurrentPath] = useState("");
+  const [errors, setErrors] = useState<string[]>([]);
+
+  useEffect(() => {
+    void api
+      .listMigrations()
+      .then((items) => {
+        const restorable = items.filter((item) => item.stage === "linked");
+        setRecords(restorable);
+        setSelected(new Set(restorable.map((item) => item.id)));
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const selectedRecords = useMemo(
+    () => records.filter((item) => selected.has(item.id)),
+    [records, selected]
+  );
+
+  const continueUninstall = () => void api.finishUtilityWindow();
+  const restoreSelected = async () => {
+    if (selectedRecords.length === 0) return;
+    setRestoring(true);
+    setErrors([]);
+    const failed: string[] = [];
+    for (const record of selectedRecords) {
+      setCurrentPath(record.source);
+      try {
+        await api.rollbackMigration(record.id);
+        setRecords((items) => items.filter((item) => item.id !== record.id));
+      } catch (reason) {
+        failed.push(
+          `${record.source}：${reason instanceof Error ? reason.message : String(reason)}`
+        );
+      }
+    }
+    setCurrentPath("");
+    setRestoring(false);
+    setErrors(failed);
+    if (failed.length === 0) continueUninstall();
+  };
+
+  return (
+    <main className="uninstall-restore-window">
+      <header>
+        <div className="uninstall-logo">
+          <DatabaseBackup size={25} />
+        </div>
+        <div>
+          <span>UNINSTALL SAFETY</span>
+          <h1>卸载前，是否恢复已迁移的数据？</h1>
+          <p>
+            勾选需要恢复的目录。CDriveShiftAI 会先把数据安全复制回原位置，再继续卸载。
+          </p>
+        </div>
+      </header>
+
+      <section className="uninstall-warning">
+        <AlertTriangle size={18} />
+        <div>
+          <strong>恢复需要源盘有足够可用空间</strong>
+          <span>数据复制回原盘并再次校验成功后，目标磁盘中的迁移副本会被删除。</span>
+        </div>
+      </section>
+
+      <section className="uninstall-selection">
+        <div className="uninstall-selection-head">
+          <span>
+            <ShieldCheck size={15} />
+            可恢复迁移记录
+            <small>{records.length}</small>
+          </span>
+          {records.length > 0 && (
+            <button
+              type="button"
+              disabled={restoring}
+              onClick={() =>
+                setSelected(
+                  selected.size === records.length
+                    ? new Set()
+                    : new Set(records.map((item) => item.id))
+                )
+              }
+            >
+              {selected.size === records.length ? "取消全选" : "全选"}
+            </button>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="uninstall-empty">
+            <span className="spinner" />
+            正在读取项目目录中的迁移记录…
+          </div>
+        ) : records.length === 0 ? (
+          <div className="uninstall-empty">
+            <CheckCircle2 size={30} />
+            <strong>没有需要恢复的迁移</strong>
+            <span>可以直接继续卸载，历史记录不会在应用退出时被自动清空。</span>
+          </div>
+        ) : (
+          <div className="uninstall-record-list">
+            {records.map((record) => (
+              <label className={selected.has(record.id) ? "selected" : ""} key={record.id}>
+                <input
+                  type="checkbox"
+                  checked={selected.has(record.id)}
+                  disabled={restoring}
+                  onChange={(event) => {
+                    const next = new Set(selected);
+                    if (event.target.checked) next.add(record.id);
+                    else next.delete(record.id);
+                    setSelected(next);
+                  }}
+                />
+                <span className="uninstall-check" />
+                <HardDrive size={18} />
+                <span>
+                  <strong>{record.source}</strong>
+                  <small>
+                    <ArrowLeftRight size={11} />
+                    {record.destination}
+                  </small>
+                </span>
+                <b>{formatBytes(record.totalBytes)}</b>
+              </label>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {restoring && (
+        <div className="uninstall-progress">
+          <span className="spinner" />
+          <div>
+            <strong>正在恢复所选目录</strong>
+            <span>{currentPath}</span>
+          </div>
+        </div>
+      )}
+      {errors.length > 0 && (
+        <div className="uninstall-errors">
+          <strong>部分目录未恢复，请检查后重试或选择保留迁移状态：</strong>
+          {errors.map((error) => <span key={error}>{error}</span>)}
+        </div>
+      )}
+
+      <footer>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={restoring}
+          onClick={continueUninstall}
+        >
+          保留现状并继续卸载
+        </button>
+        <button
+          type="button"
+          className="primary-button"
+          disabled={restoring || selectedRecords.length === 0}
+          onClick={() => void restoreSelected()}
+        >
+          <DatabaseBackup size={16} />
+          恢复所选 {selectedRecords.length > 0 ? `(${selectedRecords.length})` : ""} 并继续卸载
+        </button>
+      </footer>
+    </main>
+  );
+}

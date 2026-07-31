@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="70" y1="55" x2="440" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#173E54"/>
+      <stop offset=".46" stop-color="#126D73"/>
+      <stop offset="1" stop-color="#4E4AB5"/>
+    </linearGradient>
+    <linearGradient id="line" x1="125" y1="118" x2="393" y2="402" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E9FFF9"/>
+      <stop offset=".55" stop-color="#8FFFF0"/>
+      <stop offset="1" stop-color="#7CA6FF"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.25 0 0 0 0 1 0 0 0 0 0.8 0 0 0 .55 0"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="22" y="22" width="468" height="468" rx="132" fill="url(#bg)"/>
+  <rect x="35" y="35" width="442" height="442" rx="119" fill="none" stroke="#DFFFF8" stroke-opacity=".16" stroke-width="3"/>
+  <path d="M133 287c57 0 77-21 77-79 0 58 20 79 78 79-58 0-78 20-78 78 0-58-20-78-77-78Z" fill="none" stroke="url(#line)" stroke-width="22" stroke-linejoin="round" filter="url(#glow)"/>
+  <path d="M290 162c29 0 39-10 39-40 0 30 10 40 40 40-30 0-40 10-40 40 0-30-10-40-39-40Z" fill="#E8FFF9" filter="url(#glow)"/>
+  <path d="M304 336h81m0 0-31-31m31 31-31 31" fill="none" stroke="url(#line)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
