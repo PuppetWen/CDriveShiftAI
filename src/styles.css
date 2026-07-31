@@ -657,6 +657,32 @@ input:disabled {
   overflow: auto;
 }
 
+.view-loading-shell {
+  display: grid;
+  min-height: calc(100vh - 48px);
+  place-content: center;
+  justify-items: center;
+  gap: 9px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.bootstrap-loading {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 28% 24%, color-mix(in srgb, var(--mint) 8%, transparent), transparent 34%),
+    var(--page);
+}
+
+.view-loading-shell strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.view-loading-shell small {
+  font-size: 11px;
+}
+
 .page {
   width: min(1250px, calc(100% - 56px));
   min-height: 100%;
@@ -1175,8 +1201,14 @@ input:disabled {
 .principle-card p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.7; }
 .principle-orbit { position: relative; display: grid; flex: 0 0 105px; height: 105px; place-items: center; border-radius: 50%; color: var(--mint); background: color-mix(in srgb, var(--mint) 7%, transparent); }
 .principle-orbit .orbit { position: absolute; border: 1px solid color-mix(in srgb, var(--mint) 25%, transparent); border-radius: 50%; }
-.principle-orbit .one { width: 78px; height: 78px; animation: orbit-pulse 2.8s ease-in-out infinite; }
-.principle-orbit .two { width: 116px; height: 116px; opacity: 0.45; animation: orbit-pulse 2.8s 0.8s ease-in-out infinite; }
+.principle-orbit .one { width: 78px; height: 78px; }
+.principle-orbit .two { width: 116px; height: 116px; opacity: 0.45; }
+.principle-card:hover .principle-orbit .one {
+  animation: orbit-pulse 2.8s ease-in-out 2;
+}
+.principle-card:hover .principle-orbit .two {
+  animation: orbit-pulse 2.8s 0.8s ease-in-out 2;
+}
 @keyframes orbit-pulse { 50% { transform: scale(1.08); opacity: 0.15; } }
 .principle-tags { display: flex; gap: 7px; margin-top: 14px; }
 .principle-tags span { display: inline-flex; align-items: center; gap: 4px; border-radius: 20px; color: var(--muted); background: var(--border); padding: 4px 7px; font-size: 8px; }

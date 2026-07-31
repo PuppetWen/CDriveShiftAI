@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, CloudOff, Database, Palette, ShieldCheck } from "lucide-react";
 import { api } from "./lib/api";
 import {
@@ -19,12 +19,25 @@ import { BackgroundFX } from "./components/BackgroundFX";
 import { Sidebar } from "./components/Sidebar";
 import { Toasts, type ToastItem } from "./components/ui";
 import { OverviewView } from "./views/OverviewView";
-import { SearchView } from "./views/SearchView";
-import { OwnershipMapView } from "./views/OwnershipMapView";
-import { AnalyzeView } from "./views/AnalyzeView";
-import { MigrateView } from "./views/MigrateView";
-import { HistoryView } from "./views/HistoryView";
-import { SettingsView } from "./views/SettingsView";
+
+const SearchView = lazy(() =>
+  import("./views/SearchView").then((module) => ({ default: module.SearchView }))
+);
+const OwnershipMapView = lazy(() =>
+  import("./views/OwnershipMapView").then((module) => ({ default: module.OwnershipMapView }))
+);
+const AnalyzeView = lazy(() =>
+  import("./views/AnalyzeView").then((module) => ({ default: module.AnalyzeView }))
+);
+const MigrateView = lazy(() =>
+  import("./views/MigrateView").then((module) => ({ default: module.MigrateView }))
+);
+const HistoryView = lazy(() =>
+  import("./views/HistoryView").then((module) => ({ default: module.HistoryView }))
+);
+const SettingsView = lazy(() =>
+  import("./views/SettingsView").then((module) => ({ default: module.SettingsView }))
+);
 
 const fallbackStatus: IndexerStatus = {
   mode: "loading",
@@ -152,8 +165,11 @@ export default function App() {
     });
     const offSettings = api.onSettingsChanged(setSettings);
     const offUpdate = api.onUpdateStatus(setUpdateInfo);
-    void api.checkForUpdates().then(setUpdateInfo).catch(() => undefined);
+    const updateTimer = window.setTimeout(() => {
+      void api.checkForUpdates().then(setUpdateInfo).catch(() => undefined);
+    }, 2_500);
     return () => {
+      window.clearTimeout(updateTimer);
       offIndexer();
       offMigration();
       offNavigation();
@@ -367,7 +383,19 @@ export default function App() {
             <ShieldCheck className="shield-top" size={17} />
           </div>
         </div>
-        <section className="view-scroll">{viewContent}</section>
+        <section className="view-scroll">
+          <Suspense
+            fallback={
+              <div className="view-loading-shell" role="status" aria-live="polite">
+                <span className="spinner" />
+                <strong>正在打开功能页面</strong>
+                <small>界面模块按需载入，索引和数据不会重新构建。</small>
+              </div>
+            }
+          >
+            {viewContent}
+          </Suspense>
+        </section>
       </main>
       <Toasts items={toasts} dismiss={(id) => setToasts((items) => items.filter((x) => x.id !== id))} />
     </div>

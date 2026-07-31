@@ -70,6 +70,8 @@ let searchService: SearchService | undefined;
 let updateService: UpdateService | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
+let shutdownComplete = false;
+let shutdownPromise: Promise<void> | undefined;
 const store = new AppStore();
 let migrationService: MigrationService;
 const aiVerifications = new Map<string, { fingerprint: string; expiresAt: number }>();
@@ -283,6 +285,24 @@ function trackWindowBounds(
   });
 }
 
+function showAsSoonAsRenderable(window: BrowserWindow, maximized = false): void {
+  let shown = false;
+  const show = () => {
+    if (shown || window.isDestroyed()) return;
+    shown = true;
+    if (maximized) window.maximize();
+    window.show();
+  };
+  // ready-to-show may be delayed by GPU initialization or a busy first paint.
+  // dom-ready is sufficient because the document has an effect-matched opaque
+  // background, so showing here improves perceived startup without a white flash.
+  window.webContents.once("dom-ready", show);
+  window.once("ready-to-show", show);
+  const fallback = setTimeout(show, 1_200);
+  fallback.unref();
+  window.once("closed", () => clearTimeout(fallback));
+}
+
 function createWindow(): BrowserWindow {
   const effect = store.getSettings().effectMode;
   const colors = effectColors[effect];
@@ -307,7 +327,6 @@ function createWindow(): BrowserWindow {
       symbolColor: colors.symbols,
       height: 48
     },
-    ...(process.platform === "win32" ? { backgroundMaterial: "mica" as const } : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -326,12 +345,24 @@ function createWindow(): BrowserWindow {
     if (isQuitting || !store.getSettings().minimizeToTray) return;
     event.preventDefault();
     window.hide();
+    // Force a native background notification even if visibility events raced
+    // during startup. Besides pausing heavy work, this trims reclaimable pages
+    // across the resident process tree after the renderer is released.
+    searchService?.setBackgroundMode(true, true);
     createTray();
+    // A hidden Chromium renderer and its GPU surfaces otherwise remain the
+    // largest part of the tray working set. Search, watchers, global
+    // shortcuts and the tray all live in the main/native processes, so the UI
+    // can be destroyed after its persisted layout/state has been saved and
+    // recreated on demand without reducing background accuracy.
+    setTimeout(() => {
+      if (!window.isDestroyed() && !window.isVisible()) window.destroy();
+    }, 150);
   });
-  window.once("ready-to-show", () => {
-    if (restored?.maximized) window.maximize();
-    window.show();
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = undefined;
   });
+  showAsSoonAsRenderable(window, Boolean(restored?.maximized));
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: "deny" };
@@ -653,10 +684,7 @@ function createTray(): void {
     {
       label: "退出",
       icon: createTrayMenuIcon("exit", "#bd5d5d"),
-      click: () => {
-        isQuitting = true;
-        app.quit();
-      }
+      click: () => app.quit()
     }
   ];
   tray.setContextMenu(Menu.buildFromTemplate(template));
@@ -1625,10 +1653,10 @@ if (!singleInstance) {
   });
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    // The renderer is intentionally destroyed while resident in the tray.
+    // Launching the executable again must therefore recreate the main window,
+    // not silently return just because no BrowserWindow currently exists.
+    if (searchService) showMainView("overview");
   });
 
   app.whenReady().then(async () => {
@@ -1679,7 +1707,30 @@ if (!singleInstance) {
       });
     }
     await migrationService.recoverIncomplete();
-    void searchService.start();
+    // Let Chromium finish the first interactive frame before parsing a
+    // multi-million-entry persistent index. Search remains fully accurate once
+    // the same cache is loaded; this only removes startup contention.
+    setTimeout(() => {
+      void searchService?.start().catch(() => {
+        // SearchService publishes its own unavailable/restart status.
+      });
+    }, 850);
+    const smokeQuitDelay = Number.parseInt(
+      process.env.CDRIVESHIFTAI_SMOKE_QUIT_AFTER_READY_MS ?? "",
+      10
+    );
+    if (app.isPackaged && Number.isFinite(smokeQuitDelay) && smokeQuitDelay >= 1_000) {
+      const smokeQuitTimer = setTimeout(() => app.quit(), smokeQuitDelay);
+      smokeQuitTimer.unref();
+    }
+    const smokeTrayDelay = Number.parseInt(
+      process.env.CDRIVESHIFTAI_SMOKE_CLOSE_TO_TRAY_AFTER_READY_MS ?? "",
+      10
+    );
+    if (app.isPackaged && Number.isFinite(smokeTrayDelay) && smokeTrayDelay >= 1_000) {
+      const smokeTrayTimer = setTimeout(() => mainWindow?.close(), smokeTrayDelay);
+      smokeTrayTimer.unref();
+    }
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
@@ -1688,12 +1739,29 @@ if (!singleInstance) {
 }
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  const keepInTray =
+    !isQuitting &&
+    store.getSettings().minimizeToTray &&
+    tray != null &&
+    !tray.isDestroyed();
+  if (process.platform !== "darwin" && !keepInTray) app.quit();
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
   isQuitting = true;
+  if (shutdownComplete) return;
+  event.preventDefault();
   globalShortcut.unregisterAll();
   tray?.destroy();
-  void searchService?.stop();
+  tray = undefined;
+  if (!shutdownPromise) {
+    shutdownPromise = (async () => {
+      try {
+        await searchService?.stop();
+      } finally {
+        shutdownComplete = true;
+        app.quit();
+      }
+    })();
+  }
 });

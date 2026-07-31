@@ -6,6 +6,17 @@ import { promisify } from "node:util";
 import type { DriveInfo } from "./types";
 
 const execFileAsync = promisify(execFile);
+const DRIVE_DISCOVERY_TTL_MS = 30_000;
+
+interface LocalDriveMetadata {
+  root: string;
+  fileSystem: string;
+}
+
+let driveDiscoveryCache:
+  | { expiresAt: number; promise: Promise<LocalDriveMetadata[]> }
+  | undefined;
+let elevationCheck: Promise<boolean> | undefined;
 
 const windowsRoot = process.env.SystemRoot || "C:\\Windows";
 const systemDrive = path.parse(windowsRoot).root || "C:\\";
@@ -64,23 +75,57 @@ export function isHighRiskApplicationPath(candidate: string): boolean {
   return programFilesPaths.some((programPath) => isPathWithin(candidate, programPath));
 }
 
+async function discoverLocalDrives(): Promise<LocalDriveMetadata[]> {
+  const now = Date.now();
+  if (driveDiscoveryCache && driveDiscoveryCache.expiresAt > now) {
+    return driveDiscoveryCache.promise;
+  }
+  const promise = (async () => {
+    try {
+      const script =
+        "(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3 OR DriveType=2' | " +
+        "Select-Object DeviceID,FileSystem) | ConvertTo-Json -Compress";
+      const { stdout } = await execFileAsync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", script],
+        { windowsHide: true, timeout: 8_000, maxBuffer: 256 * 1024 }
+      );
+      const parsed = JSON.parse(stdout.trim()) as
+        | { DeviceID?: unknown; FileSystem?: unknown }
+        | Array<{ DeviceID?: unknown; FileSystem?: unknown }>;
+      const values = Array.isArray(parsed) ? parsed : [parsed];
+      const drives = values
+        .filter(
+          (item): item is { DeviceID: string; FileSystem?: unknown } =>
+            typeof item?.DeviceID === "string" && /^[A-Z]:$/i.test(item.DeviceID)
+        )
+        .map((item) => ({
+          root: `${item.DeviceID.toUpperCase()}\\`,
+          fileSystem:
+            typeof item.FileSystem === "string" && item.FileSystem.trim()
+              ? item.FileSystem.trim()
+              : "Unknown"
+        }));
+      return drives.length ? drives : [{ root: "C:\\", fileSystem: "Unknown" }];
+    } catch {
+      return [{ root: "C:\\", fileSystem: "Unknown" }];
+    }
+  })();
+  driveDiscoveryCache = {
+    expiresAt: now + DRIVE_DISCOVERY_TTL_MS,
+    promise
+  };
+  return promise;
+}
+
 export async function getDriveInfo(root = "C:\\"): Promise<DriveInfo> {
-  const stats = await statfs(root);
+  const [stats, drives] = await Promise.all([statfs(root), discoverLocalDrives()]);
   const totalBytes = Number(stats.blocks) * Number(stats.bsize);
   const freeBytes = Number(stats.bavail) * Number(stats.bsize);
-  let fileSystem = "Unknown";
-  try {
-    const driveLetter = root.slice(0, 1);
-    const script = `(Get-Volume -DriveLetter '${driveLetter}' -ErrorAction Stop).FileSystem`;
-    const { stdout } = await execFileAsync(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", script],
-      { windowsHide: true, timeout: 5_000 }
-    );
-    fileSystem = stdout.trim() || fileSystem;
-  } catch {
-    // statfs is still enough for capacity information.
-  }
+  const normalizedRoot = `${root.slice(0, 1).toUpperCase()}:\\`;
+  const fileSystem =
+    drives.find((drive) => drive.root.toUpperCase() === normalizedRoot)?.fileSystem ??
+    "Unknown";
   return {
     name: root.toUpperCase().startsWith("C:") ? "System" : `Drive ${root.slice(0, 1).toUpperCase()}`,
     root,
@@ -92,36 +137,22 @@ export async function getDriveInfo(root = "C:\\"): Promise<DriveInfo> {
 }
 
 export async function getLocalDriveRoots(): Promise<string[]> {
-  try {
-    const script =
-      "(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3 OR DriveType=2' | " +
-      "Select-Object -ExpandProperty DeviceID) | ConvertTo-Json -Compress";
-    const { stdout } = await execFileAsync(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", script],
-      { windowsHide: true, timeout: 8_000 }
-    );
-    const parsed = JSON.parse(stdout.trim()) as string | string[];
-    const values = Array.isArray(parsed) ? parsed : [parsed];
-    const roots = values
-      .filter((value): value is string => typeof value === "string" && /^[A-Z]:$/i.test(value))
-      .map((value) => `${value.toUpperCase()}\\`);
-    return roots.length ? roots : ["C:\\"];
-  } catch {
-    return ["C:\\"];
-  }
+  return (await discoverLocalDrives()).map((drive) => drive.root);
 }
 
 export async function isElevated(): Promise<boolean> {
-  try {
-    await execFileAsync("net.exe", ["session"], {
-      windowsHide: true,
-      timeout: 3_000
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  elevationCheck ??= (async () => {
+    try {
+      await execFileAsync("net.exe", ["session"], {
+        windowsHide: true,
+        timeout: 3_000
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  return elevationCheck;
 }
 
 export function systemIdentity() {

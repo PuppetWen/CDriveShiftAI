@@ -17,6 +17,9 @@ if (process.platform !== "win32") {
 }
 
 const workspace = path.resolve(import.meta.dirname, "..");
+const currentVersion = JSON.parse(
+  await readFile(path.join(workspace, "package.json"), "utf8")
+).version;
 const testRoot = path.join(
   workspace,
   ".cdriveshiftai-data",
@@ -32,7 +35,7 @@ const installDirectory = path.join(testRoot, "installation");
 const installedExecutable = path.join(installDirectory, "CDriveShiftAI.exe");
 const dataDirectory = path.join(installDirectory, ".cdriveshiftai-data");
 const sentinel = path.join(dataDirectory, "update-sentinel.txt");
-const staging = path.join(testRoot, ".cdriveshiftai-update", "0.0.2");
+const staging = path.join(testRoot, ".cdriveshiftai-update", currentVersion);
 const packagePath = path.join(staging, "CDriveShiftAI-x64.exe");
 const helperPath = path.join(staging, "cshift-updater.exe");
 const planPath = path.join(staging, "update-plan.json");
@@ -120,6 +123,27 @@ async function fileVersion(candidate) {
   return output.trim();
 }
 
+async function listDotNetInstallUtilities() {
+  const result = await run(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      [
+        "$items=@(Get-CimInstance Win32_Process | Where-Object {",
+        "$_.Name -ieq 'InstallUtil.exe'} |",
+        "Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine);",
+        "$items | ConvertTo-Json -Compress"
+      ].join("")
+    ],
+    10_000
+  );
+  if (result.code !== 0 || !result.stdout.trim()) return [];
+  const parsed = JSON.parse(result.stdout);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
 async function stopInstalledProcesses() {
   const script = `
     $root = [System.IO.Path]::GetFullPath($env:CSHIFT_SMOKE_INSTALL_PATH)
@@ -174,6 +198,10 @@ async function cleanup() {
 
 await cleanup();
 await mkdir(staging, { recursive: true });
+const dotNetUtilitiesBefore = await listDotNetInstallUtilities();
+const baselineUtilityIds = new Set(
+  dotNetUtilitiesBefore.map((item) => Number(item.ProcessId))
+);
 let completed = false;
 try {
   const install = await run(oldInstaller, [
@@ -183,6 +211,17 @@ try {
   if (install.code !== 0 || !(await exists(installedExecutable))) {
     throw new Error(
       `0.0.1 test installation failed (${install.code}): ${install.stderr}`
+    );
+  }
+  await new Promise((resolve) => setTimeout(resolve, 750));
+  const unexpectedUtilities = (await listDotNetInstallUtilities()).filter((item) => {
+    return !baselineUtilityIds.has(Number(item.ProcessId));
+  });
+  if (unexpectedUtilities.length > 0) {
+    throw new Error(
+      `CDriveShiftAI installer left a .NET InstallUtil child behind: ${JSON.stringify(
+        unexpectedUtilities
+      )}`
     );
   }
   const beforeVersion = await fileVersion(installedExecutable);
@@ -208,7 +247,7 @@ try {
         stagingDir: staging,
         backupPath,
         successMarker,
-        expectedVersion: "0.0.2",
+        expectedVersion: currentVersion,
         expectedSha512,
         logPath
       },
@@ -227,7 +266,7 @@ try {
   const afterVersion = await fileVersion(installedExecutable);
   const sentinelValue = await readFile(sentinel, "utf8");
   if (
-    afterVersion !== "0.0.2" ||
+    afterVersion !== currentVersion ||
     sentinelValue !== "preserve-index-settings-migrations"
   ) {
     throw new Error(
@@ -241,6 +280,16 @@ try {
   ) {
     throw new Error("Installed update left package, backup or preserved data behind");
   }
+  const postUpdateUtilities = (await listDotNetInstallUtilities()).filter((item) => {
+    return !baselineUtilityIds.has(Number(item.ProcessId));
+  });
+  if (postUpdateUtilities.length > 0) {
+    throw new Error(
+      `Installed update left a .NET InstallUtil child behind: ${JSON.stringify(
+        postUpdateUtilities
+      )}`
+    );
+  }
   const targetStats = await stat(installedExecutable);
   completed = true;
   console.log(
@@ -253,6 +302,7 @@ try {
         silentInstallPathPreserved: true,
         applicationDataPreservedAcrossOldUninstaller: true,
         packageAndBackupDeletedAfterStart: true,
+        unexpectedDotNetInstallUtilityProcesses: 0,
         targetBytes: targetStats.size
       },
       null,

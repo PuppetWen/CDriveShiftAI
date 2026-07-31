@@ -72,8 +72,12 @@ describe("auto-update downloader", () => {
       if (requests === 1) {
         response.writeHead(200, { "Content-Length": payload.length });
         response.flushHeaders();
-        response.write(payload.subarray(0, payload.length / 2));
-        setTimeout(() => response.socket?.destroy(), 20);
+        // Wait until Node has handed the first half to the local socket before
+        // simulating a broken connection. Destroying on a fixed short timer can
+        // race before fetch receives the headers and creates the .part file.
+        response.write(payload.subarray(0, payload.length / 2), () => {
+          setTimeout(() => response.socket?.destroy(), 50);
+        });
         return;
       }
       const match = /^bytes=(\d+)-$/.exec(String(request.headers.range ?? ""));
