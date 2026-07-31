@@ -24,6 +24,8 @@ const defaults: StoreShape = {
     minimizeToTray: true,
     globalShortcut: "CommandOrControl+Alt+Space",
     quickSearchShortcut: "CommandOrControl+Alt+F",
+    mouseQuickSearchButton: "back",
+    mouseQuickSearchHoldMs: 3_000,
     indexRoots: ["*"],
     excludedPaths: [
       "C:\\Windows\\WinSxS",
@@ -463,6 +465,16 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
       typeof input?.quickSearchShortcut === "string"
         ? input.quickSearchShortcut.trim().slice(0, 128)
         : defaults.settings.quickSearchShortcut,
+    mouseQuickSearchButton: ["disabled", "back", "forward", "middle"].includes(
+      input?.mouseQuickSearchButton ?? ""
+    )
+      ? input!.mouseQuickSearchButton!
+      : defaults.settings.mouseQuickSearchButton,
+    mouseQuickSearchHoldMs:
+      typeof input?.mouseQuickSearchHoldMs === "number" &&
+      Number.isFinite(input.mouseQuickSearchHoldMs)
+        ? Math.round(Math.min(10_000, Math.max(500, input.mouseQuickSearchHoldMs)))
+        : defaults.settings.mouseQuickSearchHoldMs,
     indexRoots: Array.isArray(input?.indexRoots) ? input.indexRoots : defaults.settings.indexRoots,
     excludedPaths: Array.isArray(input?.excludedPaths)
       ? input.excludedPaths

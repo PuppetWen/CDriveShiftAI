@@ -151,6 +151,29 @@ try {
   await wait(350);
   await capture(`cdriveshiftai-${requestedView}.png`);
 
+  if (requestedView === "settings") {
+    const updateDot = await evaluate(`(() => {
+      const button = document.querySelector(".brand-update-button");
+      if (!(button instanceof HTMLButtonElement)) return null;
+      const bounds = button.getBoundingClientRect();
+      return {
+        x: bounds.left + bounds.width / 2,
+        y: bounds.top + bounds.height / 2
+      };
+    })()`);
+    if (!updateDot) throw new Error("Brand update status dot was not rendered");
+    if (await evaluate('document.querySelector(".settings-update-dot") !== null')) {
+      throw new Error("Legacy settings update dot is still rendered");
+    }
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: updateDot.x,
+      y: updateDot.y
+    });
+    await waitFor('document.querySelector(".themed-tooltip") !== null');
+    await capture("cdriveshiftai-settings-version-tooltip.png");
+  }
+
   if (requestedView === "search") {
     await evaluate(`(() => {
       const input = document.querySelector(".search-input-wrap input");

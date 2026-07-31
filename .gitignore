@@ -4,7 +4,7 @@ dist-electron/
 release*/
 artifacts/
 .devtools/
-native/indexer/target/
+native/*/target/
 .cdriveshiftai-data/
 *.log
 .DS_Store

@@ -1,6 +1,6 @@
 {
   "name": "cdriveshiftai",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "CDriveShiftAI - AI-assisted Windows disk organizer and safe cross-drive directory migration tool",
   "main": "dist-electron/main.js",
@@ -17,12 +17,16 @@
     "build:app": "npm run build:native && npm run build:main && npm run build:web",
     "dist": "npm run prepare:electron && npm run build:app && electron-builder --win nsis",
     "dist:portable": "npm run prepare:electron && npm run build:app && electron-builder --win portable",
-    "dist:all": "npm run prepare:electron && npm run build:app && electron-builder --win nsis portable",
+    "dist:all": "npm run prepare:electron && npm run build:app && electron-builder --win nsis portable && node scripts/create-update-manifest.mjs",
     "test": "vitest run",
     "test:indexer": "node scripts/smoke-indexer.mjs",
     "test:index-cache": "node scripts/smoke-index-cache-restart.mjs",
     "test:packaged-index-cache": "node scripts/smoke-packaged-index-cache.mjs",
     "test:background-cpu": "node scripts/smoke-background-cpu.mjs",
+    "test:auto-update": "node scripts/smoke-auto-update.mjs",
+    "test:auto-update-rejection": "node scripts/smoke-auto-update.mjs --tamper",
+    "test:auto-update-rollback": "node scripts/smoke-auto-update.mjs --invalid-start",
+    "test:installed-update": "node scripts/smoke-installed-update.mjs",
     "test:portable": "node scripts/smoke-portable-distribution.mjs",
     "test:ownership-map": "npm run build:main && node scripts/smoke-ownership-map.mjs",
     "test:ownership-state": "node scripts/smoke-ownership-persistence.mjs",
@@ -68,6 +72,10 @@
       {
         "from": "native/indexer/target/release/cshift-indexer.exe",
         "to": "bin/cshift-indexer.exe"
+      },
+      {
+        "from": "native/updater/target/release/cshift-updater.exe",
+        "to": "bin/cshift-updater.exe"
       },
       {
         "from": "build/icon.png",

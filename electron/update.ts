@@ -1,8 +1,40 @@
 import { app } from "electron";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  access,
+  copyFile,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile
+} from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import path from "node:path";
 
 const RELEASE_API =
   "https://api.github.com/repos/PuppetWen/CDriveShiftAI/releases/latest";
 const CACHE_DURATION_MS = 15 * 60_000;
+const DOWNLOAD_RETRIES = 3;
+const MANIFEST_NAME = "update-manifest.json";
+
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "current"
+  | "available"
+  | "downloading"
+  | "verifying"
+  | "ready"
+  | "installing"
+  | "cancelled"
+  | "error"
+  | "unavailable";
+
+export type UpdateDistribution = "installed" | "portable" | "development";
 
 export interface AppUpdateAsset {
   name: string;
@@ -10,17 +42,32 @@ export interface AppUpdateAsset {
   downloadUrl: string;
 }
 
+export interface AppUpdateProgress {
+  transferred: number;
+  total: number;
+  percent: number;
+  bytesPerSecond: number;
+  retryAttempt: number;
+  maxRetries: number;
+}
+
 export interface AppUpdateInfo {
   status: "current" | "available" | "unavailable";
+  phase: UpdatePhase;
+  distribution: UpdateDistribution;
   currentVersion: string;
   latestVersion?: string;
   updateAvailable: boolean;
+  canAutoUpdate: boolean;
   releaseName?: string;
   releaseUrl?: string;
   publishedAt?: string;
   assets: AppUpdateAsset[];
+  selectedAsset?: AppUpdateAsset;
+  progress?: AppUpdateProgress;
   message: string;
   checkedAt: string;
+  errorCode?: string;
 }
 
 interface GitHubRelease {
@@ -37,7 +84,35 @@ interface GitHubRelease {
   }>;
 }
 
-let cached: { at: number; result: AppUpdateInfo } | undefined;
+interface ManifestAsset {
+  name: string;
+  size: number;
+  sha512: string;
+}
+
+interface UpdateManifest {
+  schemaVersion: 1;
+  version: string;
+  assets: {
+    installer: ManifestAsset;
+    portable: ManifestAsset;
+  };
+}
+
+interface UpdatePlan {
+  schemaVersion: 1;
+  mode: "installed" | "portable";
+  parentPid: number;
+  packagePath: string;
+  targetPath: string;
+  installedDir?: string;
+  stagingDir: string;
+  backupPath: string;
+  successMarker: string;
+  expectedVersion: string;
+  expectedSha512: string;
+  logPath: string;
+}
 
 function versionParts(value: string): number[] {
   return value
@@ -58,41 +133,158 @@ function compareVersions(first: string, second: string): number {
   return 0;
 }
 
-export async function checkForUpdates(force = false): Promise<AppUpdateInfo> {
-  const now = Date.now();
-  if (!force && cached && now - cached.at < CACHE_DURATION_MS) {
-    return structuredClone(cached.result);
+function updateDistribution(): UpdateDistribution {
+  if (!app.isPackaged) return "development";
+  return process.env.PORTABLE_EXECUTABLE_FILE ? "portable" : "installed";
+}
+
+function distributionExecutable(): string {
+  return path.resolve(process.env.PORTABLE_EXECUTABLE_FILE || process.execPath);
+}
+
+function updateStagingDirectory(version: string): string {
+  const executable = distributionExecutable();
+  const mode = updateDistribution();
+  const parent =
+    mode === "installed"
+      ? path.dirname(path.dirname(executable))
+      : path.dirname(executable);
+  return path.join(parent, ".cdriveshiftai-update", version);
+}
+
+function clone<T>(value: T): T {
+  return structuredClone(value);
+}
+
+async function exists(candidate: string): Promise<boolean> {
+  try {
+    await access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function sha512(candidate: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const digest = createHash("sha512");
+    const stream = createReadStream(candidate);
+    stream.on("data", (chunk) => digest.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(digest.digest("hex")));
+  });
+}
+
+function githubHeaders(version: string): Record<string, string> {
+  return {
+    Accept: "application/vnd.github+json",
+    "User-Agent": `CDriveShiftAI/${version}`,
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true }
+    );
+  });
+}
+
+function safeManifest(value: unknown): UpdateManifest | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Partial<UpdateManifest>;
+  if (
+    input.schemaVersion !== 1 ||
+    typeof input.version !== "string" ||
+    !input.assets
+  ) {
+    return undefined;
+  }
+  const validAsset = (asset: ManifestAsset | undefined) =>
+    asset &&
+    typeof asset.name === "string" &&
+    path.basename(asset.name) === asset.name &&
+    !/[\u0000-\u001f]/.test(asset.name) &&
+    Number.isSafeInteger(asset.size) &&
+    asset.size > 0 &&
+    typeof asset.sha512 === "string" &&
+    /^[a-f0-9]{128}$/i.test(asset.sha512);
+  if (!validAsset(input.assets.installer) || !validAsset(input.assets.portable)) {
+    return undefined;
+  }
+  return input as UpdateManifest;
+}
+
+export class UpdateService {
+  private cached?: { at: number; result: AppUpdateInfo };
+  private state: AppUpdateInfo;
+  private manifest?: UpdateManifest;
+  private abortController?: AbortController;
+  private lastProgressAt = 0;
+
+  constructor(
+    private readonly onState: (state: AppUpdateInfo) => void,
+    private readonly canInstall: () => Promise<void>
+  ) {
+    const currentVersion = app.getVersion();
+    this.state = {
+      status: "current",
+      phase: "idle",
+      distribution: updateDistribution(),
+      currentVersion,
+      updateAvailable: false,
+      canAutoUpdate: false,
+      assets: [],
+      message: "尚未检查更新",
+      checkedAt: new Date(0).toISOString()
+    };
   }
 
-  const currentVersion = app.getVersion();
-  const checkedAt = new Date().toISOString();
-  try {
-    const response = await fetch(RELEASE_API, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": `CDriveShiftAI/${currentVersion}`,
-        "X-GitHub-Api-Version": "2022-11-28"
-      },
-      signal: AbortSignal.timeout(6_000)
+  getState(): AppUpdateInfo {
+    return clone(this.state);
+  }
+
+  private setState(patch: Partial<AppUpdateInfo>): AppUpdateInfo {
+    this.state = { ...this.state, ...patch };
+    const result = this.getState();
+    this.onState(result);
+    return result;
+  }
+
+  async check(force = false): Promise<AppUpdateInfo> {
+    const now = Date.now();
+    if (!force && this.cached && now - this.cached.at < CACHE_DURATION_MS) {
+      this.state = clone(this.cached.result);
+      return this.getState();
+    }
+
+    const currentVersion = app.getVersion();
+    const checkedAt = new Date().toISOString();
+    this.setState({
+      phase: "checking",
+      message: "正在检查 GitHub Release…",
+      errorCode: undefined
     });
-    if (!response.ok) {
-      throw new Error(`GitHub Release 返回 HTTP ${response.status}`);
-    }
-    const release = (await response.json()) as GitHubRelease;
-    if (release.draft || release.prerelease || !release.tag_name) {
-      throw new Error("尚未找到可用的正式版本");
-    }
-    const latestVersion = release.tag_name.replace(/^v/i, "");
-    const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
-    const result: AppUpdateInfo = {
-      status: updateAvailable ? "available" : "current",
-      currentVersion,
-      latestVersion,
-      updateAvailable,
-      releaseName: release.name || `CDriveShiftAI ${latestVersion}`,
-      releaseUrl: release.html_url,
-      publishedAt: release.published_at,
-      assets: (release.assets ?? [])
+    try {
+      const response = await fetch(RELEASE_API, {
+        headers: githubHeaders(currentVersion),
+        signal: AbortSignal.timeout(10_000)
+      });
+      if (!response.ok) {
+        throw new Error(`GitHub Release 返回 HTTP ${response.status}`);
+      }
+      const release = (await response.json()) as GitHubRelease;
+      if (release.draft || release.prerelease || !release.tag_name) {
+        throw new Error("尚未找到可用的正式版本");
+      }
+      const assets = (release.assets ?? [])
         .filter(
           (asset) =>
             typeof asset.name === "string" &&
@@ -102,24 +294,388 @@ export async function checkForUpdates(force = false): Promise<AppUpdateInfo> {
           name: asset.name!,
           size: Number(asset.size) || 0,
           downloadUrl: asset.browser_download_url!
-        })),
-      message: updateAvailable
-        ? `发现新版本 ${latestVersion}`
-        : `当前已是最新版本 ${currentVersion}`,
-      checkedAt
+        }));
+      const latestVersion = release.tag_name.replace(/^v/i, "");
+      if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(latestVersion)) {
+        throw new Error("Release 版本号格式无效");
+      }
+      const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+      const manifestReleaseAsset = assets.find(
+        (asset) => asset.name.toLocaleLowerCase() === MANIFEST_NAME
+      );
+      let manifest: UpdateManifest | undefined;
+      if (updateAvailable && manifestReleaseAsset) {
+        const manifestResponse = await fetch(manifestReleaseAsset.downloadUrl, {
+          headers: githubHeaders(currentVersion),
+          signal: AbortSignal.timeout(10_000)
+        });
+        if (manifestResponse.ok) {
+          manifest = safeManifest(await manifestResponse.json());
+        }
+      }
+      if (manifest && manifest.version !== latestVersion) manifest = undefined;
+      const distribution = updateDistribution();
+      const manifestAsset =
+        distribution === "portable"
+          ? manifest?.assets.portable
+          : manifest?.assets.installer;
+      const selectedAsset = manifestAsset
+        ? assets.find((asset) => asset.name === manifestAsset.name)
+        : undefined;
+      const canAutoUpdate =
+        updateAvailable &&
+        app.isPackaged &&
+        distribution !== "development" &&
+        Boolean(manifest && manifestAsset && selectedAsset);
+      this.manifest = manifest;
+      const result: AppUpdateInfo = {
+        status: updateAvailable ? "available" : "current",
+        phase: updateAvailable ? "available" : "current",
+        distribution,
+        currentVersion,
+        latestVersion,
+        updateAvailable,
+        canAutoUpdate,
+        releaseName: release.name || `CDriveShiftAI ${latestVersion}`,
+        releaseUrl: release.html_url,
+        publishedAt: release.published_at,
+        assets,
+        selectedAsset,
+        message: updateAvailable
+          ? canAutoUpdate
+            ? `发现新版本 ${latestVersion}，可自动下载并更新`
+            : `发现新版本 ${latestVersion}，但该 Release 缺少自动更新清单`
+          : `当前已是最新版本 ${currentVersion}`,
+        checkedAt
+      };
+      this.state = result;
+      this.cached = { at: now, result: clone(result) };
+      this.onState(this.getState());
+      return this.getState();
+    } catch (error) {
+      return this.setState({
+        status: "unavailable",
+        phase: "unavailable",
+        currentVersion,
+        updateAvailable: false,
+        canAutoUpdate: false,
+        assets: [],
+        selectedAsset: undefined,
+        progress: undefined,
+        message: `暂时无法检查更新：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        checkedAt,
+        errorCode: "CHECK_FAILED"
+      });
+    }
+  }
+
+  cancel(): AppUpdateInfo {
+    this.abortController?.abort(new Error("用户已取消下载"));
+    return this.setState({
+      phase: "cancelled",
+      message: "已暂停更新；下次继续时会从已下载位置续传",
+      errorCode: undefined
+    });
+  }
+
+  async downloadAndInstall(): Promise<AppUpdateInfo> {
+    try {
+      return await this.performDownloadAndInstall();
+    } catch (error) {
+      if (this.abortController?.signal.aborted) {
+        return this.setState({
+          phase: "cancelled",
+          message: "已暂停更新；下次继续时会从已下载位置续传",
+          errorCode: undefined
+        });
+      }
+      return this.setState({
+        phase: "error",
+        message: `自动更新未完成：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        errorCode: "UPDATE_FAILED"
+      });
+    } finally {
+      this.abortController = undefined;
+    }
+  }
+
+  private async performDownloadAndInstall(): Promise<AppUpdateInfo> {
+    if (this.state.phase === "downloading" || this.state.phase === "verifying") {
+      return this.getState();
+    }
+    if (!this.state.updateAvailable || !this.state.canAutoUpdate) {
+      const checked = await this.check(true);
+      if (!checked.updateAvailable || !checked.canAutoUpdate) return checked;
+    }
+    await this.canInstall();
+    const distribution = updateDistribution();
+    const manifestAsset =
+      distribution === "portable"
+        ? this.manifest?.assets.portable
+        : this.manifest?.assets.installer;
+    const selectedAsset = this.state.selectedAsset;
+    const latestVersion = this.state.latestVersion;
+    if (!manifestAsset || !selectedAsset || !latestVersion) {
+      throw new Error("Release 自动更新资产不完整");
+    }
+    const controller = new AbortController();
+    this.abortController = controller;
+    const stagingDir = updateStagingDirectory(latestVersion);
+    await mkdir(stagingDir, { recursive: true });
+    const partialPath = path.join(stagingDir, `${manifestAsset.name}.part`);
+    const packagePath = path.join(stagingDir, manifestAsset.name);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= DOWNLOAD_RETRIES; attempt += 1) {
+      try {
+        await this.downloadAttempt(
+          selectedAsset.downloadUrl,
+          partialPath,
+          manifestAsset.size,
+          attempt,
+          controller.signal
+        );
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (controller.signal.aborted) throw error;
+        if (attempt < DOWNLOAD_RETRIES) {
+          this.setState({
+            phase: "downloading",
+            message: `下载中断，${Math.min(2 ** (attempt - 1), 4)} 秒后进行第 ${
+              attempt + 1
+            } 次尝试…`
+          });
+          await delay(Math.min(2 ** (attempt - 1), 4) * 1_000, controller.signal);
+        }
+      }
+    }
+    if (lastError) {
+      return this.setState({
+        phase: "error",
+        message: `更新包下载失败：${
+          lastError instanceof Error ? lastError.message : String(lastError)
+        }`,
+        errorCode: "DOWNLOAD_FAILED"
+      });
+    }
+
+    this.setState({
+      phase: "verifying",
+      message: "正在校验更新包完整性与 SHA-512…",
+      progress: {
+        transferred: manifestAsset.size,
+        total: manifestAsset.size,
+        percent: 100,
+        bytesPerSecond: 0,
+        retryAttempt: this.state.progress?.retryAttempt ?? 1,
+        maxRetries: DOWNLOAD_RETRIES
+      }
+    });
+    const partialStats = await stat(partialPath);
+    const actualDigest = await sha512(partialPath);
+    if (
+      partialStats.size !== manifestAsset.size ||
+      actualDigest.toLocaleLowerCase() !== manifestAsset.sha512.toLocaleLowerCase()
+    ) {
+      await rm(partialPath, { force: true });
+      return this.setState({
+        phase: "error",
+        message: "更新包校验失败，已拒绝安装并删除损坏文件",
+        errorCode: "CHECKSUM_MISMATCH"
+      });
+    }
+    await rm(packagePath, { force: true });
+    await rename(partialPath, packagePath);
+    this.setState({
+      phase: "ready",
+      message: "更新包校验通过，正在准备安全替换…",
+      errorCode: undefined
+    });
+    return this.install(packagePath, manifestAsset);
+  }
+
+  private async downloadAttempt(
+    url: string,
+    partialPath: string,
+    total: number,
+    attempt: number,
+    signal: AbortSignal
+  ): Promise<void> {
+    let transferred = 0;
+    if (await exists(partialPath)) {
+      transferred = (await stat(partialPath)).size;
+      if (transferred > total) {
+        await rm(partialPath, { force: true });
+        transferred = 0;
+      }
+    }
+    const headers: Record<string, string> = githubHeaders(app.getVersion());
+    if (transferred > 0) headers.Range = `bytes=${transferred}-`;
+    const response = await fetch(url, { headers, signal, redirect: "follow" });
+    if (response.status === 416 && transferred === total) return;
+    if (!response.ok && response.status !== 206) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    if (transferred > 0 && response.status !== 206) {
+      await rm(partialPath, { force: true });
+      transferred = 0;
+    }
+    if (!response.body) throw new Error("下载响应没有数据流");
+    const file = await open(partialPath, transferred > 0 ? "a" : "w");
+    const reader = response.body.getReader();
+    const startedAt = Date.now();
+    const startedBytes = transferred;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (signal.aborted) throw signal.reason;
+        await file.write(value);
+        transferred += value.byteLength;
+        const now = Date.now();
+        if (now - this.lastProgressAt >= 120 || transferred >= total) {
+          this.lastProgressAt = now;
+          const elapsed = Math.max(0.25, (now - startedAt) / 1_000);
+          this.setState({
+            phase: "downloading",
+            message:
+              attempt > 1
+                ? `正在断点续传（第 ${attempt}/${DOWNLOAD_RETRIES} 次尝试）`
+                : "正在下载更新包…",
+            progress: {
+              transferred,
+              total,
+              percent: Math.min(100, (transferred / total) * 100),
+              bytesPerSecond: Math.max(0, (transferred - startedBytes) / elapsed),
+              retryAttempt: attempt,
+              maxRetries: DOWNLOAD_RETRIES
+            },
+            errorCode: undefined
+          });
+        }
+      }
+    } finally {
+      await file.close();
+    }
+    if (transferred !== total) {
+      throw new Error(`文件大小不完整（${transferred}/${total} 字节）`);
+    }
+  }
+
+  private async install(
+    packagePath: string,
+    manifestAsset: ManifestAsset
+  ): Promise<AppUpdateInfo> {
+    await this.canInstall();
+    const distribution = updateDistribution();
+    if (distribution === "development") {
+      throw new Error("开发模式不能执行自更新");
+    }
+    const targetPath = distributionExecutable();
+    const stagingDir = path.dirname(packagePath);
+    const helperSource = path.join(
+      process.resourcesPath,
+      "bin",
+      "cshift-updater.exe"
+    );
+    if (!(await exists(helperSource))) {
+      throw new Error("更新助手缺失，已保留下载包但不会执行替换");
+    }
+    const helperPath = path.join(stagingDir, "cshift-updater.exe");
+    await copyFile(helperSource, helperPath);
+    const plan: UpdatePlan = {
+      schemaVersion: 1,
+      mode: distribution,
+      parentPid: process.pid,
+      packagePath,
+      targetPath:
+        distribution === "installed"
+          ? path.join(path.dirname(targetPath), "CDriveShiftAI.exe")
+          : targetPath,
+      installedDir: distribution === "installed" ? path.dirname(targetPath) : undefined,
+      stagingDir,
+      backupPath: path.join(
+        stagingDir,
+        distribution === "installed" ? "previous-version" : "previous-version.exe"
+      ),
+      successMarker: path.join(stagingDir, "update-success.json"),
+      expectedVersion: this.state.latestVersion!,
+      expectedSha512: manifestAsset.sha512,
+      logPath: path.join(stagingDir, "update.log")
     };
-    cached = { at: now, result };
-    return structuredClone(result);
-  } catch (error) {
-    return {
-      status: "unavailable",
-      currentVersion,
-      updateAvailable: false,
-      assets: [],
-      message: `暂时无法检查更新：${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      checkedAt
+    const planPath = path.join(stagingDir, "update-plan.json");
+    await writeFile(planPath, JSON.stringify(plan, null, 2), "utf8");
+    this.setState({
+      phase: "installing",
+      message:
+        distribution === "installed"
+          ? "即将退出并静默安装；失败时会自动恢复旧版本"
+          : "即将退出并在原路径替换便携版；失败时会自动恢复旧文件"
+    });
+    const child = spawn(helperPath, ["--plan", planPath], {
+      detached: true,
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+    child.unref();
+    setTimeout(() => app.quit(), 180);
+    return this.getState();
+  }
+}
+
+function safeUpdateStaging(candidate: string): boolean {
+  const resolved = path.resolve(candidate);
+  return resolved
+    .split(path.sep)
+    .some((segment) => segment.toLocaleLowerCase() === ".cdriveshiftai-update");
+}
+
+export async function completePendingUpdate(): Promise<void> {
+  const markerIndex = process.argv.indexOf("--update-staging");
+  if (markerIndex < 0) return;
+  const stagingDir = process.argv[markerIndex + 1];
+  if (!stagingDir || !safeUpdateStaging(stagingDir)) return;
+  try {
+    const plan = JSON.parse(
+      await readFile(path.join(stagingDir, "update-plan.json"), "utf8")
+    ) as UpdatePlan;
+    if (
+      plan.schemaVersion !== 1 ||
+      path.resolve(plan.stagingDir) !== path.resolve(stagingDir) ||
+      plan.expectedVersion !== app.getVersion()
+    ) {
+      return;
+    }
+    await writeFile(
+      plan.successMarker,
+      JSON.stringify({
+        version: app.getVersion(),
+        startedAt: new Date().toISOString(),
+        pid: process.pid
+      }),
+      "utf8"
+    );
+    const cleanup = async (remaining = 20): Promise<void> => {
+      try {
+        await rm(stagingDir, { recursive: true, force: true });
+      } catch {
+        if (remaining > 0) {
+          setTimeout(() => void cleanup(remaining - 1), 1_500);
+        }
+      }
     };
+    setTimeout(() => void cleanup(), 3_000);
+  } catch {
+    // The helper treats a missing success marker as a failed update and
+    // restores the previous executable/application directory.
   }
 }

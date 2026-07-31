@@ -287,6 +287,8 @@ export interface AppSettings {
   minimizeToTray: boolean;
   globalShortcut: string;
   quickSearchShortcut: string;
+  mouseQuickSearchButton: MouseShortcutButton;
+  mouseQuickSearchHoldMs: number;
   indexRoots: string[];
   excludedPaths: string[];
   ai: {
@@ -299,6 +301,15 @@ export interface AppSettings {
     privacyMode: "metadata-only" | "allow-samples";
     verifiedAt?: string;
   };
+}
+
+export type MouseShortcutButton = "disabled" | "back" | "forward" | "middle";
+
+export interface MouseShortcutStatus {
+  available: boolean;
+  button: MouseShortcutButton;
+  holdMs: number;
+  message: string;
 }
 
 export type ShortcutTarget = "main" | "quick-search";

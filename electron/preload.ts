@@ -4,17 +4,23 @@ import type {
   IndexerStatus,
   MigrationRecord
 } from "./types";
+import type { AppUpdateInfo } from "./update";
 
 contextBridge.exposeInMainWorld("cDriveShiftAI", {
   getOverview: () => ipcRenderer.invoke("system:overview"),
   checkForUpdates: (force?: boolean) =>
     ipcRenderer.invoke("app:update-check", force === true),
+  getUpdateState: () => ipcRenderer.invoke("app:update-state"),
+  startUpdate: () => ipcRenderer.invoke("app:update-start"),
+  cancelUpdate: () => ipcRenderer.invoke("app:update-cancel"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateSettings: (patch: unknown) => ipcRenderer.invoke("settings:update", patch),
   checkGlobalShortcut: (shortcut: string, target: string) =>
     ipcRenderer.invoke("shortcut:check", shortcut, target),
   testGlobalShortcut: (target: string) =>
     ipcRenderer.invoke("shortcut:test", target),
+  getMouseShortcutStatus: () => ipcRenderer.invoke("shortcut:mouse-status"),
+  testMouseShortcut: () => ipcRenderer.invoke("shortcut:mouse-test"),
   listAiModels: (input: unknown) => ipcRenderer.invoke("ai:list-models", input),
   testAiConnection: (input: unknown) => ipcRenderer.invoke("ai:test", input),
   saveAiDraft: (input: unknown) => ipcRenderer.invoke("ai:save-draft", input),
@@ -123,5 +129,11 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
       listener(settings);
     ipcRenderer.on("settings:changed", handler);
     return () => ipcRenderer.removeListener("settings:changed", handler);
+  },
+  onUpdateStatus: (listener: (status: AppUpdateInfo) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: AppUpdateInfo) =>
+      listener(status);
+    ipcRenderer.on("app:update-status", handler);
+    return () => ipcRenderer.removeListener("app:update-status", handler);
   }
 });

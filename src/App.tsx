@@ -151,12 +151,14 @@ export default function App() {
       }
     });
     const offSettings = api.onSettingsChanged(setSettings);
+    const offUpdate = api.onUpdateStatus(setUpdateInfo);
     void api.checkForUpdates().then(setUpdateInfo).catch(() => undefined);
     return () => {
       offIndexer();
       offMigration();
       offNavigation();
       offSettings();
+      offUpdate();
     };
   }, [notify]);
 
@@ -322,7 +324,7 @@ export default function App() {
         indexer={indexer}
         collapsed={sidebarCollapsed}
         onToggle={toggleSidebar}
-        updateAvailable={updateInfo?.updateAvailable === true}
+        updateInfo={updateInfo}
       />
       <main className="main-stage">
         <div className="topbar">

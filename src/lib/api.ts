@@ -64,6 +64,8 @@ const mockSettings: AppSettings = {
   minimizeToTray: true,
   globalShortcut: "CommandOrControl+Alt+Space",
   quickSearchShortcut: "CommandOrControl+Alt+F",
+  mouseQuickSearchButton: "back",
+  mouseQuickSearchHoldMs: 3_000,
   indexRoots: ["*"],
   excludedPaths: ["C:\\Windows\\WinSxS", "C:\\System Volume Information"],
   ai: {
@@ -195,17 +197,59 @@ const browserFallback: CDriveShiftApi = {
     return mockOverview;
   },
   async checkForUpdates() {
+    if (new URLSearchParams(window.location.search).has("update-demo")) {
+      return {
+        status: "available",
+        phase: "downloading",
+        distribution: "portable",
+        currentVersion: "0.0.1",
+        latestVersion: "0.0.2",
+        updateAvailable: true,
+        canAutoUpdate: true,
+        releaseName: "CDriveShiftAI 0.0.2",
+        releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
+        publishedAt: new Date().toISOString(),
+        assets: [],
+        selectedAsset: {
+          name: "CDriveShiftAI-x64-portable.exe",
+          size: 104_053_922,
+          downloadUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest"
+        },
+        progress: {
+          transferred: 67_634_688,
+          total: 104_053_922,
+          percent: 64.9996,
+          bytesPerSecond: 7_864_320,
+          retryAttempt: 1,
+          maxRetries: 3
+        },
+        message: "正在下载更新包…",
+        checkedAt: new Date().toISOString()
+      } as const;
+    }
     return {
       status: "current",
-      currentVersion: "0.0.1",
-      latestVersion: "0.0.1",
+      phase: "current",
+      distribution: "development",
+      currentVersion: "0.0.2",
+      latestVersion: "0.0.2",
       updateAvailable: false,
-      releaseName: "CDriveShiftAI 0.0.1",
+      canAutoUpdate: false,
+      releaseName: "CDriveShiftAI 0.0.2",
       releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
       assets: [],
-      message: "当前已是最新版本 0.0.1",
+      message: "当前已是最新版本 0.0.2",
       checkedAt: new Date().toISOString()
-    };
+    } as const;
+  },
+  async getUpdateState() {
+    return this.checkForUpdates();
+  },
+  async startUpdate() {
+    return this.checkForUpdates();
+  },
+  async cancelUpdate() {
+    return this.checkForUpdates();
   },
   async getSettings() {
     return mockSettings;
@@ -252,6 +296,20 @@ const browserFallback: CDriveShiftApi = {
     };
   },
   async testGlobalShortcut() {
+    return true;
+  },
+  async getMouseShortcutStatus() {
+    return {
+      available: true,
+      button: mockSettings.mouseQuickSearchButton,
+      holdMs: mockSettings.mouseQuickSearchHoldMs,
+      message:
+        mockSettings.mouseQuickSearchButton === "disabled"
+          ? "鼠标快捷操作已关闭"
+          : "全局鼠标监听可用；短按不会被拦截"
+    };
+  },
+  async testMouseShortcut() {
     return true;
   },
   async listAiModels(input) {
@@ -643,7 +701,8 @@ const browserFallback: CDriveShiftApi = {
     return () => mockMigrationListeners.delete(listener);
   },
   onAppNavigation: () => () => undefined,
-  onSettingsChanged: () => () => undefined
+  onSettingsChanged: () => () => undefined,
+  onUpdateStatus: () => () => undefined
 };
 
 export const api: CDriveShiftApi = window.cDriveShiftAI ?? browserFallback;

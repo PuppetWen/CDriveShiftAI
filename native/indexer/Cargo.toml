@@ -1,6 +1,6 @@
 [package]
 name = "cshift-indexer"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "First-party NTFS MFT indexer for CDriveShiftAI"
 
@@ -15,8 +15,12 @@ regex = "1.11.1"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52.0", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
-  "Win32_System_Threading"
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_UI_Input",
+  "Win32_UI_WindowsAndMessaging"
 ] }
