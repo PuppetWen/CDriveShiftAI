@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  crashReporter,
   dialog,
   globalShortcut,
   ipcMain,
@@ -15,7 +16,8 @@ import {
 } from "electron";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, cp, lstat, readlink, rename, stat } from "node:fs/promises";
+import { access, cp, lstat, readlink, rename, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { analyzeLocally, scanOwnershipMap, summarizeDirectory } from "./analyzer";
@@ -27,6 +29,13 @@ import {
   type ResolvedAiConnection
 } from "./ai-client";
 import { configureApplicationDataPaths } from "./data-root";
+import { createDiagnosticReport } from "./diagnostics";
+import {
+  configureLogger,
+  getLogDirectory,
+  logger,
+  serializeError
+} from "./logger";
 import { MigrationService } from "./migration";
 import { SearchService } from "./search";
 import { AppStore } from "./store";
@@ -61,7 +70,25 @@ import type {
   WindowLayoutBounds
 } from "./types";
 
-configureApplicationDataPaths();
+const applicationDataRoot = configureApplicationDataPaths();
+configureLogger(applicationDataRoot);
+crashReporter.start({ uploadToServer: false, compress: false });
+
+process.on("uncaughtException", (error) => {
+  const details = serializeError(error);
+  logger.error("process.uncaught_exception", { error: details, isQuitting });
+  if ((error as NodeJS.ErrnoException).code === "EPIPE" || isQuitting) return;
+  if (app.isReady()) {
+    dialog.showErrorBox(
+      "CDriveShiftAI 运行错误",
+      `程序已记录错误。请在设置中导出诊断报告，或打开日志目录后将最新日志发给开发者。\n\n${error.message}`
+    );
+  }
+});
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("process.unhandled_rejection", { error: serializeError(reason) });
+});
 
 let mainWindow: BrowserWindow | undefined;
 let quickSearchWindow: BrowserWindow | undefined;
@@ -94,6 +121,19 @@ function trackWindowActivity(window: BrowserWindow): void {
   window.on("minimize", sync);
   window.on("restore", sync);
   window.on("closed", sync);
+  window.on("unresponsive", () => {
+    logger.warn("window.unresponsive", {
+      title: window.getTitle(),
+      url: window.webContents.getURL()
+    });
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    logger.error("renderer.gone", {
+      title: window.getTitle(),
+      reason: details.reason,
+      exitCode: details.exitCode
+    });
+  });
 }
 
 const effectColors: Record<
@@ -948,6 +988,45 @@ function registerIpc(): void {
   ipcMain.handle("app:update-state", () => updateService?.getState());
   ipcMain.handle("app:update-start", () => updateService?.downloadAndInstall());
   ipcMain.handle("app:update-cancel", () => updateService?.cancel());
+  ipcMain.handle("diagnostics:open-logs", async () => {
+    const result = await shell.openPath(getLogDirectory());
+    if (result) throw new Error(`无法打开日志目录：${result}`);
+  });
+  ipcMain.handle("diagnostics:export", async () => {
+    const now = new Date();
+    const stamp = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0"),
+      "-",
+      String(now.getHours()).padStart(2, "0"),
+      String(now.getMinutes()).padStart(2, "0"),
+      String(now.getSeconds()).padStart(2, "0")
+    ].join("");
+    const options = {
+      title: "导出 CDriveShiftAI 诊断报告",
+      defaultPath: path.join(
+        path.dirname(process.execPath),
+        `CDriveShiftAI-diagnostics-${stamp}.json`
+      ),
+      filters: [{ name: "JSON 诊断报告", extensions: ["json"] }]
+    };
+    const selected = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showSaveDialog(mainWindow, options)
+      : await dialog.showSaveDialog(options);
+    if (selected.canceled || !selected.filePath) return { cancelled: true };
+    const report = await createDiagnosticReport({
+      applicationDataRoot,
+      logDirectory: getLogDirectory(),
+      settings: store.getSettings(),
+      update: updateService?.getState(),
+      indexer: searchService?.getStatus(),
+      migrations: store.listMigrations()
+    });
+    await writeFile(selected.filePath, report, { encoding: "utf8", mode: 0o600 });
+    logger.info("diagnostics.exported", { reportPath: selected.filePath });
+    return { cancelled: false, path: selected.filePath };
+  });
   ipcMain.handle("settings:update", async (_event, patch: unknown) => {
     if (!patch || typeof patch !== "object") throw new Error("设置内容无效");
     const { ai: _ignoredAi, apiKey: _ignoredApiKey, ...safePatch } = patch as Record<
@@ -1645,6 +1724,18 @@ if (!singleInstance) {
   app.quit();
 } else if (uninstallRestoreMode) {
   app.whenReady().then(async () => {
+    logger.info("application.ready", {
+      version: app.getVersion(),
+      packaged: app.isPackaged,
+      execPath: process.execPath,
+      resourcesPath: process.resourcesPath,
+      dataRoot: applicationDataRoot,
+      platform: process.platform,
+      architecture: process.arch,
+      osRelease: os.release(),
+      logicalCpuCount: os.cpus().length,
+      totalMemoryBytes: os.totalmem()
+    });
     await store.init();
     applyNativeEffect(store.getSettings().effectMode);
     migrationService = new MigrationService(store, () => undefined);
@@ -1660,6 +1751,18 @@ if (!singleInstance) {
   });
 
   app.whenReady().then(async () => {
+    logger.info("application.ready", {
+      version: app.getVersion(),
+      packaged: app.isPackaged,
+      execPath: process.execPath,
+      resourcesPath: process.resourcesPath,
+      dataRoot: applicationDataRoot,
+      platform: process.platform,
+      architecture: process.arch,
+      osRelease: os.release(),
+      logicalCpuCount: os.cpus().length,
+      totalMemoryBytes: os.totalmem()
+    });
     await store.init();
     applyNativeEffect(store.getSettings().effectMode);
     mainWindow = createWindow();
@@ -1751,6 +1854,10 @@ app.on("before-quit", (event) => {
   isQuitting = true;
   if (shutdownComplete) return;
   event.preventDefault();
+  logger.info("application.shutdown_started", {
+    hasIndexer: searchService != null,
+    pendingWindows: BrowserWindow.getAllWindows().length
+  });
   globalShortcut.unregisterAll();
   tray?.destroy();
   tray = undefined;
@@ -1760,8 +1867,19 @@ app.on("before-quit", (event) => {
         await searchService?.stop();
       } finally {
         shutdownComplete = true;
+        logger.info("application.shutdown_completed");
         app.quit();
       }
     })();
   }
+});
+
+app.on("child-process-gone", (_event, details) => {
+  logger.warn("application.child_process_gone", {
+    type: details.type,
+    reason: details.reason,
+    exitCode: details.exitCode,
+    name: details.name,
+    serviceName: details.serviceName
+  });
 });

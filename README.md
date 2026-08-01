@@ -12,7 +12,7 @@ CDriveShiftAI 是一个 Windows 桌面端磁盘整理工具，用于：
 
 当前版本完全使用自研索引管线，不调用 Everything。
 
-当前正式版本：`0.0.3`。安装包与便携包见
+当前正式版本：`0.0.4`。安装包与便携包见
 [GitHub Releases](https://github.com/PuppetWen/CDriveShiftAI/releases)。
 
 ## 已实现能力

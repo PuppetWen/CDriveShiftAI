@@ -4485,6 +4485,47 @@ input:checked + .toggle::after { transform: translateX(13px); }
 @keyframes update-card-scan {
   50%, 100% { transform: translateX(100%); }
 }
+.diagnostic-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 11px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * .7);
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+.diagnostic-actions.has-error {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+}
+.diagnostic-actions > span {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.diagnostic-actions > span strong { font-size: 10px; }
+.diagnostic-actions > span small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diagnostic-actions button { white-space: nowrap; }
+:root[data-effect="aurora"] .diagnostic-actions {
+  border-width: 2px;
+  border-radius: 3px;
+  box-shadow: 3px 3px 0 color-mix(in srgb, #061316 42%, transparent);
+}
+:root[data-effect="matrix"] .diagnostic-actions {
+  box-shadow: inset 0 0 26px rgba(52, 195, 255, .035);
+}
+:root[data-effect="calm"] .diagnostic-actions {
+  box-shadow: 0 10px 28px rgba(49, 75, 88, .05);
+}
 .effect-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .effect-card { display: flex; align-items: center; gap: 11px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: color-mix(in srgb, var(--bg) 20%, transparent); padding: 9px; cursor: pointer; text-align: left; transition: transform 160ms ease, border-color 160ms ease, background 160ms ease; }
 .effect-card:hover { border-color: var(--border-strong); background: color-mix(in srgb, var(--surface-hover) 74%, transparent); transform: translateY(-1px); }
