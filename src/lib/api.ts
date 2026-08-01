@@ -203,10 +203,10 @@ const browserFallback: CDriveShiftApi = {
         phase: "downloading",
         distribution: "portable",
         currentVersion: "0.0.2",
-        latestVersion: "0.0.3",
+        latestVersion: "0.0.4",
         updateAvailable: true,
         canAutoUpdate: true,
-        releaseName: "CDriveShiftAI 0.0.3",
+        releaseName: "CDriveShiftAI 0.0.4",
         releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
         publishedAt: new Date().toISOString(),
         assets: [],
@@ -231,14 +231,14 @@ const browserFallback: CDriveShiftApi = {
       status: "current",
       phase: "current",
       distribution: "development",
-      currentVersion: "0.0.3",
-      latestVersion: "0.0.3",
+      currentVersion: "0.0.4",
+      latestVersion: "0.0.4",
       updateAvailable: false,
       canAutoUpdate: false,
-      releaseName: "CDriveShiftAI 0.0.3",
+      releaseName: "CDriveShiftAI 0.0.4",
       releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
       assets: [],
-      message: "当前已是最新版本 0.0.3",
+      message: "当前已是最新版本 0.0.4",
       checkedAt: new Date().toISOString()
     } as const;
   },
@@ -250,6 +250,12 @@ const browserFallback: CDriveShiftApi = {
   },
   async cancelUpdate() {
     return this.checkForUpdates();
+  },
+  async openLogDirectory() {
+    return unavailable<void>();
+  },
+  async exportDiagnosticReport() {
+    return unavailable<never>();
   },
   async getSettings() {
     return mockSettings;

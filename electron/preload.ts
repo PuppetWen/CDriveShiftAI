@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
   getUpdateState: () => ipcRenderer.invoke("app:update-state"),
   startUpdate: () => ipcRenderer.invoke("app:update-start"),
   cancelUpdate: () => ipcRenderer.invoke("app:update-cancel"),
+  openLogDirectory: () => ipcRenderer.invoke("diagnostics:open-logs"),
+  exportDiagnosticReport: () => ipcRenderer.invoke("diagnostics:export"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateSettings: (patch: unknown) => ipcRenderer.invoke("settings:update", patch),
   checkGlobalShortcut: (shortcut: string, target: string) =>

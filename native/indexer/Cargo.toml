@@ -1,6 +1,6 @@
 [package]
 name = "cshift-indexer"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 description = "First-party NTFS MFT indexer for CDriveShiftAI"
 

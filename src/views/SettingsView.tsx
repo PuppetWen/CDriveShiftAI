@@ -9,6 +9,8 @@ import {
   Eye,
   EyeOff,
   ExternalLink,
+  FileJson,
+  FolderOpen,
   KeyRound,
   Keyboard,
   Laptop,
@@ -286,6 +288,7 @@ export function SettingsView({
 }: SettingsViewProps) {
   const [draft, setDraft] = useState(settings);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [rebuilding, setRebuilding] = useState(false);
   const [models, setModels] = useState<AiModelInfo[]>([]);
@@ -740,7 +743,7 @@ export function SettingsView({
         <div className="update-status-panel">
           <div>
             <small>当前版本</small>
-            <strong>v{updateInfo?.currentVersion ?? "0.0.3"}</strong>
+            <strong>v{updateInfo?.currentVersion ?? "0.0.4"}</strong>
           </div>
           <div>
             <small>最新版本</small>
@@ -916,6 +919,56 @@ export function SettingsView({
             </div>
           </div>
         )}
+        <div
+          className={
+            updateInfo?.phase === "error"
+              ? "diagnostic-actions has-error"
+              : "diagnostic-actions"
+          }
+        >
+          <span>
+            <strong>运行诊断</strong>
+            <small>
+              {updateInfo?.phase === "error"
+                ? "更新失败已写入日志；导出报告发给开发者即可定位环境与权限问题。"
+                : "本地记录崩溃、更新和索引生命周期；不会写入 API Key、搜索词或文件正文。"}
+            </small>
+          </span>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              void api.openLogDirectory().catch((error) =>
+                notify("error", error instanceof Error ? error.message : String(error))
+              );
+            }}
+          >
+            <FolderOpen size={14} />
+            打开日志目录
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={exportingDiagnostics}
+            onClick={() => {
+              setExportingDiagnostics(true);
+              void api
+                .exportDiagnosticReport()
+                .then((result) => {
+                  if (!result.cancelled) {
+                    notify("success", `诊断报告已导出：${result.path ?? "已保存"}`);
+                  }
+                })
+                .catch((error) =>
+                  notify("error", error instanceof Error ? error.message : String(error))
+                )
+                .finally(() => setExportingDiagnostics(false));
+            }}
+          >
+            {exportingDiagnostics ? <span className="spinner" /> : <FileJson size={14} />}
+            {exportingDiagnostics ? "正在整理…" : "导出诊断报告"}
+          </button>
+        </div>
       </section>
 
       <section className="settings-section glass-card">

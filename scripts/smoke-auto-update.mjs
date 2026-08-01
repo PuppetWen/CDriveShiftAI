@@ -46,7 +46,12 @@ const distribution = path.join(testRoot, "distribution");
 const target = path.join(distribution, "CDriveShiftAI-update-smoke.exe");
 const staging = path.join(distribution, ".cdriveshiftai-update", currentVersion);
 const packagePath = path.join(staging, "CDriveShiftAI-x64-portable.exe");
-const helperPath = path.join(staging, "cshift-updater.exe");
+const runnerDirectory = path.join(
+  distribution,
+  "CDriveShiftAI-Update-Runner",
+  currentVersion
+);
+const helperPath = path.join(runnerDirectory, "CDriveShiftAI-Update.exe");
 const planPath = path.join(staging, "update-plan.json");
 const backupPath = path.join(staging, "previous-version.exe");
 const successMarker = path.join(staging, "update-success.json");
@@ -136,6 +141,7 @@ async function removeDistributionWithRetry() {
 }
 
 await mkdir(staging, { recursive: true });
+await mkdir(runnerDirectory, { recursive: true });
 await copyFile(oldPortable, target);
 await copyFile(newPortable, packagePath);
 await copyFile(helperSource, helperPath);
@@ -164,7 +170,8 @@ await writeFile(
       successMarker,
       expectedVersion: currentVersion,
       expectedSha512,
-      logPath
+      logPath,
+      runnerDirectory
     },
     null,
     2
@@ -258,11 +265,21 @@ try {
       throw new Error(`Portable target was not replaced: ${afterVersion}`);
     }
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      if (!(await exists(packagePath)) && !(await exists(backupPath))) break;
+      if (
+        !(await exists(packagePath)) &&
+        !(await exists(backupPath)) &&
+        !(await exists(runnerDirectory))
+      ) break;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    if ((await exists(packagePath)) || (await exists(backupPath))) {
-      throw new Error("Successful update did not delete its package and backup");
+    if (
+      (await exists(packagePath)) ||
+      (await exists(backupPath)) ||
+      (await exists(runnerDirectory))
+    ) {
+      throw new Error(
+        "Successful update did not delete its package, backup and runner"
+      );
     }
     const targetStats = await stat(target);
     console.log(
@@ -275,6 +292,7 @@ try {
           targetReplacedInPlace: true,
           packageDeletedAfterStart: true,
           backupDeletedAfterStart: true,
+          runnerDeletedAfterStart: true,
           targetBytes: targetStats.size
         },
         null,

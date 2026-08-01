@@ -508,12 +508,19 @@ export interface AppUpdateInfo {
   errorCode?: string;
 }
 
+export interface DiagnosticExportResult {
+  cancelled: boolean;
+  path?: string;
+}
+
 export interface CDriveShiftApi {
   getOverview(): Promise<SystemOverview>;
   checkForUpdates(force?: boolean): Promise<AppUpdateInfo>;
   getUpdateState(): Promise<AppUpdateInfo>;
   startUpdate(): Promise<AppUpdateInfo>;
   cancelUpdate(): Promise<AppUpdateInfo>;
+  openLogDirectory(): Promise<void>;
+  exportDiagnosticReport(): Promise<DiagnosticExportResult>;
   getSettings(): Promise<AppSettings>;
   updateSettings(patch: Partial<Omit<AppSettings, "ai">>): Promise<AppSettings>;
   checkGlobalShortcut(

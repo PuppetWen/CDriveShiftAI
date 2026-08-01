@@ -1,9 +1,7 @@
 import { app } from "electron";
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   access,
-  copyFile,
   mkdir,
   open,
   readFile,
@@ -14,6 +12,11 @@ import {
 } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import path from "node:path";
+import { logger, serializeError } from "./logger";
+import {
+  launchUpdaterHelper,
+  prepareUpdaterExecutable
+} from "./update-launcher";
 
 const RELEASE_API =
   "https://api.github.com/repos/PuppetWen/CDriveShiftAI/releases/latest";
@@ -112,6 +115,7 @@ interface UpdatePlan {
   expectedVersion: string;
   expectedSha512: string;
   logPath: string;
+  runnerDirectory?: string;
 }
 
 function versionParts(value: string): number[] {
@@ -150,6 +154,13 @@ function updateStagingDirectory(version: string): string {
       ? path.dirname(path.dirname(executable))
       : path.dirname(executable);
   return path.join(parent, ".cdriveshiftai-update", version);
+}
+
+function updateDistributionParent(): string {
+  const executable = distributionExecutable();
+  return updateDistribution() === "installed"
+    ? path.dirname(path.dirname(executable))
+    : path.dirname(executable);
 }
 
 function clone<T>(value: T): T {
@@ -384,6 +395,12 @@ export class UpdateService {
     try {
       return await this.performDownloadAndInstall();
     } catch (error) {
+      logger.error("update.failed", {
+        phase: this.state.phase,
+        distribution: this.state.distribution,
+        version: this.state.latestVersion,
+        error: serializeError(error)
+      });
       if (this.abortController?.signal.aborted) {
         return this.setState({
           phase: "cancelled",
@@ -587,7 +604,28 @@ export class UpdateService {
       throw new Error("更新助手缺失，已保留下载包但不会执行替换");
     }
     const helperPath = path.join(stagingDir, "cshift-updater.exe");
-    await copyFile(helperSource, helperPath);
+    const runnerDirectory = path.join(
+      updateDistributionParent(),
+      "CDriveShiftAI-Update-Runner",
+      this.state.latestVersion!
+    );
+    let fallbackHelperPath = path.join(
+      runnerDirectory,
+      "CDriveShiftAI-Update.exe"
+    );
+    await prepareUpdaterExecutable(helperSource, helperPath);
+    try {
+      await prepareUpdaterExecutable(helperSource, fallbackHelperPath);
+    } catch (error) {
+      logger.warn("update.fallback_helper_prepare_failed", {
+        fallbackHelperPath,
+        error: serializeError(error)
+      });
+      // Never execute a fallback copy that did not pass byte-for-byte hashing.
+      // PowerShell can still provide a separate launch API for the verified
+      // primary helper if this directory itself could not be created.
+      fallbackHelperPath = helperPath;
+    }
     const plan: UpdatePlan = {
       schemaVersion: 1,
       mode: distribution,
@@ -606,7 +644,8 @@ export class UpdateService {
       successMarker: path.join(stagingDir, "update-success.json"),
       expectedVersion: this.state.latestVersion!,
       expectedSha512: manifestAsset.sha512,
-      logPath: path.join(stagingDir, "update.log")
+      logPath: path.join(stagingDir, "update.log"),
+      runnerDirectory
     };
     const planPath = path.join(stagingDir, "update-plan.json");
     await writeFile(planPath, JSON.stringify(plan, null, 2), "utf8");
@@ -617,16 +656,20 @@ export class UpdateService {
           ? "即将退出并静默安装；失败时会自动恢复旧版本"
           : "即将退出并在原路径替换便携版；失败时会自动恢复旧文件"
     });
-    const child = spawn(helperPath, ["--plan", planPath], {
-      detached: true,
-      windowsHide: true,
-      stdio: "ignore"
+    const launched = await launchUpdaterHelper({
+      primaryPath: helperPath,
+      fallbackPath: fallbackHelperPath,
+      planPath,
+      forcePrimaryFailure:
+        process.env.CDRIVESHIFTAI_UPDATE_FORCE_PRIMARY_EACCES === "1"
     });
-    await new Promise<void>((resolve, reject) => {
-      child.once("spawn", resolve);
-      child.once("error", reject);
+    logger.info("update.install_handoff", {
+      distribution,
+      version: this.state.latestVersion,
+      strategy: launched.strategy,
+      executable: launched.executable,
+      childPid: launched.child.pid
     });
-    child.unref();
     setTimeout(() => app.quit(), 180);
     return this.getState();
   }
@@ -637,6 +680,16 @@ function safeUpdateStaging(candidate: string): boolean {
   return resolved
     .split(path.sep)
     .some((segment) => segment.toLocaleLowerCase() === ".cdriveshiftai-update");
+}
+
+function safeUpdateRunner(candidate: string): boolean {
+  return path
+    .resolve(candidate)
+    .split(path.sep)
+    .some(
+      (segment) =>
+        segment.toLocaleLowerCase() === "cdriveshiftai-update-runner"
+    );
 }
 
 export async function completePendingUpdate(): Promise<void> {
@@ -667,6 +720,9 @@ export async function completePendingUpdate(): Promise<void> {
     const cleanup = async (remaining = 20): Promise<void> => {
       try {
         await rm(stagingDir, { recursive: true, force: true });
+        if (plan.runnerDirectory && safeUpdateRunner(plan.runnerDirectory)) {
+          await rm(plan.runnerDirectory, { recursive: true, force: true });
+        }
       } catch {
         if (remaining > 0) {
           setTimeout(() => void cleanup(remaining - 1), 1_500);

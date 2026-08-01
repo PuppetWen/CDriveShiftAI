@@ -21,6 +21,7 @@ import {
   determineIndexRefreshReason,
   INDEX_REFRESH_INTERVAL_MS
 } from "./index-refresh-policy";
+import { logger, serializeError } from "./logger";
 
 interface PendingRequest {
   resolve: (response: NativeResponse) => void;
@@ -96,6 +97,10 @@ export class SearchService {
       stdio: ["pipe", "pipe", "pipe"]
     });
     this.child = child;
+    logger.info("indexer.spawn_requested", {
+      executable,
+      backgroundMode: this.backgroundMode
+    });
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => this.handleLine(line));
     child.stderr.on("data", (chunk) => {
@@ -109,12 +114,26 @@ export class SearchService {
     // an "error" event in addition to invoking the write callback; without a
     // listener that EPIPE becomes an uncaught main-process exception.
     child.stdin.on("error", (error) => {
+      logger.warn("indexer.stdin_error", {
+        stopping: this.stopping,
+        error: serializeError(error)
+      });
       if (this.child === child) this.rejectPending(error);
     });
     child.on("error", (error) => {
+      logger.error("indexer.process_error", {
+        stopping: this.stopping,
+        error: serializeError(error)
+      });
       if (this.child === child) this.rejectPending(error);
     });
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
+      logger.info("indexer.exited", {
+        code,
+        signal,
+        stopping: this.stopping,
+        restartCount: this.restartCount
+      });
       lines.close();
       if (this.child === child) this.child = undefined;
       this.rejectPending(new Error(`索引进程已退出（${code ?? "unknown"}）`));
@@ -175,6 +194,10 @@ export class SearchService {
   async stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
+    logger.info("indexer.stop_started", {
+      hasChild: this.child != null,
+      pendingRequests: this.pending.size
+    });
     this.stopPromise = (async () => {
       if (this.dailyRefreshTimer) {
         clearTimeout(this.dailyRefreshTimer);
@@ -199,6 +222,7 @@ export class SearchService {
         new Promise<false>((resolve) => setTimeout(() => resolve(false), 1_500))
       ]);
       if (!graceful && child.exitCode == null && !child.killed) {
+        logger.warn("indexer.stop_forced", { childPid: child.pid });
         child.kill();
         await Promise.race([
           exited,
@@ -207,6 +231,7 @@ export class SearchService {
       }
       if (this.child === child) this.child = undefined;
       this.rejectPending(new Error("索引服务已停止"));
+      logger.info("indexer.stop_completed", { childPid: child.pid });
     })();
     return this.stopPromise;
   }
@@ -623,6 +648,11 @@ export class SearchService {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        logger.warn("indexer.request_timeout", {
+          operation: typeof payload.op === "string" ? payload.op : "unknown",
+          timeout,
+          stopping: this.stopping
+        });
         reject(new Error("索引请求超时"));
       }, timeout);
       this.pending.set(id, { resolve, reject, timer });
@@ -631,11 +661,21 @@ export class SearchService {
           if (!error) return;
           clearTimeout(timer);
           this.pending.delete(id);
+          logger.warn("indexer.request_write_failed", {
+            operation: typeof payload.op === "string" ? payload.op : "unknown",
+            stopping: this.stopping,
+            error: serializeError(error)
+          });
           reject(error);
         });
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(id);
+        logger.warn("indexer.request_write_threw", {
+          operation: typeof payload.op === "string" ? payload.op : "unknown",
+          stopping: this.stopping,
+          error: serializeError(error)
+        });
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
