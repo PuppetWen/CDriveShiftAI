@@ -2581,6 +2581,12 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                     status.message = Some(format!("索引增量日志写入失败：{error}"));
                     update_status(&state, &output, status);
                 }
+                if !state.backgrounded.load(Ordering::Relaxed) {
+                    output.send(&json!({
+                        "event": "indexChanged",
+                        "changedCount": deltas.len()
+                    }));
+                }
             }
             drop(watchers);
             state.watching.store(false, Ordering::SeqCst);

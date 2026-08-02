@@ -16,6 +16,7 @@ const executable = path.join(
 const testTempRoot = path.join(workspace, ".cdriveshiftai-data", "test-temp");
 await mkdir(testTempRoot, { recursive: true });
 const fixture = await mkdtemp(path.join(testTempRoot, "indexer-"));
+const indexState = await mkdtemp(path.join(testTempRoot, "indexer-state-"));
 const nested = path.join(fixture, "nested");
 const scoped = path.join(fixture, "scope");
 const similarlyNamedScope = path.join(fixture, "scope-extra");
@@ -91,8 +92,8 @@ try {
   await request({
     op: "init",
     root: fixture,
-    cachePath: path.join(fixture, "names.bin"),
-    contentCacheDir: path.join(fixture, "content")
+    cachePath: path.join(indexState, "names.bin"),
+    contentCacheDir: path.join(indexState, "content")
   });
   await waitForEvent(
     (message) => message.event === "status" && message.status?.state === "ready"
@@ -177,6 +178,34 @@ try {
     throw new Error("Executable catalog did not include the portable application fixture");
   }
 
+  const livePath = path.join(fixture, "live-change-probe.txt");
+  events.length = 0;
+  await writeFile(livePath, "live watcher probe", "utf8");
+  await waitForEvent((message) => message.event === "indexChanged");
+  const liveCreated = await request({
+    op: "query",
+    query: "live-change-probe",
+    kind: "file",
+    scope: fixture,
+    limit: 10
+  });
+  if (!liveCreated.results?.some((result) => result.name === "live-change-probe.txt")) {
+    throw new Error("Live watcher did not add the new file to search results");
+  }
+  events.length = 0;
+  await rm(livePath, { force: true });
+  await waitForEvent((message) => message.event === "indexChanged");
+  const liveDeleted = await request({
+    op: "query",
+    query: "live-change-probe",
+    kind: "file",
+    scope: fixture,
+    limit: 10
+  });
+  if (liveDeleted.results?.length !== 0) {
+    throw new Error("Live watcher did not remove the deleted file from search results");
+  }
+
   await request({ op: "contentIndex", scope: fixture });
   await waitForEvent(
     (message) => message.event === "contentStatus" && message.status?.state === "ready"
@@ -240,6 +269,8 @@ try {
         scopedMatches: scopedResult.results.length,
         regexMatches: regexResult.results.length,
         executableCatalogMatches: executableCatalog.results.length,
+        liveCreateMatches: liveCreated.results.length,
+        liveDeleteMatches: liveDeleted.results.length,
         contentMatches: contentResult.results.length,
         contentRegexMatches: contentRegexResult.results.length,
         invalidRegexRejected,
@@ -254,4 +285,5 @@ try {
   if (!child.killed) child.kill();
   await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 1_000))]);
   await rm(fixture, { recursive: true, force: true });
+  await rm(indexState, { recursive: true, force: true });
 }

@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   ContentIndexerStatus,
   IndexerStatus,
-  MigrationRecord
+  MigrationRecord,
+  SearchIndexChangedEvent
 } from "./types";
 import type { AppUpdateInfo } from "./update";
 
@@ -91,6 +92,14 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
     const handler = (_event: Electron.IpcRendererEvent, status: IndexerStatus) => listener(status);
     ipcRenderer.on("indexer:status", handler);
     return () => ipcRenderer.removeListener("indexer:status", handler);
+  },
+  onSearchIndexChanged: (listener: (event: SearchIndexChangedEvent) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: SearchIndexChangedEvent
+    ) => listener(payload);
+    ipcRenderer.on("search:index-changed", handler);
+    return () => ipcRenderer.removeListener("search:index-changed", handler);
   },
   onContentIndexerStatus: (listener: (status: ContentIndexerStatus) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, status: ContentIndexerStatus) =>

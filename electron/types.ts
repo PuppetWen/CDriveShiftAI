@@ -284,6 +284,7 @@ export interface OwnershipMapResult {
 export interface AppSettings {
   effectMode: "aurora" | "matrix" | "calm";
   launchAtLogin: boolean;
+  launchMinimized: boolean;
   minimizeToTray: boolean;
   globalShortcut: string;
   quickSearchShortcut: string;
@@ -458,4 +459,10 @@ export interface NativeResponse {
   error?: string;
   status?: IndexerStatus | ContentIndexerStatus;
   results?: SearchResult[] | ContentSearchResult[];
+  changedCount?: number;
+}
+
+export interface SearchIndexChangedEvent {
+  changedCount: number;
+  observedAt: string;
 }

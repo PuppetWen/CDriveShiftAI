@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, net, session } from "electron";
 import { createHash } from "node:crypto";
 import {
   access,
@@ -55,7 +55,7 @@ export interface AppUpdateProgress {
 }
 
 export interface AppUpdateInfo {
-  status: "current" | "available" | "unavailable";
+  status: "checking" | "current" | "available" | "unavailable";
   phase: UpdatePhase;
   distribution: UpdateDistribution;
   currentVersion: string;
@@ -71,6 +71,13 @@ export interface AppUpdateInfo {
   message: string;
   checkedAt: string;
   errorCode?: string;
+  network?: UpdateNetworkRoute;
+}
+
+export interface UpdateNetworkRoute {
+  mode: "system-proxy" | "direct" | "unavailable";
+  label: string;
+  resolvedAt: string;
 }
 
 interface GitHubRelease {
@@ -194,6 +201,22 @@ function githubHeaders(version: string): Record<string, string> {
   };
 }
 
+export function summarizeProxyRules(rules: string): Pick<UpdateNetworkRoute, "mode" | "label"> {
+  const candidates = rules
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const proxy = candidates.find((item) => !/^DIRECT$/i.test(item));
+  if (!proxy) return { mode: "direct", label: "系统网络 · 直连" };
+  const match = /^(PROXY|HTTPS?|SOCKS(?:4|5)?)\s+(.+)$/i.exec(proxy);
+  if (!match) return { mode: "system-proxy", label: "Windows 系统代理" };
+  const endpoint = match[2].replace(/^.*@/, "");
+  return {
+    mode: "system-proxy",
+    label: `Windows 系统代理 · ${match[1].toUpperCase()} ${endpoint}`
+  };
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
@@ -239,6 +262,7 @@ export class UpdateService {
   private manifest?: UpdateManifest;
   private abortController?: AbortController;
   private lastProgressAt = 0;
+  private networkResolvedAt = 0;
 
   constructor(
     private readonly onState: (state: AppUpdateInfo) => void,
@@ -246,7 +270,7 @@ export class UpdateService {
   ) {
     const currentVersion = app.getVersion();
     this.state = {
-      status: "current",
+      status: "checking",
       phase: "idle",
       distribution: updateDistribution(),
       currentVersion,
@@ -269,6 +293,39 @@ export class UpdateService {
     return result;
   }
 
+  private async resolveNetworkRoute(url: string, force = false): Promise<void> {
+    if (!force && this.state.network && Date.now() - this.networkResolvedAt < 30_000) {
+      return;
+    }
+    const resolvedAt = new Date().toISOString();
+    try {
+      const rules = await session.defaultSession.resolveProxy(url);
+      const summary = summarizeProxyRules(rules);
+      this.networkResolvedAt = Date.now();
+      this.setState({ network: { ...summary, resolvedAt } });
+      logger.info("update.network_route", summary);
+    } catch (error) {
+      this.networkResolvedAt = Date.now();
+      this.setState({
+        network: {
+          mode: "unavailable",
+          label: "系统代理检测失败，按 Windows 默认网络继续",
+          resolvedAt
+        }
+      });
+      logger.warn("update.proxy_resolution_failed", { error: serializeError(error) });
+    }
+  }
+
+  private async networkFetch(
+    url: string,
+    init: Parameters<typeof net.fetch>[1],
+    refreshRoute = false
+  ): Promise<Response> {
+    await this.resolveNetworkRoute(url, refreshRoute);
+    return net.fetch(url, init);
+  }
+
   async check(force = false): Promise<AppUpdateInfo> {
     const now = Date.now();
     if (!force && this.cached && now - this.cached.at < CACHE_DURATION_MS) {
@@ -279,15 +336,16 @@ export class UpdateService {
     const currentVersion = app.getVersion();
     const checkedAt = new Date().toISOString();
     this.setState({
+      status: "checking",
       phase: "checking",
       message: "正在检查 GitHub Release…",
       errorCode: undefined
     });
     try {
-      const response = await fetch(RELEASE_API, {
+      const response = await this.networkFetch(RELEASE_API, {
         headers: githubHeaders(currentVersion),
         signal: AbortSignal.timeout(10_000)
-      });
+      }, true);
       if (!response.ok) {
         throw new Error(`GitHub Release 返回 HTTP ${response.status}`);
       }
@@ -316,7 +374,7 @@ export class UpdateService {
       );
       let manifest: UpdateManifest | undefined;
       if (updateAvailable && manifestReleaseAsset) {
-        const manifestResponse = await fetch(manifestReleaseAsset.downloadUrl, {
+        const manifestResponse = await this.networkFetch(manifestReleaseAsset.downloadUrl, {
           headers: githubHeaders(currentVersion),
           signal: AbortSignal.timeout(10_000)
         });
@@ -357,7 +415,8 @@ export class UpdateService {
             ? `发现新版本 ${latestVersion}，可自动下载并更新`
             : `发现新版本 ${latestVersion}，但该 Release 缺少自动更新清单`
           : `当前已是最新版本 ${currentVersion}`,
-        checkedAt
+        checkedAt,
+        network: this.state.network
       };
       this.state = result;
       this.cached = { at: now, result: clone(result) };
@@ -533,7 +592,11 @@ export class UpdateService {
     }
     const headers: Record<string, string> = githubHeaders(app.getVersion());
     if (transferred > 0) headers.Range = `bytes=${transferred}-`;
-    const response = await fetch(url, { headers, signal, redirect: "follow" });
+    const response = await this.networkFetch(
+      url,
+      { headers, signal, redirect: "follow" },
+      attempt === 1
+    );
     if (response.status === 416 && transferred === total) return;
     if (!response.ok && response.status !== 206) {
       throw new Error(`HTTP ${response.status}`);

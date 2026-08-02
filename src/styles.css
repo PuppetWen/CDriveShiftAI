@@ -4436,6 +4436,11 @@ input:checked + .toggle::after { transform: translateX(13px); }
 .update-progress-meta {
   justify-content: flex-end;
 }
+.update-network-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .update-progress-meta > span:first-child {
   margin-right: auto;
 }
@@ -4593,6 +4598,7 @@ input:checked + .toggle::after { transform: translateX(13px); }
 .setting-note { display: flex; align-items: flex-start; gap: 7px; margin-top: 10px; color: var(--dim); font-size: 8px; line-height: 1.5; }
 .setting-note svg { flex: 0 0 auto; color: var(--good); }
 .setting-row { display: flex; align-items: center; gap: 9px; min-height: 52px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.setting-row.is-disabled { cursor: not-allowed; opacity: .52; }
 .setting-row > div { flex: 1; }
 .setting-row strong,
 .setting-row small { display: block; }
