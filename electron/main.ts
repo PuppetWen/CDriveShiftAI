@@ -99,6 +99,8 @@ let tray: Tray | undefined;
 let isQuitting = false;
 let shutdownComplete = false;
 let shutdownPromise: Promise<void> | undefined;
+let visibleUpdateCheckTimer: NodeJS.Timeout | undefined;
+let lastVisibleUpdateCheckAt = 0;
 const store = new AppStore();
 let migrationService: MigrationService;
 const aiVerifications = new Map<string, { fingerprint: string; expiresAt: number }>();
@@ -380,6 +382,7 @@ function createWindow(): BrowserWindow {
 
   window.setMenuBarVisibility(false);
   trackWindowActivity(window);
+  window.on("restore", () => triggerVisibleUpdateCheck("main-window-restored"));
   trackWindowBounds(window, "mainWindowBounds");
   window.on("close", (event) => {
     if (isQuitting || !store.getSettings().minimizeToTray) return;
@@ -434,6 +437,36 @@ function emitUpdateState(state: AppUpdateInfo): void {
   }
 }
 
+function triggerVisibleUpdateCheck(reason: string, delayMs = 0): void {
+  if (!updateService || isQuitting) return;
+  const busyPhases = new Set(["checking", "downloading", "verifying", "ready", "installing"]);
+  if (busyPhases.has(updateService.getState().phase)) return;
+  if (visibleUpdateCheckTimer) {
+    clearTimeout(visibleUpdateCheckTimer);
+    visibleUpdateCheckTimer = undefined;
+  }
+  const run = () => {
+    visibleUpdateCheckTimer = undefined;
+    if (!updateService || isQuitting) return;
+    if (busyPhases.has(updateService.getState().phase)) return;
+    if (Date.now() - lastVisibleUpdateCheckAt < 1_500) return;
+    lastVisibleUpdateCheckAt = Date.now();
+    logger.info("update.visible_check", { reason });
+    void updateService.check(true).catch((error) => {
+      logger.warn("update.visible_check_failed", {
+        reason,
+        error: serializeError(error)
+      });
+    });
+  };
+  if (delayMs > 0) {
+    visibleUpdateCheckTimer = setTimeout(run, delayMs);
+    visibleUpdateCheckTimer.unref();
+  } else {
+    run();
+  }
+}
+
 function assertUpdateCanInstall(): Promise<void> {
   const busyStages = new Set([
     "preflight",
@@ -466,11 +499,17 @@ function showMainView(
   view: "overview" | "search" | "ownership-map" | "analyze" | "migrate" | "history" | "settings",
   options: { path?: string; focus?: "ai-settings" | "search-input" } = {}
 ): void {
+  const shouldCheckForUpdates =
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    !mainWindow.isVisible() ||
+    mainWindow.isMinimized();
   if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
   sendNavigation(mainWindow, { view, ...options });
+  if (shouldCheckForUpdates) triggerVisibleUpdateCheck("main-window-restored");
 }
 
 function createQuickSearchWindow(): BrowserWindow {
@@ -1765,9 +1804,7 @@ if (!singleInstance) {
     });
     await store.init();
     applyNativeEffect(store.getSettings().effectMode);
-    mainWindow = createWindow();
     await completePendingUpdate();
-    createTray();
     const currentSettings = store.getSettings();
     searchService = new SearchService(
       (status) => {
@@ -1784,13 +1821,24 @@ if (!singleInstance) {
           }
         }
       },
+      (event) => {
+        for (const window of [mainWindow, quickSearchWindow]) {
+          if (
+            window &&
+            !window.isDestroyed() &&
+            window.isVisible() &&
+            !window.isMinimized()
+          ) {
+            window.webContents.send("search:index-changed", event);
+          }
+        }
+      },
       () => createQuickSearchWindow(),
       {
         button: currentSettings.mouseQuickSearchButton,
         holdMs: currentSettings.mouseQuickSearchHoldMs
       }
     );
-    syncSearchBackgroundMode();
     migrationService = new MigrationService(store, (record, message) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("migration:progress", { record, message });
@@ -1798,8 +1846,16 @@ if (!singleInstance) {
     });
     updateService = new UpdateService(emitUpdateState, assertUpdateCanInstall);
     registerIpc();
+    const startupMinimized =
+      process.argv.includes("--startup-minimized") &&
+      currentSettings.launchAtLogin &&
+      currentSettings.launchMinimized;
+    if (!startupMinimized) mainWindow = createWindow();
+    createTray();
+    syncSearchBackgroundMode();
+    triggerVisibleUpdateCheck("application-startup", 2_500);
     const shortcutFailures = applyGlobalShortcuts(store.getSettings());
-    if (shortcutFailures.length > 0) {
+    if (shortcutFailures.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
       void dialog.showMessageBox(mainWindow, {
         type: "warning",
         title: "全局快捷键未完全启用",
@@ -1807,6 +1863,12 @@ if (!singleInstance) {
         detail: "可在设置中修改快捷键后重新保存。",
         buttons: ["知道了"],
         noLink: true
+      });
+    }
+    if (shortcutFailures.length > 0 && startupMinimized) {
+      logger.warn("shortcut.registration_incomplete", {
+        startupMinimized,
+        failures: shortcutFailures
       });
     }
     await migrationService.recoverIncomplete();
@@ -1836,7 +1898,7 @@ if (!singleInstance) {
     }
 
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
+      if (BrowserWindow.getAllWindows().length === 0) showMainView("overview");
     });
   });
 }
@@ -1852,6 +1914,10 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", (event) => {
   isQuitting = true;
+  if (visibleUpdateCheckTimer) {
+    clearTimeout(visibleUpdateCheckTimer);
+    visibleUpdateCheckTimer = undefined;
+  }
   if (shutdownComplete) return;
   event.preventDefault();
   logger.info("application.shutdown_started", {

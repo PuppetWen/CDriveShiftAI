@@ -174,6 +174,7 @@ export function SearchView({
     initialRename?: boolean;
   }>();
   const [propertyPath, setPropertyPath] = useState("");
+  const [liveIndexRevision, setLiveIndexRevision] = useState(0);
   const requestSequence = useRef(0);
   const sizeSequence = useRef(0);
   const skipRestoredSearchRef = useRef(false);
@@ -181,6 +182,7 @@ export function SearchView({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const bookmarkPanelRef = useRef<HTMLElement>(null);
   const workspaceSnapshotRef = useRef<SearchWorkspaceState | undefined>(undefined);
+  const liveRefreshRef = useRef(false);
   const {
     feedback: openFeedback,
     openPath,
@@ -221,6 +223,22 @@ export function SearchView({
   );
 
   useEffect(() => api.onContentIndexerStatus(setContentStatus), []);
+
+  useEffect(() => {
+    if (mode !== "name" || !query.trim()) return;
+    let timer: number | undefined;
+    const unsubscribe = api.onSearchIndexChanged(() => {
+      if (timer != null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        liveRefreshRef.current = true;
+        setLiveIndexRevision((revision) => revision + 1);
+      }, 180);
+    });
+    return () => {
+      if (timer != null) window.clearTimeout(timer);
+      unsubscribe();
+    };
+  }, [mode, query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -467,9 +485,11 @@ export function SearchView({
     }
 
     const sequence = ++requestSequence.current;
+    const backgroundRefresh = liveRefreshRef.current;
+    liveRefreshRef.current = false;
     const timer = window.setTimeout(() => {
       const started = performance.now();
-      setLoading(true);
+      if (!backgroundRefresh) setLoading(true);
       setError("");
       const request =
         mode === "name"
@@ -487,7 +507,15 @@ export function SearchView({
         .then((items) => {
           if (sequence !== requestSequence.current) return;
           if (mode === "name") {
-            setResults(items as SearchResult[]);
+            const next = items as SearchResult[];
+            setResults((current) =>
+              searchResultsEqual(current, next) ? current : next
+            );
+            setSelectedPath((current) =>
+              current && next.some((item) => item.path === current)
+                ? current
+                : next[0]?.path ?? ""
+            );
             setContentResults([]);
           } else {
             setContentResults(items as ContentSearchResult[]);
@@ -500,7 +528,7 @@ export function SearchView({
           setError(reason instanceof Error ? reason.message : String(reason));
         })
         .finally(() => {
-          if (sequence === requestSequence.current) setLoading(false);
+          if (sequence === requestSequence.current && !backgroundRefresh) setLoading(false);
         });
     }, mode === "name" ? 110 : 180);
     return () => window.clearTimeout(timer);
@@ -510,6 +538,7 @@ export function SearchView({
     contentReadyRevision,
     contentScope,
     filters,
+    liveIndexRevision,
     mode,
     query,
     regexValidation.message,
@@ -1760,6 +1789,11 @@ export function SearchView({
                 <Info size={13} /> 全盘索引未完成，结果会持续补全
               </span>
             )}
+            {mode === "name" && indexer.state === "ready" && (
+              <span className="inline-note live-search-note">
+                <Zap size={12} /> 索引变更实时同步
+              </span>
+            )}
             {mode === "content" && contentStatusMatchesScope && contentStatus.message && (
               <span className="inline-note">
                 <Info size={13} /> {contentStatus.message}
@@ -2054,4 +2088,20 @@ export function SearchView({
       )}
     </div>
   );
+}
+
+function searchResultsEqual(current: SearchResult[], next: SearchResult[]): boolean {
+  if (current.length !== next.length) return false;
+  return current.every((item, index) => {
+    const candidate = next[index];
+    return (
+      item.path === candidate.path &&
+      item.name === candidate.name &&
+      item.isDirectory === candidate.isDirectory &&
+      item.size === candidate.size &&
+      item.modifiedAt === candidate.modifiedAt &&
+      item.score === candidate.score &&
+      item.source === candidate.source
+    );
+  });
 }

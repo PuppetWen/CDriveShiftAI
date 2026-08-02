@@ -165,6 +165,7 @@ export async function createDiagnosticReport(input: DiagnosticInput): Promise<st
     settings: {
       effectMode: input.settings.effectMode,
       launchAtLogin: input.settings.launchAtLogin,
+      launchMinimized: input.settings.launchMinimized,
       minimizeToTray: input.settings.minimizeToTray,
       globalShortcutConfigured: Boolean(input.settings.globalShortcut),
       quickSearchShortcutConfigured: Boolean(input.settings.quickSearchShortcut),

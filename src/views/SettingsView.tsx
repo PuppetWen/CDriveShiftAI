@@ -306,6 +306,7 @@ export function SettingsView({
   const effectRequest = useRef(0);
   const behaviorRequests = useRef({
     launchAtLogin: 0,
+    launchMinimized: 0,
     minimizeToTray: 0
   });
   const shortcutRequests = useRef({
@@ -326,6 +327,9 @@ export function SettingsView({
       const next = { ...current, effectMode: settings.effectMode };
       if (previous.launchAtLogin !== settings.launchAtLogin) {
         next.launchAtLogin = settings.launchAtLogin;
+      }
+      if (previous.launchMinimized !== settings.launchMinimized) {
+        next.launchMinimized = settings.launchMinimized;
       }
       if (previous.minimizeToTray !== settings.minimizeToTray) {
         next.minimizeToTray = settings.minimizeToTray;
@@ -391,7 +395,7 @@ export function SettingsView({
   };
 
   const updateBehaviorSetting = async (
-    field: "launchAtLogin" | "minimizeToTray",
+    field: "launchAtLogin" | "launchMinimized" | "minimizeToTray",
     value: boolean
   ) => {
     const request = ++behaviorRequests.current[field];
@@ -743,7 +747,7 @@ export function SettingsView({
         <div className="update-status-panel">
           <div>
             <small>当前版本</small>
-            <strong>v{updateInfo?.currentVersion ?? "0.0.4"}</strong>
+            <strong>v{updateInfo?.currentVersion ?? "0.0.5"}</strong>
           </div>
           <div>
             <small>最新版本</small>
@@ -764,6 +768,12 @@ export function SettingsView({
                     ? "安装版静默更新"
                     : "开发模式"}{" "}
                 · 发布于 {new Date(updateInfo.publishedAt).toLocaleString()}
+              </span>
+            )}
+            {updateInfo?.network && (
+              <span className="update-network-route">
+                <Wifi size={12} />
+                {updateInfo.network.label}
               </span>
             )}
           </div>
@@ -1059,6 +1069,24 @@ export function SettingsView({
               onChange={(event) =>
                 void updateBehaviorSetting(
                   "launchAtLogin",
+                  event.target.checked
+                )
+              }
+            />
+            <span className="toggle" />
+          </label>
+          <label className={`setting-row ${!draft.launchAtLogin ? "is-disabled" : ""}`}>
+            <div>
+              <strong>开机启动后最小化</strong>
+              <small>仅在 Windows 登录自动启动时直接进入托盘，不打开主窗口</small>
+            </div>
+            <input
+              type="checkbox"
+              checked={draft.launchMinimized}
+              disabled={!draft.launchAtLogin}
+              onChange={(event) =>
+                void updateBehaviorSetting(
+                  "launchMinimized",
                   event.target.checked
                 )
               }

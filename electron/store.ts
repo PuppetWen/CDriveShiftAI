@@ -21,6 +21,7 @@ const defaults: StoreShape = {
   settings: {
     effectMode: "aurora",
     launchAtLogin: false,
+    launchMinimized: false,
     minimizeToTray: true,
     globalShortcut: "CommandOrControl+Alt+Space",
     quickSearchShortcut: "CommandOrControl+Alt+F",
@@ -575,7 +576,13 @@ export class AppStore {
       }
     }
 
-    app.setLoginItemSettings({ openAtLogin: this.data.settings.launchAtLogin });
+    app.setLoginItemSettings({
+      openAtLogin: this.data.settings.launchAtLogin,
+      args:
+        this.data.settings.launchAtLogin && this.data.settings.launchMinimized
+          ? ["--startup-minimized"]
+          : []
+    });
     await this.flush();
     return this.getSettings();
   }

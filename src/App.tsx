@@ -165,11 +165,8 @@ export default function App() {
     });
     const offSettings = api.onSettingsChanged(setSettings);
     const offUpdate = api.onUpdateStatus(setUpdateInfo);
-    const updateTimer = window.setTimeout(() => {
-      void api.checkForUpdates().then(setUpdateInfo).catch(() => undefined);
-    }, 2_500);
+    void api.getUpdateState().then(setUpdateInfo).catch(() => undefined);
     return () => {
-      window.clearTimeout(updateTimer);
       offIndexer();
       offMigration();
       offNavigation();

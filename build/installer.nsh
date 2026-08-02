@@ -1,3 +1,42 @@
+!ifndef BUILD_UNINSTALLER
+Var /GLOBAL cdrivePreserveNoDesktopShortcut
+
+!macro customInit
+  StrCpy $cdrivePreserveNoDesktopShortcut "false"
+  ReadRegStr $R7 HKEY_CURRENT_USER "${INSTALL_REGISTRY_KEY}" InstallLocation
+  ReadRegStr $R6 HKEY_LOCAL_MACHINE "${INSTALL_REGISTRY_KEY}" InstallLocation
+  ${If} $R7 != ""
+  ${OrIf} $R6 != ""
+    ReadRegStr $R8 HKEY_CURRENT_USER "${INSTALL_REGISTRY_KEY}" ShortcutName
+    ${If} $R8 == ""
+      ReadRegStr $R8 HKEY_LOCAL_MACHINE "${INSTALL_REGISTRY_KEY}" ShortcutName
+    ${EndIf}
+    ${If} $R8 == ""
+      StrCpy $R8 "${SHORTCUT_NAME}"
+    ${EndIf}
+    StrCpy $R5 "false"
+    SetShellVarContext current
+    ${If} ${FileExists} "$DESKTOP\$R8.lnk"
+      StrCpy $R5 "true"
+    ${EndIf}
+    SetShellVarContext all
+    ${If} ${FileExists} "$DESKTOP\$R8.lnk"
+      StrCpy $R5 "true"
+    ${EndIf}
+    SetShellVarContext current
+    ${If} $R5 == "false"
+      StrCpy $cdrivePreserveNoDesktopShortcut "true"
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+!macro customInstall
+  ${If} $cdrivePreserveNoDesktopShortcut == "true"
+    Delete "$newDesktopLink"
+  ${EndIf}
+!macroend
+!endif
+
 !macro customUnInstall
   ${IfNot} ${isUpdated}
     ${IfNot} ${Silent}

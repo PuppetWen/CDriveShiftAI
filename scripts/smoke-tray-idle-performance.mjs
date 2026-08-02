@@ -34,6 +34,8 @@ await writeFile(
   JSON.stringify({
     settings: {
       effectMode: "calm",
+      launchAtLogin: true,
+      launchMinimized: true,
       minimizeToTray: true
     }
   }),
@@ -77,7 +79,7 @@ function processTreeSnapshot(rootPid) {
   return JSON.parse(output);
 }
 
-const child = spawn(executable, [], {
+const child = spawn(executable, ["--startup-minimized"], {
   windowsHide: true,
   stdio: ["ignore", "ignore", "pipe"],
   env: {

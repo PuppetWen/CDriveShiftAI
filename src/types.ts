@@ -143,6 +143,11 @@ export interface SearchResult {
   source: "native-index" | "live-scan";
 }
 
+export interface SearchIndexChangedEvent {
+  changedCount: number;
+  observedAt: string;
+}
+
 export interface SearchContextActionResult {
   action: "dismissed" | "revealed" | "opened" | "opened-with" | "analyze" | "deleted" | "error";
   message?: string;
@@ -349,6 +354,7 @@ export interface MigrationRecord {
 export interface AppSettings {
   effectMode: EffectMode;
   launchAtLogin: boolean;
+  launchMinimized: boolean;
   minimizeToTray: boolean;
   globalShortcut: string;
   quickSearchShortcut: string;
@@ -490,7 +496,7 @@ export interface AppUpdateProgress {
 }
 
 export interface AppUpdateInfo {
-  status: "current" | "available" | "unavailable";
+  status: "checking" | "current" | "available" | "unavailable";
   phase: UpdatePhase;
   distribution: "installed" | "portable" | "development";
   currentVersion: string;
@@ -506,6 +512,11 @@ export interface AppUpdateInfo {
   message: string;
   checkedAt: string;
   errorCode?: string;
+  network?: {
+    mode: "system-proxy" | "direct" | "unavailable";
+    label: string;
+    resolvedAt: string;
+  };
 }
 
 export interface DiagnosticExportResult {
@@ -582,6 +593,7 @@ export interface CDriveShiftApi {
   reapplyMigration(id: string): Promise<MigrationRecord>;
   deleteMigrations(ids: string[]): Promise<number>;
   onIndexerStatus(listener: (status: IndexerStatus) => void): () => void;
+  onSearchIndexChanged(listener: (event: SearchIndexChangedEvent) => void): () => void;
   onContentIndexerStatus(listener: (status: ContentIndexerStatus) => void): () => void;
   onMigrationProgress(listener: (event: MigrationProgressEvent) => void): () => void;
   onAppNavigation(listener: (event: AppNavigationEvent) => void): () => void;

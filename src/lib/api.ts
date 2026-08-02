@@ -61,6 +61,7 @@ const mockOverview: SystemOverview = {
 const mockSettings: AppSettings = {
   effectMode: "aurora",
   launchAtLogin: false,
+  launchMinimized: false,
   minimizeToTray: true,
   globalShortcut: "CommandOrControl+Alt+Space",
   quickSearchShortcut: "CommandOrControl+Alt+F",
@@ -202,11 +203,11 @@ const browserFallback: CDriveShiftApi = {
         status: "available",
         phase: "downloading",
         distribution: "portable",
-        currentVersion: "0.0.2",
-        latestVersion: "0.0.4",
+        currentVersion: "0.0.4",
+        latestVersion: "0.0.5",
         updateAvailable: true,
         canAutoUpdate: true,
-        releaseName: "CDriveShiftAI 0.0.4",
+        releaseName: "CDriveShiftAI 0.0.5",
         releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
         publishedAt: new Date().toISOString(),
         assets: [],
@@ -231,14 +232,14 @@ const browserFallback: CDriveShiftApi = {
       status: "current",
       phase: "current",
       distribution: "development",
-      currentVersion: "0.0.4",
-      latestVersion: "0.0.4",
+      currentVersion: "0.0.5",
+      latestVersion: "0.0.5",
       updateAvailable: false,
       canAutoUpdate: false,
-      releaseName: "CDriveShiftAI 0.0.4",
+      releaseName: "CDriveShiftAI 0.0.5",
       releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
       assets: [],
-      message: "当前已是最新版本 0.0.4",
+      message: "当前已是最新版本 0.0.5",
       checkedAt: new Date().toISOString()
     } as const;
   },
@@ -701,6 +702,7 @@ const browserFallback: CDriveShiftApi = {
     return before - mockMigrations.length;
   },
   onIndexerStatus: () => () => undefined,
+  onSearchIndexChanged: () => () => undefined,
   onContentIndexerStatus: () => () => undefined,
   onMigrationProgress(listener) {
     mockMigrationListeners.add(listener);

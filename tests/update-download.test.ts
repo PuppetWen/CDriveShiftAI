@@ -8,10 +8,14 @@ vi.mock("electron", () => ({
     getVersion: () => "0.0.1",
     isPackaged: true,
     quit: () => undefined
+  },
+  net: { fetch: (...args: Parameters<typeof fetch>) => fetch(...args) },
+  session: {
+    defaultSession: { resolveProxy: async () => "DIRECT" }
   }
 }));
 
-import { UpdateService } from "../electron/update";
+import { summarizeProxyRules, UpdateService } from "../electron/update";
 
 interface DownloadAttempt {
   downloadAttempt(
@@ -64,6 +68,16 @@ afterEach(async () => {
 });
 
 describe("auto-update downloader", () => {
+  it("recognizes Windows system proxy and direct routes", () => {
+    expect(summarizeProxyRules("PROXY 127.0.0.1:7890; DIRECT")).toEqual({
+      mode: "system-proxy",
+      label: "Windows 系统代理 · PROXY 127.0.0.1:7890"
+    });
+    expect(summarizeProxyRules("DIRECT")).toEqual({
+      mode: "direct",
+      label: "系统网络 · 直连"
+    });
+  });
   it("resumes a partially downloaded package with an HTTP Range request", async () => {
     let requests = 0;
     let resumedFrom = -1;

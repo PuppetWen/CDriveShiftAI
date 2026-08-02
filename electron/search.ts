@@ -13,6 +13,7 @@ import type {
   MouseShortcutButton,
   MouseShortcutStatus,
   NativeResponse,
+  SearchIndexChangedEvent,
   SearchFilters,
   SearchResult
 } from "./types";
@@ -64,6 +65,7 @@ export class SearchService {
   constructor(
     private readonly onStatus: (status: IndexerStatus) => void,
     private readonly onContentStatus: (status: ContentIndexerStatus) => void,
+    private readonly onIndexChanged: (event: SearchIndexChangedEvent) => void,
     private readonly onMouseShortcutHold: () => void,
     initialMouseShortcut: { button: MouseShortcutButton; holdMs: number }
   ) {
@@ -189,6 +191,16 @@ export class SearchService {
       },
       90_000
     );
+    if (this.backgroundMode) {
+      // An indexer that starts directly in tray mode does not observe a later
+      // foreground-to-background transition. Re-send the background command
+      // after init so it applies the same process-tree working-set trim used
+      // when a visible window is closed, without stopping watchers or search.
+      await this.request(
+        { op: "setBackground", background: true, processId: process.pid },
+        3_000
+      );
+    }
   }
 
   async stop(): Promise<void> {
@@ -712,6 +724,14 @@ export class SearchService {
     }
     if (response.event === "mouseShortcutHold") {
       this.onMouseShortcutHold();
+      return;
+    }
+    if (response.event === "indexChanged") {
+      this.executableCatalogCache = undefined;
+      this.onIndexChanged({
+        changedCount: Math.max(1, response.changedCount ?? 1),
+        observedAt: new Date().toISOString()
+      });
       return;
     }
     if (response.event === "mouseShortcutStatus") {
