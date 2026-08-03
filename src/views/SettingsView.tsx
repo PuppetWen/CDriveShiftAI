@@ -419,6 +419,11 @@ export function SettingsView({
     if (value === persistedSettingsRef.current[field]) return;
     const request = ++shortcutRequests.current[target];
     try {
+      if (value.trim()) {
+        const availability = await api.checkGlobalShortcut(value, target);
+        if (request !== shortcutRequests.current[target]) return;
+        if (!availability.available) return;
+      }
       const updated = await api.updateSettings({
         [field]: value
       });
@@ -437,11 +442,17 @@ export function SettingsView({
       );
     } catch (error) {
       if (request !== shortcutRequests.current[target]) return;
+      const message = error instanceof Error ? error.message : String(error);
+      if (/快捷键.*(?:占用|冲突|格式无效)/u.test(message)) {
+        // Keep the attempted value visible. ShortcutRecorder continuously
+        // checks it and renders the conflict as red inline guidance.
+        return;
+      }
       setDraft((current) => ({
         ...current,
         [field]: persistedSettingsRef.current[field]
       }));
-      notify("error", error instanceof Error ? error.message : String(error));
+      notify("error", message);
     }
   };
 

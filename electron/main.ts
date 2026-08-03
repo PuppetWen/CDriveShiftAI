@@ -1077,10 +1077,15 @@ function registerIpc(): void {
       ...previous,
       ...(safePatch as Partial<Omit<AppSettings, "ai">>)
     };
-    const shortcutFailures = applyGlobalShortcuts(candidate);
-    if (shortcutFailures.length > 0) {
-      applyGlobalShortcuts(previous);
-      throw new Error(shortcutFailures.join("；"));
+    const changesKeyboardShortcuts =
+      Object.prototype.hasOwnProperty.call(safePatch, "globalShortcut") ||
+      Object.prototype.hasOwnProperty.call(safePatch, "quickSearchShortcut");
+    if (changesKeyboardShortcuts) {
+      const shortcutFailures = applyGlobalShortcuts(candidate);
+      if (shortcutFailures.length > 0) {
+        applyGlobalShortcuts(previous);
+        throw new Error(shortcutFailures.join("；"));
+      }
     }
     try {
       const settings = await store.updateSettings(
@@ -1099,7 +1104,7 @@ function registerIpc(): void {
       createTray();
       return settings;
     } catch (error) {
-      applyGlobalShortcuts(previous);
+      if (changesKeyboardShortcuts) applyGlobalShortcuts(previous);
       throw error;
     }
   });
@@ -1855,17 +1860,7 @@ if (!singleInstance) {
     syncSearchBackgroundMode();
     triggerVisibleUpdateCheck("application-startup", 2_500);
     const shortcutFailures = applyGlobalShortcuts(store.getSettings());
-    if (shortcutFailures.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
-      void dialog.showMessageBox(mainWindow, {
-        type: "warning",
-        title: "全局快捷键未完全启用",
-        message: shortcutFailures.join("\n"),
-        detail: "可在设置中修改快捷键后重新保存。",
-        buttons: ["知道了"],
-        noLink: true
-      });
-    }
-    if (shortcutFailures.length > 0 && startupMinimized) {
+    if (shortcutFailures.length > 0) {
       logger.warn("shortcut.registration_incomplete", {
         startupMinimized,
         failures: shortcutFailures
