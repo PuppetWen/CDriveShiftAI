@@ -2345,174 +2345,71 @@ kbd { border: 1px solid var(--border); border-radius: 5px; color: var(--dim); ba
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  transform-origin: center;
-}
-
-.path-openable::before {
-  position: absolute;
-  z-index: 4;
-  border-radius: inherit;
-  content: "";
-  inset: 1px;
-  opacity: 0;
-  pointer-events: none;
 }
 
 .path-openable:active {
-  transform: scale(.997);
-  transition: transform 70ms ease;
+  background: color-mix(in srgb, var(--mint) 4%, transparent);
+  transition: background 70ms ease;
 }
 
 .path-open-feedback {
   position: absolute;
   z-index: 7;
-  top: 50%;
-  left: 50%;
-  display: inline-flex;
-  min-width: 106px;
-  height: 30px;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  border: 1px solid color-mix(in srgb, var(--mint) 42%, var(--border));
-  border-radius: 999px;
-  color: var(--text);
-  background:
-    linear-gradient(110deg, color-mix(in srgb, var(--mint) 18%, transparent), transparent 52%),
-    color-mix(in srgb, var(--surface-solid) 96%, transparent);
-  padding: 0 12px;
-  box-shadow:
-    0 12px 35px color-mix(in srgb, #000 28%, transparent),
-    0 0 28px color-mix(in srgb, var(--mint) 18%, transparent);
-  font-size: 8px;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  overflow: hidden;
+  border: 0;
+  background: linear-gradient(90deg, var(--mint), var(--blue));
+  box-shadow: 0 -1px 5px color-mix(in srgb, var(--mint) 22%, transparent);
   pointer-events: none;
-  transform: translate(-50%, -50%);
-  animation: path-feedback-enter 180ms cubic-bezier(.2, .85, .2, 1) both;
-  backdrop-filter: blur(18px) saturate(1.25);
+  transform-origin: left center;
 }
 
-.path-open-feedback i {
-  position: relative;
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  border-radius: 50%;
-  color: var(--bg);
-  background: var(--mint);
+.path-open-feedback.opening {
+  animation: path-open-line 520ms ease-in-out infinite alternate;
 }
 
-.path-open-feedback b { font-weight: 650; white-space: nowrap; }
-.path-open-feedback.opening i { animation: path-icon-orbit 540ms linear infinite; }
-.path-open-feedback.opened i { background: var(--good); }
+.path-open-feedback.opened {
+  background: var(--good);
+  animation: path-open-line-complete 480ms ease-out both;
+}
+
 .path-open-feedback.error {
-  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
-  box-shadow: 0 12px 35px color-mix(in srgb, var(--danger) 18%, transparent);
-}
-.path-open-feedback.error i { color: white; background: var(--danger); }
-
-.path-openable.path-open-opening::before {
-  opacity: 1;
-  background:
-    linear-gradient(100deg, transparent 15%, color-mix(in srgb, var(--mint) 15%, transparent) 42%, color-mix(in srgb, var(--blue) 13%, transparent) 58%, transparent 84%);
-  background-size: 240% 100%;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mint) 36%, transparent);
-  animation: path-aurora-sweep 560ms ease-out infinite;
-}
-
-.path-openable.path-open-opened::before {
-  opacity: 1;
-  background: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--good) 15%, transparent), transparent 62%);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 25%, transparent);
-  animation: path-open-complete 820ms ease-out both;
-}
-
-:root[data-effect="matrix"] .path-openable.path-open-opening {
-  animation: path-matrix-lock 220ms steps(2, end) both;
-}
-
-:root[data-effect="matrix"] .path-openable.path-open-opening::before {
-  border-radius: 2px;
-  opacity: 1;
-  background:
-    linear-gradient(90deg, transparent, color-mix(in srgb, var(--mint) 24%, transparent), transparent),
-    repeating-linear-gradient(0deg, transparent 0 5px, color-mix(in srgb, var(--blue) 11%, transparent) 6px);
-  background-size: 190% 100%, 100% 100%;
-  box-shadow:
-    inset 3px 0 var(--mint),
-    inset -3px 0 var(--blue),
-    inset 0 0 0 1px color-mix(in srgb, var(--mint) 58%, transparent);
-  animation: path-matrix-scan 380ms steps(8, end) infinite;
+  background: var(--danger);
+  animation: path-open-line-complete 620ms ease-out both;
 }
 
 :root[data-effect="matrix"] .path-open-feedback {
-  border-radius: 4px;
-  border-color: color-mix(in srgb, var(--mint) 66%, var(--border));
-  background:
-    repeating-linear-gradient(0deg, transparent 0 3px, color-mix(in srgb, var(--blue) 8%, transparent) 4px),
-    color-mix(in srgb, var(--surface-solid) 97%, transparent);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent),
-    0 0 30px color-mix(in srgb, var(--mint) 24%, transparent);
-  font-family: "Cascadia Code", monospace;
-  letter-spacing: .04em;
-}
-
-:root[data-effect="matrix"] .path-open-feedback i { border-radius: 3px; }
-
-:root[data-effect="calm"] .path-openable.path-open-opening::before {
-  opacity: 1;
-  background: radial-gradient(circle at 50% 52%, rgba(255, 255, 255, .88), color-mix(in srgb, var(--mint) 8%, transparent) 42%, transparent 74%);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mint) 18%, transparent);
-  animation: path-calm-breathe 520ms ease-in-out infinite alternate;
+  height: 1px;
+  background: linear-gradient(90deg, var(--mint), #72a9ff, var(--mint));
+  box-shadow: 0 -1px 7px color-mix(in srgb, var(--mint) 32%, transparent);
 }
 
 :root[data-effect="calm"] .path-open-feedback {
-  border-color: rgba(28, 132, 139, .2);
-  color: var(--text);
-  background: rgba(252, 255, 255, .91);
-  box-shadow:
-    0 14px 35px rgba(50, 81, 94, .16),
-    0 0 0 6px rgba(255, 255, 255, .26);
-  backdrop-filter: blur(22px);
+  background: linear-gradient(90deg, rgba(38, 149, 151, .42), rgba(95, 143, 201, .38));
+  box-shadow: none;
 }
 
-@keyframes path-feedback-enter {
-  from { opacity: 0; transform: translate(-50%, -44%) scale(.88); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.path-open-feedback-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
-@keyframes path-icon-orbit {
-  0% { transform: rotate(0deg) scale(.92); }
-  50% { transform: rotate(180deg) scale(1.08); }
-  100% { transform: rotate(360deg) scale(.92); }
+@keyframes path-open-line {
+  from { opacity: .36; transform: scaleX(.18); }
+  to { opacity: .92; transform: scaleX(.78); }
 }
 
-@keyframes path-aurora-sweep {
-  from { background-position: 120% 0; }
-  to { background-position: -120% 0; }
-}
-
-@keyframes path-open-complete {
-  0% { opacity: .95; transform: scale(.98); }
-  100% { opacity: 0; transform: scale(1.035); }
-}
-
-@keyframes path-matrix-lock {
-  0% { transform: translateX(0); }
-  35% { transform: translateX(1px); }
-  70% { transform: translateX(-1px); }
-  100% { transform: translateX(0); }
-}
-
-@keyframes path-matrix-scan {
-  from { background-position: 130% 0, 0 0; }
-  to { background-position: -130% 0, 0 8px; }
-}
-
-@keyframes path-calm-breathe {
-  from { opacity: .5; transform: scale(.985); }
-  to { opacity: .92; transform: scale(1); }
+@keyframes path-open-line-complete {
+  from { opacity: .85; transform: scaleX(.82); }
+  to { opacity: 0; transform: scaleX(1); }
 }
 
 /* Theme-aware hover hints (replaces unstyleable Windows/browser title popups) */
@@ -6331,24 +6228,16 @@ input:checked + .toggle::after { transform: translateX(13px); }
 }
 
 :root[data-effect="aurora"] .path-openable::before {
-  border-radius: 0;
-  background:
-    repeating-linear-gradient(90deg, transparent 0 13px, rgba(239, 196, 100, .82) 13px 26px);
-  animation-timing-function: steps(6, end);
+  content: none;
 }
 
 :root[data-effect="aurora"] .path-open-feedback {
-  border: 2px solid #63888a;
-  border-radius: 3px;
-  background: #25464b;
-  box-shadow: 0 5px 0 #0b252a;
-  backdrop-filter: none;
-  animation-timing-function: steps(3, end);
-}
-
-:root[data-effect="aurora"] .path-open-feedback i {
-  border-radius: 1px;
-  box-shadow: none;
+  height: 2px;
+  border: 0;
+  border-radius: 0;
+  background: linear-gradient(90deg, #f0c45e, #79c9c6);
+  box-shadow: 0 -1px 0 rgba(10, 37, 42, .5);
+  animation-timing-function: steps(5, end);
 }
 
 :root[data-effect="aurora"] .path-properties-backdrop {
