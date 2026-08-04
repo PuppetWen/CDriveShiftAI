@@ -1,4 +1,4 @@
-export type EffectMode = "aurora" | "matrix" | "calm";
+export type EffectMode = "aurora" | "matrix" | "calm" | "ember" | "ivory";
 export type ViewId =
   | "overview"
   | "search"
@@ -492,6 +492,8 @@ export interface MouseShortcutStatus {
 }
 
 export type ShortcutTarget = "main" | "quick-search";
+
+export type SettingsModuleId = "update" | "appearance" | "system" | "ai";
 
 export interface ShortcutCheckResult {
   available: boolean;

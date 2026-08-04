@@ -304,7 +304,7 @@ export interface OwnershipMapResult {
 }
 
 export interface AppSettings {
-  effectMode: "aurora" | "matrix" | "calm";
+  effectMode: "aurora" | "matrix" | "calm" | "ember" | "ivory";
   launchAtLogin: boolean;
   launchMinimized: boolean;
   minimizeToTray: boolean;

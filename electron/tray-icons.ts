@@ -21,6 +21,8 @@ export type TrayIconKind =
   | "theme-aurora"
   | "theme-matrix"
   | "theme-calm"
+  | "theme-ember"
+  | "theme-ivory"
   | "settings"
   | "exit";
 
@@ -45,6 +47,8 @@ export const trayIconKinds: TrayIconKind[] = [
   "theme-aurora",
   "theme-matrix",
   "theme-calm",
+  "theme-ember",
+  "theme-ivory",
   "settings",
   "exit"
 ];
@@ -342,6 +346,30 @@ function drawIcon(buffer: Buffer, kind: TrayIconKind, color: Rgb): void {
         true
       );
       line(buffer, { x: 5, y: 7 }, { x: 11, y: 7 }, color);
+      break;
+    case "theme-ember":
+      polyline(
+        buffer,
+        [
+          { x: 8, y: 1 },
+          { x: 14, y: 5 },
+          { x: 14, y: 11 },
+          { x: 8, y: 15 },
+          { x: 2, y: 11 },
+          { x: 2, y: 5 }
+        ],
+        color,
+        true
+      );
+      polyline(buffer, [{ x: 8, y: 4 }, { x: 11, y: 9 }, { x: 8, y: 13 }, { x: 5, y: 9 }, { x: 8, y: 4 }], color);
+      break;
+    case "theme-ivory":
+      circle(buffer, 8, 8, 4, color);
+      [1, 3, 8, 13, 15].forEach((value) => {
+        if (value === 8) return;
+        line(buffer, { x: 8, y: value }, { x: 8, y: value < 8 ? value + 2 : value - 2 }, color);
+        line(buffer, { x: value, y: 8 }, { x: value < 8 ? value + 2 : value - 2, y: 8 }, color);
+      });
       break;
     case "settings":
       circle(buffer, 8, 8, 5, color);

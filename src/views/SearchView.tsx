@@ -15,6 +15,7 @@ import { createPortal } from "react-dom";
 import {
   Archive,
   ArrowDown,
+  ArrowRightLeft,
   ArrowUp,
   AudioLines,
   Bookmark,
@@ -53,7 +54,7 @@ import {
   PathOpenFeedback,
   usePathOpenFeedback
 } from "../components/PathOpenFeedback";
-import { Badge, EmptyState, PageTitle } from "../components/ui";
+import { Badge, EmptyState } from "../components/ui";
 import { api } from "../lib/api";
 import { formatBytes, formatDate } from "../lib/format";
 import { useVirtualList } from "../lib/virtual-list";
@@ -162,6 +163,13 @@ const nameMatchModeLabels: Record<NameMatchMode, string> = {
   regex: "正则匹配"
 };
 
+const nameMatchModeDetails: Record<NameMatchMode, string> = {
+  contains: "关键词连续出现在名称中",
+  whole: "只匹配独立完整词",
+  fuzzy: "按字符顺序智能匹配",
+  regex: "使用正则表达式规则"
+};
+
 export function SearchView({
   indexer,
   drives,
@@ -174,7 +182,6 @@ export function SearchView({
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>(defaultFilters);
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
-  const [matchModeMenuOpen, setMatchModeMenuOpen] = useState(false);
   const [extensionInput, setExtensionInput] = useState("");
   const [datePreset, setDatePreset] = useState<DatePreset>("any");
   const [contentScope, setContentScope] = useState("*");
@@ -236,7 +243,6 @@ export function SearchView({
   const skipRestoredSizesRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const bookmarkPanelRef = useRef<HTMLElement>(null);
-  const matchModePickerRef = useRef<HTMLDivElement>(null);
   const workspaceSnapshotRef = useRef<SearchWorkspaceState | undefined>(undefined);
   const liveRefreshRef = useRef(false);
   const resultsRef = useRef<SearchResult[]>([]);
@@ -316,23 +322,6 @@ export function SearchView({
     return () => window.removeEventListener("pointerdown", close, true);
   }, [bookmarkPanelOpen]);
 
-  useEffect(() => {
-    if (!matchModeMenuOpen) return;
-    const close = (event: PointerEvent) => {
-      if (!matchModePickerRef.current?.contains(event.target as Node)) {
-        setMatchModeMenuOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMatchModeMenuOpen(false);
-    };
-    window.addEventListener("pointerdown", close, true);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("pointerdown", close, true);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [matchModeMenuOpen]);
   const contentIndexingCurrentScope =
     mode === "content" && contentStatus.state === "indexing" && contentStatusMatchesScope;
   const regexValidation = useMemo(
@@ -1552,55 +1541,35 @@ export function SearchView({
 
   return (
     <div className={standalone ? "page search-page standalone-search-page" : "page search-page"}>
-      {standalone ? (
-        <div className="standalone-search-heading">
-          <div>
-            <span>FULL SEARCH WORKSPACE</span>
-            <strong>全电脑搜索</strong>
-            <small>与主程序共享搜索状态、筛选条件和已存搜索</small>
-          </div>
+      <div className="search-mode-toolbar">
+        <div className="search-mode-switch">
+          <button type="button" className={mode === "name" ? "active" : ""} onClick={() => setMode("name")}>
+            <Search size={17} />
+            <span>
+              <strong>名称搜索</strong>
+              <small>全盘组合筛选</small>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={mode === "content" ? "active" : ""}
+            onClick={() => setMode("content")}
+          >
+            <FileSearch size={17} />
+            <span>
+              <strong>内容搜索</strong>
+              <small>指定目录全文</small>
+            </span>
+          </button>
+        </div>
+        {!standalone && (
           <Badge tone={indexer.state === "ready" ? "good" : "warn"}>
             <Database size={13} />
             {indexer.state === "ready"
               ? `${indexer.entries.toLocaleString()} 条名称索引`
               : "全盘索引构建中"}
           </Badge>
-        </div>
-      ) : (
-        <PageTitle
-          eyebrow="FIRST-PARTY SEARCH"
-          title="全盘搜索，快速准确"
-          description="组合文件类型、盘符、扩展名、大小、日期和名称规则，并按任意列即时排序。"
-          action={
-            <Badge tone={indexer.state === "ready" ? "good" : "warn"}>
-              <Database size={13} />
-              {indexer.state === "ready"
-                ? `${indexer.entries.toLocaleString()} 条名称索引`
-                : "全盘索引构建中"}
-            </Badge>
-          }
-        />
-      )}
-
-      <div className="search-mode-switch">
-        <button type="button" className={mode === "name" ? "active" : ""} onClick={() => setMode("name")}>
-          <Search size={17} />
-          <span>
-            <strong>名称搜索</strong>
-            <small>全盘组合筛选</small>
-          </span>
-        </button>
-        <button
-          type="button"
-          className={mode === "content" ? "active" : ""}
-          onClick={() => setMode("content")}
-        >
-          <FileSearch size={17} />
-          <span>
-            <strong>内容搜索</strong>
-            <small>指定目录全文</small>
-          </span>
-        </button>
+        )}
       </div>
 
       <section
@@ -1808,144 +1777,148 @@ export function SearchView({
 
         {mode === "name" ? (
           <>
-            <div className="search-filter-topline">
-              <div className="quick-category-row">
-                <button
-                  type="button"
-                  className={categories.length === 0 ? "active" : ""}
-                  onClick={() => setFilters((current) => ({ ...current, categories: [] }))}
-                >
-                  全部
-                </button>
-                {categoryDefinitions.map(({ value, label, icon: Icon }) => (
+            <div className="search-filter-workbench">
+              <section className="search-filter-group search-filter-types">
+                <div className="search-filter-group-title">
+                  <File size={13} />
+                  <span>文件类型</span>
+                </div>
+                <div className="quick-category-row">
                   <button
                     type="button"
-                    className={categories.includes(value) ? "active" : ""}
-                    onClick={() => toggleCategory(value)}
-                    key={value}
+                    className={categories.length === 0 ? "active" : ""}
+                    onClick={() => setFilters((current) => ({ ...current, categories: [] }))}
                   >
-                    <Icon size={13} />
-                    {label}
+                    全部
                   </button>
-                ))}
-              </div>
-              <div className="search-filter-actions">
-                <div className="match-mode-picker" ref={matchModePickerRef}>
-                  <ThemedTooltip content="选择包含、完整词、模糊或正则匹配；完整词按通用字符边界判断，不针对特定关键词">
+                  {categoryDefinitions.map(({ value, label, icon: Icon }) => (
                     <button
                       type="button"
-                      className={`match-mode-control ${nameMatchMode}`}
-                      aria-haspopup="menu"
-                      aria-expanded={matchModeMenuOpen}
-                      onClick={() => setMatchModeMenuOpen((value) => !value)}
+                      className={categories.includes(value) ? "active" : ""}
+                      onClick={() => toggleCategory(value)}
+                      key={value}
                     >
-                      <FileSearch size={13} />
-                      <span>{nameMatchModeLabels[nameMatchMode]}</span>
-                      <ChevronDown size={12} className={matchModeMenuOpen ? "flip" : ""} />
+                      <Icon size={13} />
+                      {label}
                     </button>
-                  </ThemedTooltip>
-                  {matchModeMenuOpen && (
-                    <div className="match-mode-menu" role="menu">
-                      {(Object.keys(nameMatchModeLabels) as NameMatchMode[]).map((value) => (
+                  ))}
+                </div>
+              </section>
+
+              <div className="search-filter-workbench-row">
+                <section className="search-filter-group search-filter-location">
+                  <div className="search-filter-group-title">
+                    <Globe2 size={13} />
+                    <span>搜索位置</span>
+                  </div>
+                  <div className="search-filter-location-controls">
+                    <div className="drive-scope-pills" aria-label="磁盘范围，可多选">
+                      <button
+                        type="button"
+                        className={scopes.length === 0 ? "active" : ""}
+                        onClick={() => setFilters((current) => ({ ...current, scope: "*", scopes: [] }))}
+                      >
+                        <Globe2 size={12} /> 全电脑
+                      </button>
+                      {drives.map((drive) => (
                         <button
                           type="button"
-                          className={nameMatchMode === value ? "active" : ""}
-                          role="menuitemradio"
-                          aria-checked={nameMatchMode === value}
-                          onClick={() => {
-                            selectNameMatchMode(value);
-                            setMatchModeMenuOpen(false);
-                          }}
-                          key={value}
+                          className={scopes.includes(drive.root) ? "active" : ""}
+                          onClick={() => toggleDrive(drive.root)}
+                          key={drive.root}
                         >
-                          <span />
-                          <strong>{nameMatchModeLabels[value]}</strong>
-                          <small>
-                            {value === "contains"
-                              ? "关键词连续出现在名称中"
-                              : value === "whole"
-                                ? "只匹配独立完整词"
-                                : value === "fuzzy"
-                                  ? "按字符顺序智能匹配"
-                                  : "使用正则表达式规则"}
-                          </small>
+                          {drive.root.slice(0, 2)}
                         </button>
                       ))}
                     </div>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  className={filterPanelOpen ? "advanced-filter-button active" : "advanced-filter-button"}
-                  onClick={() => setFilterPanelOpen((value) => !value)}
-                >
-                  <SlidersHorizontal size={14} />
-                  高级筛选
-                  {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
-                  <ChevronDown size={13} className={filterPanelOpen ? "flip" : ""} />
-                </button>
-              </div>
-            </div>
+                    <button
+                      type="button"
+                      className={`scope-button ${scopes.length === 0 ? "default-scope" : ""}`}
+                      onClick={() => void chooseScope()}
+                    >
+                      {scopes.length === 0 ? <Globe2 size={14} /> : <FolderOpen size={14} />}
+                      <span>{scopeLabel}</span>
+                    </button>
+                  </div>
+                </section>
 
-            <div className="search-filters name-filter-row">
-              <div className="drive-scope-pills" aria-label="磁盘范围，可多选">
-                <button
-                  type="button"
-                  className={scopes.length === 0 ? "active" : ""}
-                  onClick={() => setFilters((current) => ({ ...current, scope: "*", scopes: [] }))}
-                >
-                  <Globe2 size={12} /> 全电脑
-                </button>
-                {drives.map((drive) => (
-                  <button
-                    type="button"
-                    className={scopes.includes(drive.root) ? "active" : ""}
-                    onClick={() => toggleDrive(drive.root)}
-                    key={drive.root}
-                  >
-                    {drive.root.slice(0, 2)}
-                  </button>
-                ))}
+                <section className="search-filter-group search-filter-match">
+                  <div className="search-filter-group-title">
+                    <FileSearch size={13} />
+                    <span>匹配方式</span>
+                  </div>
+                  <div className="match-mode-segments" role="radiogroup" aria-label="名称匹配方式">
+                    {(Object.keys(nameMatchModeLabels) as NameMatchMode[]).map((value) => (
+                      <ThemedTooltip content={nameMatchModeDetails[value]} key={value}>
+                        <button
+                          type="button"
+                          className={nameMatchMode === value ? "active" : ""}
+                          role="radio"
+                          aria-checked={nameMatchMode === value}
+                          onClick={() => selectNameMatchMode(value)}
+                        >
+                          <span />
+                          {nameMatchModeLabels[value]}
+                        </button>
+                      </ThemedTooltip>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="search-filter-group search-filter-order">
+                  <div className="search-filter-group-title">
+                    <ListFilter size={13} />
+                    <span>排序与属性</span>
+                    {elapsed != null && (
+                      <small className="latency">
+                        <Zap size={11} /> {elapsed < 1 ? "<1" : elapsed.toFixed(0)} ms
+                      </small>
+                    )}
+                  </div>
+                  <div className="search-filter-order-controls">
+                    <div className="sort-control">
+                      <ListFilter size={13} />
+                      <select
+                        value={filters.sortBy}
+                        onChange={(event) =>
+                          setFilters((current) => ({
+                            ...current,
+                            sortBy: event.target.value as SearchSortField
+                          }))
+                        }
+                      >
+                        {(Object.keys(sortLabels) as SearchSortField[]).map((field) => (
+                          <option value={field} key={field}>
+                            按{sortLabels[field]}排序
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        aria-label={filters.sortDirection === "asc" ? "当前升序，点击切换降序" : "当前降序，点击切换升序"}
+                        onClick={() =>
+                          setFilters((current) => ({
+                            ...current,
+                            sortDirection: current.sortDirection === "asc" ? "desc" : "asc"
+                          }))
+                        }
+                      >
+                        {filters.sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      className={filterPanelOpen ? "advanced-filter-button active" : "advanced-filter-button"}
+                      onClick={() => setFilterPanelOpen((value) => !value)}
+                    >
+                      <SlidersHorizontal size={14} />
+                      更多条件
+                      {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
+                      <ChevronDown size={13} className={filterPanelOpen ? "flip" : ""} />
+                    </button>
+                  </div>
+                </section>
               </div>
-              <button type="button" className="scope-button" onClick={() => void chooseScope()}>
-                {scopes.length === 0 ? <Globe2 size={14} /> : <FolderOpen size={14} />}
-                <span>{scopeLabel}</span>
-              </button>
-              <div className="sort-control">
-                <ListFilter size={13} />
-                <select
-                  value={filters.sortBy}
-                  onChange={(event) =>
-                    setFilters((current) => ({
-                      ...current,
-                      sortBy: event.target.value as SearchSortField
-                    }))
-                  }
-                >
-                  {(Object.keys(sortLabels) as SearchSortField[]).map((field) => (
-                    <option value={field} key={field}>
-                      按{sortLabels[field]}排序
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  aria-label={filters.sortDirection === "asc" ? "当前升序，点击切换降序" : "当前降序，点击切换升序"}
-                  onClick={() =>
-                    setFilters((current) => ({
-                      ...current,
-                      sortDirection: current.sortDirection === "asc" ? "desc" : "asc"
-                    }))
-                  }
-                >
-                  {filters.sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
-                </button>
-              </div>
-              {elapsed != null && (
-                <span className="latency">
-                  <Zap size={13} /> {elapsed < 1 ? "<1" : elapsed.toFixed(0)} ms
-                </span>
-              )}
             </div>
 
             {filterPanelOpen && (
@@ -2433,18 +2406,34 @@ export function SearchView({
                     <span className="result-date-cell">{formatDate(item.modifiedAt)}</span>
                     <div className="result-row-action">
                       {item.isDirectory ? (
-                        <ThemedTooltip content="分析这个文件夹归属于哪个应用、用途与迁移风险">
-                          <button
-                            className="analyze-button"
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onAnalyze(item.path);
-                            }}
-                          >
-                            <Sparkles size={14} /> 分析
-                          </button>
-                        </ThemedTooltip>
+                        <>
+                          <ThemedTooltip content="分析这个文件夹归属于哪个应用、用途与迁移风险">
+                            <button
+                              className="result-quick-action"
+                              type="button"
+                              aria-label="分析目录归属"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onAnalyze(item.path);
+                              }}
+                            >
+                              <Sparkles size={15} />
+                            </button>
+                          </ThemedTooltip>
+                          <ThemedTooltip content="将这个目录带入可恢复的安全迁移流程">
+                            <button
+                              className="result-quick-action migrate"
+                              type="button"
+                              aria-label="进入安全迁移"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onMigrate(item.path);
+                              }}
+                            >
+                              <ArrowRightLeft size={15} />
+                            </button>
+                          </ThemedTooltip>
+                        </>
                       ) : (
                         <ThemedTooltip content="使用 Windows 当前默认应用打开文件">
                           <button

@@ -431,6 +431,102 @@ export function BackgroundFX({ mode }: { mode: EffectMode }) {
       context.restore();
     };
 
+    const drawEmber = (time: number) => {
+      context.clearRect(0, 0, width, height);
+      context.save();
+
+      const core = context.createRadialGradient(
+        width * 0.72,
+        height * 0.22,
+        0,
+        width * 0.72,
+        height * 0.22,
+        Math.max(width, height) * 0.68
+      );
+      core.addColorStop(0, "rgba(255, 105, 35, .12)");
+      core.addColorStop(0.42, "rgba(122, 42, 16, .045)");
+      core.addColorStop(1, "rgba(11, 7, 5, 0)");
+      context.fillStyle = core;
+      context.fillRect(0, 0, width, height);
+
+      const radius = 42;
+      const rowHeight = Math.sqrt(3) * radius;
+      context.lineWidth = 1;
+      for (let row = -1; row < height / rowHeight + 2; row += 1) {
+        for (let column = -1; column < width / (radius * 3) + 2; column += 1) {
+          const centerX = column * radius * 3 + (row % 2 ? radius * 1.5 : 0);
+          const centerY = row * rowHeight;
+          const pulse = 0.028 + 0.018 * Math.sin(time * 0.0007 + row * 0.7 + column);
+          context.strokeStyle = `rgba(255, 113, 42, ${pulse})`;
+          context.beginPath();
+          for (let side = 0; side < 6; side += 1) {
+            const angle = (Math.PI / 3) * side;
+            const x = centerX + Math.cos(angle) * radius;
+            const y = centerY + Math.sin(angle) * radius;
+            if (side === 0) context.moveTo(x, y);
+            else context.lineTo(x, y);
+          }
+          context.closePath();
+          context.stroke();
+        }
+      }
+
+      const scanX = ((time * 0.045) % (width + 320)) - 160;
+      const scan = context.createLinearGradient(scanX - 100, 0, scanX + 100, 0);
+      scan.addColorStop(0, "rgba(255, 104, 32, 0)");
+      scan.addColorStop(0.5, "rgba(255, 126, 48, .075)");
+      scan.addColorStop(1, "rgba(255, 104, 32, 0)");
+      context.fillStyle = scan;
+      context.fillRect(scanX - 100, 0, 200, height);
+
+      moveParticles(0.24);
+      for (const [index, particle] of particles.slice(0, 24).entries()) {
+        const pulse = 0.5 + Math.sin(time * 0.001 + particle.phase) * 0.5;
+        context.fillStyle = `rgba(255, ${105 + (index % 3) * 22}, 54, ${0.045 + pulse * 0.11})`;
+        context.shadowColor = "rgba(255, 93, 25, .75)";
+        context.shadowBlur = index % 5 === 0 ? 12 : 5;
+        context.fillRect(particle.x * width, particle.y * height, index % 5 === 0 ? 3 : 1.5, 1.5);
+      }
+      context.restore();
+    };
+
+    const drawIvory = (time: number) => {
+      context.clearRect(0, 0, width, height);
+      context.save();
+
+      const wash = context.createLinearGradient(0, 0, width, height);
+      wash.addColorStop(0, "rgba(255, 251, 244, .56)");
+      wash.addColorStop(0.52, "rgba(246, 242, 234, .08)");
+      wash.addColorStop(1, "rgba(195, 85, 60, .045)");
+      context.fillStyle = wash;
+      context.fillRect(0, 0, width, height);
+
+      const phase = time * 0.00012;
+      context.lineWidth = 1;
+      for (let row = 0; row < 7; row += 1) {
+        context.strokeStyle = `rgba(${row % 2 ? "96, 128, 145" : "194, 84, 61"}, ${0.035 + row * 0.004})`;
+        context.beginPath();
+        for (let x = -50; x <= width + 50; x += 32) {
+          const y = height * (0.12 + row * 0.14) + Math.sin(x * 0.004 + row + phase) * 18;
+          if (x === -50) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        }
+        context.stroke();
+      }
+
+      moveParticles(0.12);
+      for (const [index, particle] of particles.slice(0, 20).entries()) {
+        const pulse = 0.5 + Math.sin(time * 0.0007 + particle.phase) * 0.5;
+        context.beginPath();
+        context.fillStyle = index % 3 === 0
+          ? `rgba(195, 80, 57, ${0.025 + pulse * 0.035})`
+          : `rgba(94, 126, 146, ${0.02 + pulse * 0.03})`;
+        context.arc(particle.x * width, particle.y * height, 4 + particle.radius * 3, 0, Math.PI * 2);
+        context.fill();
+      }
+      context.restore();
+    };
+
     const draw = (time: number) => {
       animation = 0;
       if (document.hidden) return;
@@ -439,7 +535,9 @@ export function BackgroundFX({ mode }: { mode: EffectMode }) {
       const visualTime = reducedMotion ? 0 : time;
       if (mode === "aurora") drawBlockWorld(visualTime);
       else if (mode === "matrix") drawTechnology(visualTime);
-      else drawCrystal(visualTime);
+      else if (mode === "calm") drawCrystal(visualTime);
+      else if (mode === "ember") drawEmber(visualTime);
+      else drawIvory(visualTime);
       timer = window.setTimeout(() => {
         timer = 0;
         animation = requestAnimationFrame(draw);

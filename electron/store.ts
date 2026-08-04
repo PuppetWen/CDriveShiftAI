@@ -492,6 +492,11 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
   return {
     ...defaults.settings,
     ...input,
+    effectMode: ["aurora", "matrix", "calm", "ember", "ivory"].includes(
+      input?.effectMode ?? ""
+    )
+      ? input!.effectMode!
+      : defaults.settings.effectMode,
     globalShortcut:
       typeof input?.globalShortcut === "string"
         ? input.globalShortcut.trim().slice(0, 128)

@@ -5,6 +5,8 @@ import path from "node:path";
 const workspace = path.resolve(import.meta.dirname, "..");
 const chromePath = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const previewUrl = process.argv[2] ?? "http://127.0.0.1:5173/?view=overview";
+const viewportWidth = Math.max(900, Number(process.argv[3] ?? 1600));
+const viewportHeight = Math.max(600, Number(process.argv[4] ?? 1000));
 const outputDirectory = path.resolve("artifacts");
 const debugPort = 9237;
 const testTempRoot = path.join(workspace, ".cdriveshiftai-data", "test-temp");
@@ -24,7 +26,7 @@ const chrome = spawn(
     "--disable-background-networking",
     "--disable-default-apps",
     "--hide-scrollbars",
-    "--window-size=1600,1000",
+    `--window-size=${viewportWidth},${viewportHeight}`,
     "about:blank"
   ],
   { stdio: "ignore", windowsHide: true }
@@ -139,14 +141,28 @@ try {
   await send("Page.enable");
   await send("Runtime.enable");
   await send("Emulation.setDeviceMetricsOverride", {
-    width: 1600,
-    height: 1000,
+    width: viewportWidth,
+    height: viewportHeight,
     deviceScaleFactor: 1,
     mobile: false
   });
   await send("Page.navigate", { url: previewUrl });
   await waitFor('document.readyState === "complete"');
-  await waitFor('document.querySelector(".effect-switcher") !== null');
+  await waitFor(
+    'document.querySelector(".effect-switcher") !== null || document.querySelector(".quick-search-workspace") !== null'
+  );
+  const requestedEffect = new URL(previewUrl).searchParams.get("effect");
+  if (["aurora", "matrix", "calm", "ember", "ivory"].includes(requestedEffect)) {
+    const labels = {
+      aurora: "方块",
+      matrix: "科技",
+      calm: "晶境",
+      ember: "熔橙",
+      ivory: "暖瓷"
+    };
+    await clickButton(labels[requestedEffect]);
+    await waitFor(`document.documentElement.dataset.effect === ${JSON.stringify(requestedEffect)}`);
+  }
   const requestedView = new URL(previewUrl).searchParams.get("view") || "overview";
   await wait(350);
   await capture(`cdriveshiftai-${requestedView}.png`);
@@ -172,6 +188,17 @@ try {
     });
     await waitFor('document.querySelector(".themed-tooltip") !== null');
     await capture("cdriveshiftai-settings-version-tooltip.png");
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 4, y: 4 });
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll(".settings-module-nav button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "索引与快捷操作");
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`);
+    await waitFor('document.querySelector(".settings-system-stack") !== null');
+    await wait(160);
+    await capture("cdriveshiftai-settings-system.png");
   }
 
   if (requestedView === "search") {
@@ -187,18 +214,9 @@ try {
       return true;
     })()`);
     await waitFor('document.querySelector(".result-grid-row") !== null');
-    await clickButton("高级筛选");
+    await clickButton("更多条件");
     await waitFor('document.querySelector(".advanced-filter-panel") !== null');
-    await clickButton("包含匹配");
-    await waitFor('document.querySelector(".match-mode-menu") !== null');
-    const regexModeSelected = await evaluate(`(() => {
-      const button = [...document.querySelectorAll(".match-mode-menu button")]
-        .find((item) => item.querySelector("strong")?.textContent?.trim() === "正则匹配");
-      if (!(button instanceof HTMLButtonElement)) return false;
-      button.click();
-      return true;
-    })()`);
-    if (!regexModeSelected) throw new Error("Regex name match mode was unavailable");
+    await clickButton("正则匹配");
     await waitFor('document.querySelector(".regex-assistant") !== null');
     await wait(220);
     await capture("cdriveshiftai-search-regex-assistant.png");
@@ -853,6 +871,14 @@ try {
 
   await clickButton("AI：仅本地");
   await waitFor('document.querySelector(".settings-page") !== null');
+  await evaluate(`(() => {
+    const button = [...document.querySelectorAll(".settings-module-nav button")]
+      .find((item) => item.querySelector("strong")?.textContent?.trim() === "AI 服务");
+    if (!(button instanceof HTMLButtonElement)) return false;
+    button.click();
+    return true;
+  })()`);
+  await waitFor('document.querySelector(".ai-provider-panel") !== null');
 
   await evaluate(`(() => {
     const toggle = document.querySelector(".ai-master input");
@@ -913,6 +939,14 @@ try {
   await wait(120);
   await capture("cdriveshiftai-ai-provider-saved.png");
   await evaluate('document.querySelector(".settings-page")?.scrollTo({ top: 0 })');
+  await evaluate(`(() => {
+    const button = [...document.querySelectorAll(".settings-module-nav button")]
+      .find((item) => item.querySelector("strong")?.textContent?.trim() === "界面外观");
+    if (!(button instanceof HTMLButtonElement)) return false;
+    button.click();
+    return true;
+  })()`);
+  await waitFor('document.querySelector(".effect-cards") !== null');
 
   const scenes = [
     ["科技", "matrix", "cdriveshiftai-effect-technology.png"],

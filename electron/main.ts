@@ -144,7 +144,9 @@ const effectColors: Record<
 > = {
   aurora: { background: "#183841", symbols: "#f2e7c6", nativeTheme: "dark" },
   matrix: { background: "#050815", symbols: "#a8eefa", nativeTheme: "dark" },
-  calm: { background: "#edf4f5", symbols: "#526f7e", nativeTheme: "light" }
+  calm: { background: "#edf4f5", symbols: "#526f7e", nativeTheme: "light" },
+  ember: { background: "#0b0705", symbols: "#ffb078", nativeTheme: "dark" },
+  ivory: { background: "#f6f2ea", symbols: "#75534b", nativeTheme: "light" }
 };
 
 function applyNativeEffect(
@@ -734,17 +736,20 @@ function createTray(): void {
       submenu: ([
         ["aurora", "方块 · 像素湖境"],
         ["matrix", "科技 · HUD 数据流"],
-        ["calm", "晶境 · 玻璃流光"]
+        ["calm", "晶境 · 玻璃流光"],
+        ["ember", "熔橙 · 熔芯蜂巢"],
+        ["ivory", "暖瓷 · 米白陶影"]
       ] as const).map(([effectMode, label]) => ({
         label,
         type: "radio" as const,
         checked: settings.effectMode === effectMode,
         icon: createTrayMenuIcon(
-          effectMode === "aurora"
-            ? "theme-aurora"
-            : effectMode === "matrix"
-              ? "theme-matrix"
-              : "theme-calm"
+          `theme-${effectMode}` as
+            | "theme-aurora"
+            | "theme-matrix"
+            | "theme-calm"
+            | "theme-ember"
+            | "theme-ivory"
         ),
         click: () => {
           void store.updateSettings({ effectMode }).then((updated) => {
