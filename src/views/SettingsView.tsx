@@ -728,7 +728,7 @@ export function SettingsView({
     <div className="page settings-page">
       <PageTitle
         eyebrow="PREFERENCES"
-        title="让 CDriveShiftAI 按你的方式工作。"
+        title="按你的习惯设置 CDriveShiftAI。"
         description="选择类设置即时生效；输入类设置在焦点离开后自动校验并保存。"
       />
 

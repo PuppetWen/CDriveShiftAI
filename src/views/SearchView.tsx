@@ -1107,7 +1107,7 @@ export function SearchView({
       ) : (
         <PageTitle
           eyebrow="FIRST-PARTY SEARCH"
-          title="全电脑，输入即达。"
+          title="全盘搜索，快速准确"
           description="组合文件类型、盘符、扩展名、大小、日期和名称规则，并按任意列即时排序。"
           action={
             <Badge tone={indexer.state === "ready" ? "good" : "warn"}>
@@ -1705,8 +1705,8 @@ export function SearchView({
             </div>
             <div className="content-privacy-note">
               <Info size={14} />
-              只读取文本、代码、配置和日志；自动跳过 node_modules、.git、dist、build
-              等依赖或生成目录，单文件上限 8 MB。
+              内容搜索只索引文本、代码、配置和日志；依赖或生成目录以及超过 8 MB
+              的文件不读取正文。名称搜索不受这些限制。
             </div>
           </>
         )}
