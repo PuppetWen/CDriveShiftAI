@@ -28,6 +28,12 @@ export interface ContentSearchResult {
 export interface ContentSearchOptions {
   regex?: boolean;
   caseSensitive?: boolean;
+  sortBy?: SearchSortField;
+  sortDirection?: SearchSortDirection;
+  minSize?: number;
+  maxSize?: number;
+  modifiedAfter?: string;
+  modifiedBefore?: string;
 }
 
 export interface SearchResult {
@@ -38,6 +44,20 @@ export interface SearchResult {
   modifiedAt?: string;
   score: number;
   source: "native-index" | "live-scan";
+}
+
+export interface SearchPageOptions {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface SearchPage<T> {
+  items: T[];
+  hasMore: boolean;
+  nextCursor?: string;
+  totalMatches?: number;
+  generation: number;
+  cursorReset?: boolean;
 }
 
 export type SearchCategory =
@@ -66,6 +86,7 @@ export interface SearchFilters {
   modifiedBefore?: string;
   caseSensitive?: boolean;
   wholeWord?: boolean;
+  fuzzy?: boolean;
   matchPath?: boolean;
   regex?: boolean;
   sortBy?: SearchSortField;
@@ -113,6 +134,7 @@ export interface SearchBookmarkFolder {
 
 export interface UiLayoutState {
   sidebarCollapsed?: boolean;
+  searchResultColumnWidths?: SearchResultColumnWidths;
   searchRenamePosition?: {
     x: number;
     y: number;
@@ -282,7 +304,7 @@ export interface OwnershipMapResult {
 }
 
 export interface AppSettings {
-  effectMode: "aurora" | "matrix" | "calm";
+  effectMode: "aurora" | "matrix" | "calm" | "ember" | "ivory";
   launchAtLogin: boolean;
   launchMinimized: boolean;
   minimizeToTray: boolean;
@@ -460,9 +482,26 @@ export interface NativeResponse {
   status?: IndexerStatus | ContentIndexerStatus;
   results?: SearchResult[] | ContentSearchResult[];
   changedCount?: number;
+  hasMore?: boolean;
+  nextCursor?: string;
+  totalMatches?: number;
+  generation?: number;
+  cursorReset?: boolean;
+  contentScopes?: string[];
+}
+
+export interface SearchResultColumnWidths {
+  name: number;
+  path: number;
+  type: number;
+  size: number;
+  modified: number;
+  action: number;
 }
 
 export interface SearchIndexChangedEvent {
   changedCount: number;
   observedAt: string;
+  generation?: number;
+  contentScopes?: string[];
 }

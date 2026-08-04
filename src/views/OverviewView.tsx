@@ -48,7 +48,7 @@ export function OverviewView({
     <div className="page overview-page">
       <PageTitle
         eyebrow="CONTROL CENTER"
-        title="让每一块磁盘重新呼吸。"
+        title="全盘空间，一目了然"
         description="先找数据，再识别归属。CDriveShiftAI 用可恢复事务把目录迁往任意其他磁盘。"
         action={
           <button className="primary-button" type="button" onClick={() => onNavigate("search")}>

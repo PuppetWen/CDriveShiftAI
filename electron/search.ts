@@ -7,6 +7,7 @@ import { uptime } from "node:os";
 import path from "node:path";
 import type {
   ContentIndexerStatus,
+  ContentSearchOptions,
   ContentSearchResult,
   DirectorySizeResult,
   IndexerStatus,
@@ -15,6 +16,8 @@ import type {
   NativeResponse,
   SearchIndexChangedEvent,
   SearchFilters,
+  SearchPage,
+  SearchPageOptions,
   SearchResult
 } from "./types";
 import { getLocalDriveRoots } from "./system";
@@ -37,6 +40,54 @@ async function fileExists(candidate: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+const wordCharacterPattern = /[\p{L}\p{N}_]/u;
+
+function containsCompleteWord(target: string, needle: string): boolean {
+  let start = target.indexOf(needle);
+  while (start >= 0) {
+    const before = Array.from(target.slice(0, start)).at(-1);
+    const after = Array.from(target.slice(start + needle.length))[0];
+    if (
+      (!before || !wordCharacterPattern.test(before)) &&
+      (!after || !wordCharacterPattern.test(after))
+    ) {
+      return true;
+    }
+    start = target.indexOf(needle, start + Math.max(1, needle.length));
+  }
+  return false;
+}
+
+function fuzzySubsequenceScore(target: string, needle: string): number | undefined {
+  const wanted = Array.from(needle);
+  if (wanted.length === 0) return undefined;
+  let wantedIndex = 0;
+  let first = -1;
+  let last = -1;
+  let consecutivePairs = 0;
+  let position = 0;
+  for (const character of target) {
+    if (character === wanted[wantedIndex]) {
+      if (first < 0) first = position;
+      if (last >= 0 && position === last + 1) consecutivePairs += 1;
+      last = position;
+      wantedIndex += 1;
+      if (wantedIndex === wanted.length) {
+        const span = last - first + 1;
+        return (
+          48 +
+          (wanted.length / Math.max(1, span)) * 22 +
+          (consecutivePairs / Math.max(1, wanted.length - 1)) * 15 +
+          (1 / (1 + first * 0.15)) * 9 +
+          (needle.length / Math.max(needle.length, target.length)) * 6
+        );
+      }
+    }
+    position += 1;
+  }
+  return undefined;
 }
 
 export class SearchService {
@@ -344,6 +395,15 @@ export class SearchService {
     scope: string,
     options: { regex?: boolean; caseSensitive?: boolean } = {}
   ): Promise<ContentSearchResult[]> {
+    return (await this.searchContentPage(query, scope, options)).items;
+  }
+
+  async searchContentPage(
+    query: string,
+    scope: string,
+    options: ContentSearchOptions & SearchPageOptions = {}
+  ): Promise<SearchPage<ContentSearchResult>> {
+    const limit = Math.min(2_000, Math.max(1, Math.trunc(options.limit ?? 80)));
     if (!this.child) throw new Error("原生索引核心不可用");
     const response = await this.request(
       {
@@ -352,13 +412,24 @@ export class SearchService {
         scope,
         regex: options.regex === true,
         caseSensitive: options.caseSensitive === true,
-        limit: 160
+        sortBy: options.sortBy ?? "relevance",
+        sortDirection: options.sortDirection ?? "desc",
+        minSize: options.minSize,
+        maxSize: options.maxSize,
+        modifiedAfterMs: options.modifiedAfter
+          ? Date.parse(options.modifiedAfter)
+          : undefined,
+        modifiedBeforeMs: options.modifiedBefore
+          ? Date.parse(options.modifiedBefore)
+          : undefined,
+        cursor: options.cursor,
+        limit
       },
       options.regex ? 30_000 : 15_000
     );
-    const results = (response.results ?? []) as ContentSearchResult[];
-    return Promise.all(
-      results.map(async (result) => {
+    const nativeResults = (response.results ?? []) as ContentSearchResult[];
+    const results = await Promise.all(
+      nativeResults.map(async (result) => {
         try {
           const stats = await lstat(result.path);
           return {
@@ -371,13 +442,39 @@ export class SearchService {
         }
       })
     );
+    return {
+      items: results,
+      hasMore: response.hasMore === true,
+      nextCursor: response.nextCursor,
+      totalMatches: response.totalMatches,
+      generation: response.generation ?? 0,
+      cursorReset: response.cursorReset === true
+    };
   }
 
   async search(query: string, filters: SearchFilters): Promise<SearchResult[]> {
+    return (await this.searchPage(query, filters)).items;
+  }
+
+  async searchPage(
+    query: string,
+    filters: SearchFilters,
+    options: SearchPageOptions = {}
+  ): Promise<SearchPage<SearchResult>> {
     const trimmed = query.trim();
-    if (!trimmed) return [];
+    if (!trimmed) {
+      return { items: [], hasMore: false, generation: 0 };
+    }
+    const limit = Math.min(10_000, Math.max(1, Math.trunc(options.limit ?? 240)));
     let results: SearchResult[];
+    let hasMore = false;
+    let nextCursor: string | undefined;
+    let totalMatches: number | undefined;
+    let generation = 0;
+    let cursorReset = false;
+    let usingNative = false;
     if (this.child && this.status.state !== "error") {
+      usingNative = true;
       const response = await this.request(
         {
           op: "query",
@@ -389,15 +486,41 @@ export class SearchService {
           extensions: filters.extensions ?? [],
           caseSensitive: filters.caseSensitive ?? false,
           wholeWord: filters.wholeWord ?? false,
+          fuzzy: filters.fuzzy ?? false,
           matchPath: filters.matchPath ?? false,
           regex: filters.regex ?? false,
-          limit: 800
+          sortBy: filters.sortBy ?? "relevance",
+          sortDirection: filters.sortDirection ?? "desc",
+          minSize: filters.minSize,
+          maxSize: filters.maxSize,
+          modifiedAfterMs: filters.modifiedAfter
+            ? Date.parse(filters.modifiedAfter)
+            : undefined,
+          modifiedBeforeMs: filters.modifiedBefore
+            ? Date.parse(filters.modifiedBefore)
+            : undefined,
+          cursor: options.cursor,
+          limit
         },
-        filters.regex || filters.matchPath ? 20_000 : 8_000
+        filters.regex ||
+          filters.matchPath ||
+          filters.sortBy === "size" ||
+          filters.sortBy === "modified" ||
+          filters.minSize != null ||
+          filters.maxSize != null ||
+          filters.modifiedAfter != null ||
+          filters.modifiedBefore != null
+          ? 60_000
+          : 20_000
       );
       results = (response.results ?? []) as SearchResult[];
+      hasMore = response.hasMore === true;
+      nextCursor = response.nextCursor;
+      totalMatches = response.totalMatches;
+      generation = response.generation ?? 0;
+      cursorReset = response.cursorReset === true;
     } else {
-      results = await this.liveSearch(trimmed, filters.scope || "*", filters.kind);
+      results = await this.liveSearch(trimmed, filters.scope || "*", filters);
     }
 
     const enriched: SearchResult[] = [];
@@ -424,6 +547,8 @@ export class SearchService {
       );
     }
 
+    let pageItems = enriched;
+    if (!usingNative) {
     const modifiedThreshold = filters.modifiedAfter
       ? new Date(filters.modifiedAfter).getTime()
       : undefined;
@@ -480,7 +605,20 @@ export class SearchService {
       }
       return comparison * direction || first.name.localeCompare(second.name, "zh-CN");
     });
-    return filtered.slice(0, 500);
+      const fallbackOffset = Number.parseInt(options.cursor?.split(":").at(-1) ?? "0", 10) || 0;
+      totalMatches = filtered.length;
+      pageItems = filtered.slice(fallbackOffset, fallbackOffset + limit);
+      hasMore = fallbackOffset + pageItems.length < filtered.length;
+      nextCursor = hasMore ? `fallback:${fallbackOffset + pageItems.length}` : undefined;
+    }
+    return {
+      items: pageItems,
+      hasMore,
+      nextCursor,
+      totalMatches,
+      generation,
+      cursorReset
+    };
   }
 
   async directorySizes(inputPaths: string[]): Promise<DirectorySizeResult[]> {
@@ -596,10 +734,14 @@ export class SearchService {
   private async liveSearch(
     query: string,
     root: string,
-    kind: SearchFilters["kind"]
+    filters: SearchFilters
   ): Promise<SearchResult[]> {
     const deadline = Date.now() + 2_500;
-    const normalizedQuery = query.toLocaleLowerCase();
+    const normalizedQuery = filters.caseSensitive ? query : query.toLocaleLowerCase();
+    const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+    const expression = filters.regex
+      ? new RegExp(query, filters.caseSensitive ? "u" : "iu")
+      : undefined;
     const queue = root === "*" ? await getLocalDriveRoots() : [root];
     const results: SearchResult[] = [];
     while (queue.length > 0 && Date.now() < deadline && results.length < 80) {
@@ -611,16 +753,39 @@ export class SearchService {
           const entryPath = path.join(current, entry.name);
           if (entry.isDirectory()) queue.push(entryPath);
           const kindMatches =
-            kind === "all" ||
-            (kind === "folder" && entry.isDirectory()) ||
-            (kind === "file" && entry.isFile());
-          if (kindMatches && entry.name.toLocaleLowerCase().includes(normalizedQuery)) {
+            filters.kind === "all" ||
+            (filters.kind === "folder" && entry.isDirectory()) ||
+            (filters.kind === "file" && entry.isFile());
+          const originalTarget = filters.matchPath ? entryPath : entry.name;
+          const target = filters.caseSensitive
+            ? originalTarget
+            : originalTarget.toLocaleLowerCase();
+          let score: number | undefined;
+          if (expression?.test(originalTarget)) {
+            score = 72;
+          } else if (!expression && filters.fuzzy) {
+            const tokenScores = tokens.map((token) => fuzzySubsequenceScore(target, token));
+            if (tokenScores.every((value) => value != null)) {
+              score = tokenScores.reduce((sum, value) => sum + (value ?? 0), 0) /
+                Math.max(1, tokenScores.length);
+            }
+          } else if (
+            !expression &&
+            filters.wholeWord &&
+            tokens.every((token) => containsCompleteWord(target, token))
+          ) {
+            score = 82;
+          } else if (!expression && !filters.fuzzy && !filters.wholeWord &&
+            tokens.every((token) => target.includes(token))) {
+            score = target === normalizedQuery ? 100 : target.startsWith(normalizedQuery) ? 92 : 70;
+          }
+          if (kindMatches && score != null) {
             results.push({
               path: entryPath,
               name: entry.name,
               isDirectory: entry.isDirectory(),
               size: 0,
-              score: entry.name.toLocaleLowerCase() === normalizedQuery ? 100 : 70,
+              score,
               source: "live-scan"
             });
             if (results.length >= 80) break;
@@ -730,7 +895,9 @@ export class SearchService {
       this.executableCatalogCache = undefined;
       this.onIndexChanged({
         changedCount: Math.max(1, response.changedCount ?? 1),
-        observedAt: new Date().toISOString()
+        observedAt: new Date().toISOString(),
+        generation: response.generation,
+        contentScopes: response.contentScopes
       });
       return;
     }

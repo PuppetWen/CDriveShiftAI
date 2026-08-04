@@ -70,6 +70,7 @@ export function defaultFilters(): SearchFilters {
     extensions: [],
     caseSensitive: false,
     wholeWord: false,
+    fuzzy: false,
     matchPath: false,
     regex: false,
     sortBy: "relevance",
@@ -143,6 +144,7 @@ export function bookmarkConditionCount(bookmark: SearchBookmark): number {
     Number(filters.modifiedAfter != null || filters.modifiedBefore != null) +
     Number(filters.caseSensitive) +
     Number(filters.wholeWord) +
+    Number(filters.fuzzy) +
     Number(filters.matchPath) +
     Number(filters.regex) +
     Number(bookmark.mode === "content" && bookmark.contentScope !== "*")

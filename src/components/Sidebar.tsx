@@ -42,10 +42,14 @@ export function Sidebar({
   updateInfo
 }: SidebarProps) {
   const ready = indexer.state === "ready";
-  const updateStatus = updateInfo?.status ?? "checking";
+  const updateStatus = updateInfo?.updateAvailable
+    ? "available"
+    : updateInfo?.status ?? "checking";
   const updateTooltip =
     updateStatus === "available"
-      ? `发现新版本 v${updateInfo?.latestVersion ?? "未知"}；当前为 v${updateInfo?.currentVersion ?? "未知"}。点击进入设置更新。`
+      ? updateInfo?.status === "unavailable"
+        ? `已检测到新版本 v${updateInfo?.latestVersion ?? "未知"}；本次联网复查失败，但不会清除已确认的更新。点击进入设置查看。`
+        : `发现新版本 v${updateInfo?.latestVersion ?? "未知"}；当前为 v${updateInfo?.currentVersion ?? "未知"}。点击进入设置更新。`
       : updateStatus === "unavailable"
         ? `暂时无法检查版本：${updateInfo?.message ?? "请稍后重试"}。点击进入设置查看。`
         : updateStatus === "current"

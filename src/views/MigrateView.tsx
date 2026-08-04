@@ -116,7 +116,7 @@ export function MigrateView({
     <div className="page migrate-page">
       <PageTitle
         eyebrow="TRANSACTIONAL MOVE"
-        title="迁走数据，留住原路径。"
+        title="释放当前磁盘空间，不影响程序使用"
         description="完整复制与校验通过后才切换路径；失败会恢复原目录，不做半成品迁移。"
         action={
           <Badge tone="good">

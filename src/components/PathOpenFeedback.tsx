@@ -5,7 +5,6 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent
 } from "react";
-import { Check, ExternalLink, X } from "lucide-react";
 import { api } from "../lib/api";
 
 type OpenPhase = "opening" | "opened" | "error";
@@ -96,17 +95,13 @@ export function PathOpenFeedback({
         ? "已打开"
         : "打开失败";
   return (
-    <span className={`path-open-feedback ${feedback.phase}`} aria-live="polite">
-      <i>
-        {feedback.phase === "opening" ? (
-          <ExternalLink size={13} />
-        ) : feedback.phase === "opened" ? (
-          <Check size={14} />
-        ) : (
-          <X size={14} />
-        )}
-      </i>
-      <b>{label}</b>
+    <span
+      className={`path-open-feedback ${feedback.phase}`}
+      role="status"
+      aria-live="polite"
+      aria-label={label}
+    >
+      <span className="path-open-feedback-label">{label}</span>
     </span>
   );
 }

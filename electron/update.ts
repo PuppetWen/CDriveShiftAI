@@ -23,6 +23,8 @@ const RELEASE_API =
 const CACHE_DURATION_MS = 15 * 60_000;
 const DOWNLOAD_RETRIES = 3;
 const MANIFEST_NAME = "update-manifest.json";
+const CHECK_REQUEST_TIMEOUT_MS = 20_000;
+const CHECK_REQUEST_ATTEMPTS = 2;
 
 export type UpdatePhase =
   | "idle"
@@ -54,6 +56,11 @@ export interface AppUpdateProgress {
   maxRetries: number;
 }
 
+export interface AppUpdateReleaseSection {
+  title: string;
+  items: string[];
+}
+
 export interface AppUpdateInfo {
   status: "checking" | "current" | "available" | "unavailable";
   phase: UpdatePhase;
@@ -65,6 +72,8 @@ export interface AppUpdateInfo {
   releaseName?: string;
   releaseUrl?: string;
   publishedAt?: string;
+  releaseSummary?: string;
+  releaseSections?: AppUpdateReleaseSection[];
   assets: AppUpdateAsset[];
   selectedAsset?: AppUpdateAsset;
   progress?: AppUpdateProgress;
@@ -85,6 +94,7 @@ interface GitHubRelease {
   name?: string;
   html_url?: string;
   published_at?: string;
+  body?: string;
   draft?: boolean;
   prerelease?: boolean;
   assets?: Array<{
@@ -142,6 +152,69 @@ function compareVersions(first: string, second: string): number {
     if (difference !== 0) return difference;
   }
   return 0;
+}
+
+function cleanReleaseText(value: string): string {
+  return value
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[`*_~]/g, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function limitReleaseText(value: string, maxLength: number): string {
+  const text = cleanReleaseText(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+export function parseReleaseNotes(markdown?: string): {
+  summary?: string;
+  sections: AppUpdateReleaseSection[];
+} {
+  if (!markdown?.trim()) return { sections: [] };
+
+  const sections: AppUpdateReleaseSection[] = [];
+  const introduction: string[] = [];
+  let current: AppUpdateReleaseSection | undefined;
+
+  for (const rawLine of markdown.replace(/\r/g, "").split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const heading = /^(#{2,4})\s+(.+)$/.exec(line);
+    if (heading) {
+      const title = limitReleaseText(heading[2], 26);
+      if (!title || sections.length >= 6) {
+        current = undefined;
+        continue;
+      }
+      current = { title, items: [] };
+      sections.push(current);
+      continue;
+    }
+    if (/^#\s+/.test(line)) continue;
+
+    const bullet = /^(?:[-*+]\s+|\d+[.)]\s+)(.+)$/.exec(line);
+    const text = limitReleaseText(bullet?.[1] ?? line, 112);
+    if (!text) continue;
+    if (!current) {
+      if (introduction.length < 2) introduction.push(text);
+      continue;
+    }
+    if (current.items.length < 6) current.items.push(text);
+  }
+
+  const populated = sections.filter((section) => section.items.length > 0);
+  if (!populated.length && introduction.length) {
+    populated.push({ title: "版本说明", items: introduction.slice(0, 4) });
+  }
+  return {
+    summary: introduction.length
+      ? limitReleaseText(introduction.join(" "), 180)
+      : undefined,
+    sections: populated
+  };
 }
 
 function updateDistribution(): UpdateDistribution {
@@ -326,6 +399,53 @@ export class UpdateService {
     return net.fetch(url, init);
   }
 
+  private async fetchForUpdateCheck(
+    url: string,
+    currentVersion: string,
+    refreshRoute = false
+  ): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= CHECK_REQUEST_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await this.networkFetch(
+          url,
+          {
+            headers: githubHeaders(currentVersion),
+            signal: AbortSignal.timeout(CHECK_REQUEST_TIMEOUT_MS)
+          },
+          refreshRoute && attempt === 1
+        );
+        if (
+          attempt < CHECK_REQUEST_ATTEMPTS &&
+          (response.status === 408 || response.status === 429 || response.status >= 500)
+        ) {
+          await delay(450 * attempt);
+          continue;
+        }
+        return response;
+      } catch (error) {
+        lastError = error;
+        logger.warn("update.check_attempt_failed", {
+          attempt,
+          maxAttempts: CHECK_REQUEST_ATTEMPTS,
+          url: new URL(url).origin,
+          error: serializeError(error)
+        });
+        if (attempt < CHECK_REQUEST_ATTEMPTS) await delay(450 * attempt);
+      }
+    }
+    const timedOut =
+      lastError instanceof Error &&
+      (lastError.name === "TimeoutError" || /timeout|timed out/i.test(lastError.message));
+    throw new Error(
+      timedOut
+        ? `连接 GitHub 超时（已重试 ${CHECK_REQUEST_ATTEMPTS} 次），请检查系统代理后重试`
+        : `连接 GitHub 失败（已重试 ${CHECK_REQUEST_ATTEMPTS} 次）：${
+            lastError instanceof Error ? lastError.message : String(lastError)
+          }`
+    );
+  }
+
   async check(force = false): Promise<AppUpdateInfo> {
     const now = Date.now();
     if (!force && this.cached && now - this.cached.at < CACHE_DURATION_MS) {
@@ -342,10 +462,11 @@ export class UpdateService {
       errorCode: undefined
     });
     try {
-      const response = await this.networkFetch(RELEASE_API, {
-        headers: githubHeaders(currentVersion),
-        signal: AbortSignal.timeout(10_000)
-      }, true);
+      const response = await this.fetchForUpdateCheck(
+        RELEASE_API,
+        currentVersion,
+        true
+      );
       if (!response.ok) {
         throw new Error(`GitHub Release 返回 HTTP ${response.status}`);
       }
@@ -374,12 +495,18 @@ export class UpdateService {
       );
       let manifest: UpdateManifest | undefined;
       if (updateAvailable && manifestReleaseAsset) {
-        const manifestResponse = await this.networkFetch(manifestReleaseAsset.downloadUrl, {
-          headers: githubHeaders(currentVersion),
-          signal: AbortSignal.timeout(10_000)
-        });
-        if (manifestResponse.ok) {
-          manifest = safeManifest(await manifestResponse.json());
+        try {
+          const manifestResponse = await this.fetchForUpdateCheck(
+            manifestReleaseAsset.downloadUrl,
+            currentVersion
+          );
+          if (manifestResponse.ok) {
+            manifest = safeManifest(await manifestResponse.json());
+          }
+        } catch (error) {
+          logger.warn("update.manifest_fetch_failed", {
+            error: serializeError(error)
+          });
         }
       }
       if (manifest && manifest.version !== latestVersion) manifest = undefined;
@@ -397,6 +524,7 @@ export class UpdateService {
         distribution !== "development" &&
         Boolean(manifest && manifestAsset && selectedAsset);
       this.manifest = manifest;
+      const releaseNotes = parseReleaseNotes(release.body);
       const result: AppUpdateInfo = {
         status: updateAvailable ? "available" : "current",
         phase: updateAvailable ? "available" : "current",
@@ -408,6 +536,8 @@ export class UpdateService {
         releaseName: release.name || `CDriveShiftAI ${latestVersion}`,
         releaseUrl: release.html_url,
         publishedAt: release.published_at,
+        releaseSummary: releaseNotes.summary,
+        releaseSections: releaseNotes.sections,
         assets,
         selectedAsset,
         message: updateAvailable
@@ -423,20 +553,25 @@ export class UpdateService {
       this.onState(this.getState());
       return this.getState();
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const knownUpdate = Boolean(
+        this.state.latestVersion &&
+          compareVersions(this.state.latestVersion, currentVersion) > 0
+      );
       return this.setState({
         status: "unavailable",
         phase: "unavailable",
         currentVersion,
-        updateAvailable: false,
-        canAutoUpdate: false,
-        assets: [],
-        selectedAsset: undefined,
+        updateAvailable: knownUpdate,
+        canAutoUpdate: knownUpdate && this.state.canAutoUpdate,
+        assets: knownUpdate ? this.state.assets : [],
+        selectedAsset: knownUpdate ? this.state.selectedAsset : undefined,
         progress: undefined,
-        message: `暂时无法检查更新：${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        message: knownUpdate
+          ? `已知新版本 ${this.state.latestVersion}；本次联网复查失败：${errorMessage}`
+          : `暂时无法检查更新：${errorMessage}`,
         checkedAt,
-        errorCode: "CHECK_FAILED"
+        errorCode: /超时/.test(errorMessage) ? "CHECK_TIMEOUT" : "CHECK_FAILED"
       });
     }
   }

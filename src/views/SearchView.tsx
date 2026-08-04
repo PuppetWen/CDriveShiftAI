@@ -4,13 +4,18 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type DragEvent,
-  type MouseEvent
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type UIEvent
 } from "react";
 import { createPortal } from "react-dom";
 import {
   Archive,
   ArrowDown,
+  ArrowRightLeft,
   ArrowUp,
   AudioLines,
   Bookmark,
@@ -49,9 +54,10 @@ import {
   PathOpenFeedback,
   usePathOpenFeedback
 } from "../components/PathOpenFeedback";
-import { Badge, EmptyState, PageTitle } from "../components/ui";
+import { Badge, EmptyState } from "../components/ui";
 import { api } from "../lib/api";
 import { formatBytes, formatDate } from "../lib/format";
+import { useVirtualList } from "../lib/virtual-list";
 import {
   bookmarkConditionCount,
   bookmarkSignature,
@@ -77,6 +83,7 @@ import type {
   SearchBookmarkFolder,
   SearchFilters,
   SearchResult,
+  SearchResultColumnWidths,
   SearchSortDirection,
   SearchSortField,
   SearchWorkspaceState
@@ -90,6 +97,33 @@ interface SearchViewProps {
   notify: (type: "success" | "error", message: string) => void;
   standalone?: boolean;
 }
+
+const NAME_PAGE_SIZE = 240;
+const CONTENT_PAGE_SIZE = 80;
+const SEARCH_COLUMN_KEYS = [
+  "name",
+  "path",
+  "type",
+  "size",
+  "modified",
+  "action"
+] as const satisfies ReadonlyArray<keyof SearchResultColumnWidths>;
+const DEFAULT_SEARCH_COLUMN_WIDTHS: SearchResultColumnWidths = {
+  name: 22,
+  path: 34,
+  type: 9,
+  size: 9,
+  modified: 16,
+  action: 10
+};
+const MIN_SEARCH_COLUMN_WIDTHS: SearchResultColumnWidths = {
+  name: 12,
+  path: 16,
+  type: 6,
+  size: 7,
+  modified: 10,
+  action: 7
+};
 
 const categoryDefinitions: Array<{
   value: SearchCategory;
@@ -120,6 +154,22 @@ const sortLabels: Record<SearchSortField, string> = {
   type: "类型"
 };
 
+type NameMatchMode = "contains" | "whole" | "fuzzy" | "regex";
+
+const nameMatchModeLabels: Record<NameMatchMode, string> = {
+  contains: "包含匹配",
+  whole: "完整词匹配",
+  fuzzy: "模糊匹配",
+  regex: "正则匹配"
+};
+
+const nameMatchModeDetails: Record<NameMatchMode, string> = {
+  contains: "关键词连续出现在名称中",
+  whole: "只匹配独立完整词",
+  fuzzy: "按字符顺序智能匹配",
+  regex: "使用正则表达式规则"
+};
+
 export function SearchView({
   indexer,
   drives,
@@ -137,6 +187,16 @@ export function SearchView({
   const [contentScope, setContentScope] = useState("*");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [contentResults, setContentResults] = useState<ContentSearchResult[]>([]);
+  const [nameCursor, setNameCursor] = useState<string>();
+  const [contentCursor, setContentCursor] = useState<string>();
+  const [nameHasMore, setNameHasMore] = useState(false);
+  const [contentHasMore, setContentHasMore] = useState(false);
+  const [nameTotal, setNameTotal] = useState<number>();
+  const [contentTotal, setContentTotal] = useState<number>();
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [columnWidths, setColumnWidths] = useState<SearchResultColumnWidths>({
+    ...DEFAULT_SEARCH_COLUMN_WIDTHS
+  });
   const [directorySizes, setDirectorySizes] = useState<Map<string, DirectorySizeResult>>(
     new Map()
   );
@@ -176,6 +236,8 @@ export function SearchView({
   const [propertyPath, setPropertyPath] = useState("");
   const [liveIndexRevision, setLiveIndexRevision] = useState(0);
   const requestSequence = useRef(0);
+  const pageRequestSequence = useRef(0);
+  const loadingMoreRef = useRef(false);
   const sizeSequence = useRef(0);
   const skipRestoredSearchRef = useRef(false);
   const skipRestoredSizesRef = useRef(false);
@@ -183,6 +245,16 @@ export function SearchView({
   const bookmarkPanelRef = useRef<HTMLElement>(null);
   const workspaceSnapshotRef = useRef<SearchWorkspaceState | undefined>(undefined);
   const liveRefreshRef = useRef(false);
+  const resultsRef = useRef<SearchResult[]>([]);
+  const contentResultsRef = useRef<ContentSearchResult[]>([]);
+  const columnWidthsRef = useRef(columnWidths);
+  const columnResizeRef = useRef<{
+    boundary: number;
+    pointerId: number;
+    startX: number;
+    tableWidth: number;
+    widths: SearchResultColumnWidths;
+  } | undefined>(undefined);
   const {
     feedback: openFeedback,
     openPath,
@@ -202,6 +274,40 @@ export function SearchView({
       : "";
 
   useEffect(() => {
+    resultsRef.current = results;
+  }, [results]);
+
+  useEffect(() => {
+    contentResultsRef.current = contentResults;
+  }, [contentResults]);
+
+  useEffect(() => {
+    columnWidthsRef.current = columnWidths;
+  }, [columnWidths]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getUiLayout()
+      .then((layout) => {
+        if (cancelled || !layout.searchResultColumnWidths) return;
+        columnWidthsRef.current = layout.searchResultColumnWidths;
+        setColumnWidths(layout.searchResultColumnWidths);
+      })
+      .catch((reason) =>
+        console.warn("Unable to restore search result column widths", reason)
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(
+    () => () => document.documentElement.classList.remove("resizing-search-columns"),
+    []
+  );
+
+  useEffect(() => {
     if (!bookmarkPanelOpen) return;
     const close = (event: PointerEvent) => {
       const target = event.target as Node;
@@ -215,6 +321,7 @@ export function SearchView({
     window.addEventListener("pointerdown", close, true);
     return () => window.removeEventListener("pointerdown", close, true);
   }, [bookmarkPanelOpen]);
+
   const contentIndexingCurrentScope =
     mode === "content" && contentStatus.state === "indexing" && contentStatusMatchesScope;
   const regexValidation = useMemo(
@@ -225,20 +332,50 @@ export function SearchView({
   useEffect(() => api.onContentIndexerStatus(setContentStatus), []);
 
   useEffect(() => {
-    if (mode !== "name" || !query.trim()) return;
+    if (!query.trim()) return;
     let timer: number | undefined;
-    const unsubscribe = api.onSearchIndexChanged(() => {
+    const unsubscribe = api.onSearchIndexChanged((event) => {
+      if (mode === "content") {
+        const currentScope = normalizeScopePath(contentScope);
+        if (
+          contentScope === "*" ||
+          !event.contentScopes?.some(
+            (scope) => normalizeScopePath(scope) === currentScope
+          )
+        ) {
+          return;
+        }
+      }
       if (timer != null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         liveRefreshRef.current = true;
         setLiveIndexRevision((revision) => revision + 1);
-      }, 180);
+      }, 240);
     });
     return () => {
       if (timer != null) window.clearTimeout(timer);
       unsubscribe();
     };
-  }, [mode, query]);
+  }, [contentScope, mode, query]);
+
+  useEffect(() => {
+    if (!query.trim()) return;
+    let lastRefresh = 0;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "hidden") return;
+      const now = Date.now();
+      if (now - lastRefresh < 1_000) return;
+      lastRefresh = now;
+      liveRefreshRef.current = true;
+      setLiveIndexRevision((revision) => revision + 1);
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -290,6 +427,12 @@ export function SearchView({
         setContentScope(workspace.contentScope);
         setResults(workspace.results);
         setContentResults(workspace.contentResults);
+        setNameCursor(undefined);
+        setContentCursor(undefined);
+        setNameHasMore(workspace.mode === "name" && workspace.results.length >= NAME_PAGE_SIZE);
+        setContentHasMore(
+          workspace.mode === "content" && workspace.contentResults.length >= CONTENT_PAGE_SIZE
+        );
         const restoredSizes = workspace.directorySizes ?? [];
         setDirectorySizes(
           new Map(
@@ -455,12 +598,23 @@ export function SearchView({
     if (!workspaceReady) return;
     if (skipRestoredSearchRef.current) {
       skipRestoredSearchRef.current = false;
+      liveRefreshRef.current = true;
+      window.setTimeout(
+        () => setLiveIndexRevision((revision) => revision + 1),
+        0
+      );
       return;
     }
     const value = query.trim();
     if (!value) {
       setResults([]);
       setContentResults([]);
+      setNameCursor(undefined);
+      setContentCursor(undefined);
+      setNameHasMore(false);
+      setContentHasMore(false);
+      setNameTotal(undefined);
+      setContentTotal(undefined);
       setElapsed(undefined);
       setError("");
       return;
@@ -485,41 +639,74 @@ export function SearchView({
     }
 
     const sequence = ++requestSequence.current;
+    ++pageRequestSequence.current;
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
     const backgroundRefresh = liveRefreshRef.current;
     liveRefreshRef.current = false;
     const timer = window.setTimeout(() => {
       const started = performance.now();
-      if (!backgroundRefresh) setLoading(true);
+      if (!backgroundRefresh) {
+        setLoading(true);
+        setDirectorySizes(new Map());
+      }
       setError("");
+      const refreshLimit =
+        mode === "name"
+          ? Math.max(NAME_PAGE_SIZE, resultsRef.current.length)
+          : Math.max(CONTENT_PAGE_SIZE, contentResultsRef.current.length);
       const request =
         mode === "name"
-          ? api.search(value, {
-              ...filters,
-              kind: deriveKind(categories),
-              scope: scopes[0] ?? "*",
-              scopes
-            })
-          : api.searchContent(value, contentScope, {
+          ? api.searchPage(
+              value,
+              {
+                ...filters,
+                kind: deriveKind(categories),
+                scope: scopes[0] ?? "*",
+                scopes
+              },
+              { limit: backgroundRefresh ? refreshLimit : NAME_PAGE_SIZE }
+            )
+          : api.searchContentPage(value, contentScope, {
               regex: filters.regex,
-              caseSensitive: filters.caseSensitive
+              caseSensitive: filters.caseSensitive,
+              sortBy: filters.sortBy,
+              sortDirection: filters.sortDirection,
+              minSize: filters.minSize,
+              maxSize: filters.maxSize,
+              modifiedAfter: filters.modifiedAfter,
+              modifiedBefore: filters.modifiedBefore,
+              limit: backgroundRefresh ? refreshLimit : CONTENT_PAGE_SIZE
             });
       void request
-        .then((items) => {
+        .then((page) => {
           if (sequence !== requestSequence.current) return;
           if (mode === "name") {
-            const next = items as SearchResult[];
+            const next = page.items as SearchResult[];
             setResults((current) =>
               searchResultsEqual(current, next) ? current : next
             );
+            setNameCursor(page.nextCursor);
+            setNameHasMore(page.hasMore);
+            setNameTotal(page.totalMatches);
             setSelectedPath((current) =>
               current && next.some((item) => item.path === current)
                 ? current
                 : next[0]?.path ?? ""
             );
             setContentResults([]);
+            setContentCursor(undefined);
+            setContentHasMore(false);
+            setContentTotal(undefined);
           } else {
-            setContentResults(items as ContentSearchResult[]);
+            setContentResults(page.items as ContentSearchResult[]);
+            setContentCursor(page.nextCursor);
+            setContentHasMore(page.hasMore);
+            setContentTotal(page.totalMatches);
             setResults([]);
+            setNameCursor(undefined);
+            setNameHasMore(false);
+            setNameTotal(undefined);
           }
           setElapsed(performance.now() - started);
         })
@@ -554,9 +741,14 @@ export function SearchView({
       setDirectorySizesLoading(false);
       return;
     }
-    const paths = results.filter((item) => item.isDirectory).map((item) => item.path);
+    const paths = results
+      .filter(
+        (item) =>
+          item.isDirectory && !directorySizes.has(normalizeScopePath(item.path))
+      )
+      .slice(0, 180)
+      .map((item) => item.path);
     const sequence = ++sizeSequence.current;
-    setDirectorySizes(new Map());
     if (paths.length === 0) {
       setDirectorySizesLoading(false);
       return;
@@ -567,9 +759,13 @@ export function SearchView({
         .directorySizes(paths)
         .then((items) => {
           if (sequence !== sizeSequence.current) return;
-          setDirectorySizes(
-            new Map(items.map((item) => [normalizeScopePath(item.path), item]))
-          );
+          setDirectorySizes((current) => {
+            const next = new Map(current);
+            for (const item of items) {
+              next.set(normalizeScopePath(item.path), item);
+            }
+            return next;
+          });
         })
         .catch((reason) => {
           if (sequence === sizeSequence.current) {
@@ -587,51 +783,149 @@ export function SearchView({
   }, [notify, results, workspaceReady]);
 
   const displayedResults = useMemo(() => {
-    const enriched = results
-      .map((item) => {
-        const directorySize = item.isDirectory
-          ? directorySizes.get(normalizeScopePath(item.path))
-          : undefined;
-        return directorySize ? { ...item, size: directorySize.bytes } : item;
-      })
-      .filter((item) => {
-        if (!item.isDirectory) return true;
-        const size = directorySizes.get(normalizeScopePath(item.path));
-        if (!size?.complete) return true;
-        if (filters.minSize != null && size.bytes < filters.minSize) return false;
-        if (filters.maxSize != null && size.bytes > filters.maxSize) return false;
-        return true;
-      });
-    const field = filters.sortBy ?? "relevance";
-    const direction = filters.sortDirection === "desc" ? -1 : 1;
-    enriched.sort((first, second) => {
-      let comparison = 0;
-      if (field === "name") {
-        comparison = first.name.localeCompare(second.name, "zh-CN", {
-          numeric: true,
-          sensitivity: "base"
-        });
-      } else if (field === "path") {
-        comparison = first.path.localeCompare(second.path, "zh-CN", {
-          numeric: true,
-          sensitivity: "base"
-        });
-      } else if (field === "size") {
-        comparison = first.size - second.size;
-      } else if (field === "modified") {
-        comparison =
-          (first.modifiedAt ? Date.parse(first.modifiedAt) : 0) -
-          (second.modifiedAt ? Date.parse(second.modifiedAt) : 0);
-      } else if (field === "type") {
-        comparison = categoryOf(first).localeCompare(categoryOf(second));
-      } else {
-        comparison = second.score - first.score;
-        return comparison || first.path.length - second.path.length;
-      }
-      return comparison * direction || first.name.localeCompare(second.name, "zh-CN");
+    return results.map((item) => {
+      const directorySize = item.isDirectory
+        ? directorySizes.get(normalizeScopePath(item.path))
+        : undefined;
+      return directorySize ? { ...item, size: directorySize.bytes } : item;
     });
-    return enriched;
-  }, [directorySizes, filters.maxSize, filters.minSize, filters.sortBy, filters.sortDirection, results]);
+  }, [directorySizes, results]);
+
+  const activeResultCount =
+    mode === "name" ? displayedResults.length : contentResults.length;
+  const activeHasMore = mode === "name" ? nameHasMore : contentHasMore;
+  const virtualList = useVirtualList(
+    activeResultCount,
+    mode === "name" ? 58 : 82,
+    10
+  );
+  const virtualNameResults = displayedResults.slice(
+    virtualList.start,
+    virtualList.end
+  );
+  const virtualContentResults = contentResults.slice(
+    virtualList.start,
+    virtualList.end
+  );
+
+  useEffect(() => {
+    virtualList.resetScroll();
+  }, [contentScope, filters, mode, query, virtualList.resetScroll]);
+
+  const loadMoreResults = useCallback(async () => {
+    const value = query.trim();
+    const hasMore = mode === "name" ? nameHasMore : contentHasMore;
+    if (!value || !hasMore || loading || loadingMoreRef.current) return;
+    const sequence = ++pageRequestSequence.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    setError("");
+    try {
+      if (mode === "name") {
+        const restoredBootstrap = !nameCursor && resultsRef.current.length > 0;
+        const page = await api.searchPage(
+          value,
+          {
+            ...filters,
+            kind: deriveKind(categories),
+            scope: scopes[0] ?? "*",
+            scopes
+          },
+          {
+            cursor: nameCursor,
+            limit: restoredBootstrap
+              ? Math.min(10_000, resultsRef.current.length + NAME_PAGE_SIZE)
+              : NAME_PAGE_SIZE
+          }
+        );
+        if (sequence !== pageRequestSequence.current) return;
+        setResults((current) =>
+          restoredBootstrap || page.cursorReset
+            ? page.items
+            : mergeSearchResults(current, page.items)
+        );
+        setNameCursor(page.nextCursor);
+        setNameHasMore(page.hasMore);
+        setNameTotal(page.totalMatches);
+      } else {
+        const restoredBootstrap = !contentCursor && contentResultsRef.current.length > 0;
+        const page = await api.searchContentPage(value, contentScope, {
+          regex: filters.regex,
+          caseSensitive: filters.caseSensitive,
+          sortBy: filters.sortBy,
+          sortDirection: filters.sortDirection,
+          minSize: filters.minSize,
+          maxSize: filters.maxSize,
+          modifiedAfter: filters.modifiedAfter,
+          modifiedBefore: filters.modifiedBefore,
+          cursor: contentCursor,
+          limit: restoredBootstrap
+            ? Math.min(2_000, contentResultsRef.current.length + CONTENT_PAGE_SIZE)
+            : CONTENT_PAGE_SIZE
+        });
+        if (sequence !== pageRequestSequence.current) return;
+        setContentResults((current) =>
+          restoredBootstrap || page.cursorReset
+            ? page.items
+            : mergeContentResults(current, page.items)
+        );
+        setContentCursor(page.nextCursor);
+        setContentHasMore(page.hasMore);
+        setContentTotal(page.totalMatches);
+      }
+    } catch (reason) {
+      if (sequence === pageRequestSequence.current) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      if (sequence === pageRequestSequence.current) {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
+    }
+  }, [
+    categories,
+    contentCursor,
+    contentHasMore,
+    contentScope,
+    filters,
+    loading,
+    loadingMore,
+    mode,
+    nameCursor,
+    nameHasMore,
+    query,
+    scopes
+  ]);
+
+  const handleResultScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      virtualList.onScroll(event);
+      const element = event.currentTarget;
+      if (element.scrollHeight - element.scrollTop - element.clientHeight < 720) {
+        void loadMoreResults();
+      }
+    },
+    [loadMoreResults, virtualList]
+  );
+
+  useEffect(() => {
+    if (!activeHasMore || loading || loadingMore) return;
+    const frame = window.requestAnimationFrame(() => {
+      const element = virtualList.containerRef.current;
+      if (element && element.scrollHeight <= element.clientHeight + 360) {
+        void loadMoreResults();
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    activeResultCount,
+    activeHasMore,
+    loadMoreResults,
+    loading,
+    loadingMore,
+    virtualList.containerRef
+  ]);
 
   const chooseScope = async () => {
     const selected = await api.chooseDirectory(
@@ -741,11 +1035,146 @@ export function SearchView({
     });
   };
 
+  const resultGridStyle = useMemo<CSSProperties>(
+    () => ({
+      gridTemplateColumns: SEARCH_COLUMN_KEYS.map(
+        (key) => `${columnWidths[key]}fr`
+      ).join(" ")
+    }),
+    [columnWidths]
+  );
+
+  const resizeColumnBoundary = useCallback(
+    (
+      boundary: number,
+      deltaPercentage: number,
+      base = columnWidthsRef.current
+    ) => {
+      const leftKey = SEARCH_COLUMN_KEYS[boundary];
+      const rightKey = SEARCH_COLUMN_KEYS[boundary + 1];
+      if (!leftKey || !rightKey) return;
+      const pairWidth = base[leftKey] + base[rightKey];
+      const leftWidth = Math.min(
+        pairWidth - MIN_SEARCH_COLUMN_WIDTHS[rightKey],
+        Math.max(
+          MIN_SEARCH_COLUMN_WIDTHS[leftKey],
+          base[leftKey] + deltaPercentage
+        )
+      );
+      const next = {
+        ...base,
+        [leftKey]: leftWidth,
+        [rightKey]: pairWidth - leftWidth
+      };
+      columnWidthsRef.current = next;
+      setColumnWidths(next);
+    },
+    []
+  );
+
+  const beginColumnResize = useCallback(
+    (boundary: number, event: ReactPointerEvent<HTMLSpanElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const table = event.currentTarget.closest(".result-columns");
+      if (!(table instanceof HTMLElement) || table.clientWidth <= 0) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      columnResizeRef.current = {
+        boundary,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        tableWidth: table.clientWidth,
+        widths: { ...columnWidthsRef.current }
+      };
+      document.documentElement.classList.add("resizing-search-columns");
+    },
+    []
+  );
+
+  const moveColumnResize = useCallback(
+    (event: ReactPointerEvent<HTMLSpanElement>) => {
+      const resize = columnResizeRef.current;
+      if (!resize || resize.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      resizeColumnBoundary(
+        resize.boundary,
+        ((event.clientX - resize.startX) / resize.tableWidth) * 100,
+        resize.widths
+      );
+    },
+    [resizeColumnBoundary]
+  );
+
+  const finishColumnResize = useCallback(
+    (event: ReactPointerEvent<HTMLSpanElement>) => {
+      const resize = columnResizeRef.current;
+      if (!resize || resize.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      columnResizeRef.current = undefined;
+      document.documentElement.classList.remove("resizing-search-columns");
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      void api
+        .updateUiLayout({ searchResultColumnWidths: columnWidthsRef.current })
+        .catch((reason) =>
+          console.warn("Unable to save search result column widths", reason)
+        );
+    },
+    []
+  );
+
+  const resetColumnWidths = useCallback((event: ReactPointerEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = { ...DEFAULT_SEARCH_COLUMN_WIDTHS };
+    columnWidthsRef.current = next;
+    setColumnWidths(next);
+    void api
+      .updateUiLayout({ searchResultColumnWidths: next })
+      .catch((reason) =>
+        console.warn("Unable to reset search result column widths", reason)
+      );
+  }, []);
+
+  const adjustColumnWidthByKeyboard = useCallback(
+    (boundary: number, event: ReactKeyboardEvent<HTMLSpanElement>) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      event.stopPropagation();
+      resizeColumnBoundary(boundary, event.key === "ArrowLeft" ? -1 : 1);
+      void api
+        .updateUiLayout({ searchResultColumnWidths: columnWidthsRef.current })
+        .catch((reason) =>
+          console.warn("Unable to save search result column widths", reason)
+        );
+    },
+    [resizeColumnBoundary]
+  );
+
   const resetFilters = () => {
     setFilters(defaultFilters());
     setExtensionInput("");
     setDatePreset("any");
   };
+
+  const nameMatchMode: NameMatchMode = filters.regex
+    ? "regex"
+    : filters.fuzzy
+      ? "fuzzy"
+      : filters.wholeWord
+        ? "whole"
+        : "contains";
+
+  const selectNameMatchMode = useCallback((value: NameMatchMode) => {
+    setFilters((current) => ({
+      ...current,
+      wholeWord: value === "whole",
+      fuzzy: value === "fuzzy",
+      regex: value === "regex"
+    }));
+  }, []);
 
   const insertRegexToken = (token: string) => {
     const input = searchInputRef.current;
@@ -776,6 +1205,7 @@ export function SearchView({
     Number(filters.modifiedAfter != null || filters.modifiedBefore != null) +
     Number(filters.caseSensitive) +
     Number(filters.wholeWord) +
+    Number(filters.fuzzy) +
     Number(filters.matchPath) +
     Number(filters.regex);
 
@@ -1087,58 +1517,59 @@ export function SearchView({
           ? scopes[0]
           : `${scopes.length} 个范围`;
   const count = mode === "name" ? displayedResults.length : contentResults.length;
+  const totalCount = mode === "name" ? nameTotal : contentTotal;
+  const resultCountLabel =
+    totalCount != null
+      ? `已加载 ${count.toLocaleString()} / 共 ${totalCount.toLocaleString()} 个`
+      : `${count.toLocaleString()}${activeHasMore ? "+" : ""} 个结果`;
+  const columnResizeHandle = (boundary: number, label: string) => (
+    <span
+      className="result-column-resizer"
+      role="separator"
+      aria-label={`调整${label}列宽`}
+      aria-orientation="vertical"
+      tabIndex={0}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={resetColumnWidths}
+      onPointerDown={(event) => beginColumnResize(boundary, event)}
+      onPointerMove={moveColumnResize}
+      onPointerUp={finishColumnResize}
+      onPointerCancel={finishColumnResize}
+      onKeyDown={(event) => adjustColumnWidthByKeyboard(boundary, event)}
+    />
+  );
 
   return (
     <div className={standalone ? "page search-page standalone-search-page" : "page search-page"}>
-      {standalone ? (
-        <div className="standalone-search-heading">
-          <div>
-            <span>FULL SEARCH WORKSPACE</span>
-            <strong>全电脑搜索</strong>
-            <small>与主程序共享搜索状态、筛选条件和已存搜索</small>
-          </div>
+      <div className="search-mode-toolbar">
+        <div className="search-mode-switch">
+          <button type="button" className={mode === "name" ? "active" : ""} onClick={() => setMode("name")}>
+            <Search size={17} />
+            <span>
+              <strong>名称搜索</strong>
+              <small>全盘组合筛选</small>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={mode === "content" ? "active" : ""}
+            onClick={() => setMode("content")}
+          >
+            <FileSearch size={17} />
+            <span>
+              <strong>内容搜索</strong>
+              <small>指定目录全文</small>
+            </span>
+          </button>
+        </div>
+        {!standalone && (
           <Badge tone={indexer.state === "ready" ? "good" : "warn"}>
             <Database size={13} />
             {indexer.state === "ready"
               ? `${indexer.entries.toLocaleString()} 条名称索引`
               : "全盘索引构建中"}
           </Badge>
-        </div>
-      ) : (
-        <PageTitle
-          eyebrow="FIRST-PARTY SEARCH"
-          title="全电脑，输入即达。"
-          description="组合文件类型、盘符、扩展名、大小、日期和名称规则，并按任意列即时排序。"
-          action={
-            <Badge tone={indexer.state === "ready" ? "good" : "warn"}>
-              <Database size={13} />
-              {indexer.state === "ready"
-                ? `${indexer.entries.toLocaleString()} 条名称索引`
-                : "全盘索引构建中"}
-            </Badge>
-          }
-        />
-      )}
-
-      <div className="search-mode-switch">
-        <button type="button" className={mode === "name" ? "active" : ""} onClick={() => setMode("name")}>
-          <Search size={17} />
-          <span>
-            <strong>名称搜索</strong>
-            <small>全盘组合筛选</small>
-          </span>
-        </button>
-        <button
-          type="button"
-          className={mode === "content" ? "active" : ""}
-          onClick={() => setMode("content")}
-        >
-          <FileSearch size={17} />
-          <span>
-            <strong>内容搜索</strong>
-            <small>指定目录全文</small>
-          </span>
-        </button>
+        )}
       </div>
 
       <section
@@ -1315,6 +1746,8 @@ export function SearchView({
               mode === "name"
                 ? filters.regex
                   ? "输入正则表达式，例如 ^报告.*\\.pdf$"
+                  : filters.fuzzy
+                    ? "输入模糊关键词，例如 rdscp 可匹配 redscope"
                   : "搜索任意磁盘中的文件、目录或文件夹名字…"
                 : filters.regex
                   ? "输入正文正则，例如 error\\s+[45]\\d{2}"
@@ -1344,98 +1777,148 @@ export function SearchView({
 
         {mode === "name" ? (
           <>
-            <div className="search-filter-topline">
-              <div className="quick-category-row">
-                <button
-                  type="button"
-                  className={categories.length === 0 ? "active" : ""}
-                  onClick={() => setFilters((current) => ({ ...current, categories: [] }))}
-                >
-                  全部
-                </button>
-                {categoryDefinitions.map(({ value, label, icon: Icon }) => (
+            <div className="search-filter-workbench">
+              <section className="search-filter-group search-filter-types">
+                <div className="search-filter-group-title">
+                  <File size={13} />
+                  <span>文件类型</span>
+                </div>
+                <div className="quick-category-row">
                   <button
                     type="button"
-                    className={categories.includes(value) ? "active" : ""}
-                    onClick={() => toggleCategory(value)}
-                    key={value}
+                    className={categories.length === 0 ? "active" : ""}
+                    onClick={() => setFilters((current) => ({ ...current, categories: [] }))}
                   >
-                    <Icon size={13} />
-                    {label}
+                    全部
                   </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                className={filterPanelOpen ? "advanced-filter-button active" : "advanced-filter-button"}
-                onClick={() => setFilterPanelOpen((value) => !value)}
-              >
-                <SlidersHorizontal size={14} />
-                高级筛选
-                {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
-                <ChevronDown size={13} className={filterPanelOpen ? "flip" : ""} />
-              </button>
-            </div>
-
-            <div className="search-filters name-filter-row">
-              <div className="drive-scope-pills" aria-label="磁盘范围，可多选">
-                <button
-                  type="button"
-                  className={scopes.length === 0 ? "active" : ""}
-                  onClick={() => setFilters((current) => ({ ...current, scope: "*", scopes: [] }))}
-                >
-                  <Globe2 size={12} /> 全电脑
-                </button>
-                {drives.map((drive) => (
-                  <button
-                    type="button"
-                    className={scopes.includes(drive.root) ? "active" : ""}
-                    onClick={() => toggleDrive(drive.root)}
-                    key={drive.root}
-                  >
-                    {drive.root.slice(0, 2)}
-                  </button>
-                ))}
-              </div>
-              <button type="button" className="scope-button" onClick={() => void chooseScope()}>
-                {scopes.length === 0 ? <Globe2 size={14} /> : <FolderOpen size={14} />}
-                <span>{scopeLabel}</span>
-              </button>
-              <div className="sort-control">
-                <ListFilter size={13} />
-                <select
-                  value={filters.sortBy}
-                  onChange={(event) =>
-                    setFilters((current) => ({
-                      ...current,
-                      sortBy: event.target.value as SearchSortField
-                    }))
-                  }
-                >
-                  {(Object.keys(sortLabels) as SearchSortField[]).map((field) => (
-                    <option value={field} key={field}>
-                      按{sortLabels[field]}排序
-                    </option>
+                  {categoryDefinitions.map(({ value, label, icon: Icon }) => (
+                    <button
+                      type="button"
+                      className={categories.includes(value) ? "active" : ""}
+                      onClick={() => toggleCategory(value)}
+                      key={value}
+                    >
+                      <Icon size={13} />
+                      {label}
+                    </button>
                   ))}
-                </select>
-                <button
-                  type="button"
-                  aria-label={filters.sortDirection === "asc" ? "当前升序，点击切换降序" : "当前降序，点击切换升序"}
-                  onClick={() =>
-                    setFilters((current) => ({
-                      ...current,
-                      sortDirection: current.sortDirection === "asc" ? "desc" : "asc"
-                    }))
-                  }
-                >
-                  {filters.sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
-                </button>
+                </div>
+              </section>
+
+              <div className="search-filter-workbench-row">
+                <section className="search-filter-group search-filter-location">
+                  <div className="search-filter-group-title">
+                    <Globe2 size={13} />
+                    <span>搜索位置</span>
+                  </div>
+                  <div className="search-filter-location-controls">
+                    <div className="drive-scope-pills" aria-label="磁盘范围，可多选">
+                      <button
+                        type="button"
+                        className={scopes.length === 0 ? "active" : ""}
+                        onClick={() => setFilters((current) => ({ ...current, scope: "*", scopes: [] }))}
+                      >
+                        <Globe2 size={12} /> 全电脑
+                      </button>
+                      {drives.map((drive) => (
+                        <button
+                          type="button"
+                          className={scopes.includes(drive.root) ? "active" : ""}
+                          onClick={() => toggleDrive(drive.root)}
+                          key={drive.root}
+                        >
+                          {drive.root.slice(0, 2)}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className={`scope-button ${scopes.length === 0 ? "default-scope" : ""}`}
+                      onClick={() => void chooseScope()}
+                    >
+                      {scopes.length === 0 ? <Globe2 size={14} /> : <FolderOpen size={14} />}
+                      <span>{scopeLabel}</span>
+                    </button>
+                  </div>
+                </section>
+
+                <section className="search-filter-group search-filter-match">
+                  <div className="search-filter-group-title">
+                    <FileSearch size={13} />
+                    <span>匹配方式</span>
+                  </div>
+                  <div className="match-mode-segments" role="radiogroup" aria-label="名称匹配方式">
+                    {(Object.keys(nameMatchModeLabels) as NameMatchMode[]).map((value) => (
+                      <ThemedTooltip content={nameMatchModeDetails[value]} key={value}>
+                        <button
+                          type="button"
+                          className={nameMatchMode === value ? "active" : ""}
+                          role="radio"
+                          aria-checked={nameMatchMode === value}
+                          onClick={() => selectNameMatchMode(value)}
+                        >
+                          <span />
+                          {nameMatchModeLabels[value]}
+                        </button>
+                      </ThemedTooltip>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="search-filter-group search-filter-order">
+                  <div className="search-filter-group-title">
+                    <ListFilter size={13} />
+                    <span>排序与属性</span>
+                    {elapsed != null && (
+                      <small className="latency">
+                        <Zap size={11} /> {elapsed < 1 ? "<1" : elapsed.toFixed(0)} ms
+                      </small>
+                    )}
+                  </div>
+                  <div className="search-filter-order-controls">
+                    <div className="sort-control">
+                      <ListFilter size={13} />
+                      <select
+                        value={filters.sortBy}
+                        onChange={(event) =>
+                          setFilters((current) => ({
+                            ...current,
+                            sortBy: event.target.value as SearchSortField
+                          }))
+                        }
+                      >
+                        {(Object.keys(sortLabels) as SearchSortField[]).map((field) => (
+                          <option value={field} key={field}>
+                            按{sortLabels[field]}排序
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        aria-label={filters.sortDirection === "asc" ? "当前升序，点击切换降序" : "当前降序，点击切换升序"}
+                        onClick={() =>
+                          setFilters((current) => ({
+                            ...current,
+                            sortDirection: current.sortDirection === "asc" ? "desc" : "asc"
+                          }))
+                        }
+                      >
+                        {filters.sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      className={filterPanelOpen ? "advanced-filter-button active" : "advanced-filter-button"}
+                      onClick={() => setFilterPanelOpen((value) => !value)}
+                    >
+                      <SlidersHorizontal size={14} />
+                      更多条件
+                      {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
+                      <ChevronDown size={13} className={filterPanelOpen ? "flip" : ""} />
+                    </button>
+                  </div>
+                </section>
               </div>
-              {elapsed != null && (
-                <span className="latency">
-                  <Zap size={13} /> {elapsed < 1 ? "<1" : elapsed.toFixed(0)} ms
-                </span>
-              )}
             </div>
 
             {filterPanelOpen && (
@@ -1567,9 +2050,7 @@ export function SearchView({
                     <div className="search-option-toggles">
                       {[
                         ["matchPath", "匹配完整路径"],
-                        ["caseSensitive", "区分大小写"],
-                        ["wholeWord", "完整单词"],
-                        ["regex", "正则表达式"]
+                        ["caseSensitive", "区分大小写"]
                       ].map(([field, label]) => (
                         <button
                           type="button"
@@ -1591,7 +2072,7 @@ export function SearchView({
                 </div>
                 <div className="advanced-filter-footer">
                   <span>
-                    同一组内按“或”组合，不同组之间按“且”组合；正则和完整路径模式可能稍慢。
+                    同一组内按“或”组合，不同组之间按“且”组合；模糊、正则和完整路径模式可能稍慢。
                   </span>
                   <button type="button" onClick={resetFilters}>
                     <RotateCcw size={13} /> 重置全部筛选
@@ -1643,6 +2124,29 @@ export function SearchView({
                     修改时间 <X size={11} />
                   </button>
                 )}
+                {nameMatchMode !== "contains" && (
+                  <button type="button" onClick={() => selectNameMatchMode("contains")}>
+                    {nameMatchModeLabels[nameMatchMode]} <X size={11} />
+                  </button>
+                )}
+                {filters.caseSensitive && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFilters((current) => ({ ...current, caseSensitive: false }))
+                    }
+                  >
+                    区分大小写 <X size={11} />
+                  </button>
+                )}
+                {filters.matchPath && (
+                  <button
+                    type="button"
+                    onClick={() => setFilters((current) => ({ ...current, matchPath: false }))}
+                  >
+                    匹配完整路径 <X size={11} />
+                  </button>
+                )}
               </div>
             )}
           </>
@@ -1677,7 +2181,12 @@ export function SearchView({
                   type="button"
                   className={filters.regex ? "active" : ""}
                   onClick={() =>
-                    setFilters((current) => ({ ...current, regex: !current.regex }))
+                    setFilters((current) => ({
+                      ...current,
+                      regex: !current.regex,
+                      wholeWord: false,
+                      fuzzy: false
+                    }))
                   }
                 >
                   <span />
@@ -1702,11 +2211,6 @@ export function SearchView({
                   <Zap size={13} /> {elapsed < 1 ? "<1" : elapsed.toFixed(0)} ms
                 </span>
               )}
-            </div>
-            <div className="content-privacy-note">
-              <Info size={14} />
-              只读取文本、代码、配置和日志；自动跳过 node_modules、.git、dist、build
-              等依赖或生成目录，单文件上限 8 MB。
             </div>
           </>
         )}
@@ -1771,7 +2275,12 @@ export function SearchView({
       {query ? (
         <section className="results-panel glass-card">
           <div className="results-head">
-            <span>{loading ? "正在查询…" : `${count} 个结果`}</span>
+            <span>{loading ? "正在查询…" : resultCountLabel}</span>
+            {loadingMore && (
+              <span className="inline-note lazy-load-note">
+                <span className="spinner tiny" /> 正在加载下一批
+              </span>
+            )}
             {restoredAt && (
               <ThemedTooltip content={`保存时间：${restoredAt}`}>
                 <span className="inline-note restored-search-state">
@@ -1799,34 +2308,39 @@ export function SearchView({
                 <Info size={13} /> {contentStatus.message}
               </span>
             )}
-            <span className="result-help">单击选中 · 双击打开 · 右键更多操作</span>
+            <span className="result-help">单击选中 · 双击打开 · 右键操作 · 拖动表头分隔线调列宽</span>
           </div>
           {mode === "name" && !error && displayedResults.length > 0 && (
-            <div className="result-columns">
+            <div className="result-columns" style={resultGridStyle}>
               <button type="button" onClick={() => setSort("name")}>
                 名称
                 {filters.sortBy === "name" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(0, "名称")}
               </button>
               <button type="button" onClick={() => setSort("path")}>
                 路径
                 {filters.sortBy === "path" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(1, "路径")}
               </button>
               <button type="button" onClick={() => setSort("type")}>
                 类型
                 {filters.sortBy === "type" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(2, "类型")}
               </button>
               <button type="button" onClick={() => setSort("size")}>
                 大小
                 {filters.sortBy === "size" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(3, "大小")}
               </button>
               <button type="button" onClick={() => setSort("modified")}>
                 修改时间
                 {filters.sortBy === "modified" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(4, "修改时间")}
               </button>
               <span>操作</span>
             </div>
@@ -1846,8 +2360,16 @@ export function SearchView({
               {error}
             </EmptyState>
           ) : mode === "name" && displayedResults.length > 0 ? (
-            <div className="result-list">
-              {displayedResults.map((item) => {
+            <div
+              className="result-list virtual-result-list"
+              ref={virtualList.containerRef}
+              onScroll={handleResultScroll}
+              aria-busy={loadingMore}
+            >
+              {virtualList.paddingTop > 0 && (
+                <div className="virtual-list-spacer" style={{ height: virtualList.paddingTop }} />
+              )}
+              {virtualNameResults.map((item) => {
                 const directorySize = item.isDirectory
                   ? directorySizes.get(normalizeScopePath(item.path))
                   : undefined;
@@ -1857,6 +2379,7 @@ export function SearchView({
                     className={`result-row result-grid-row path-openable ${
                       selectedPath === item.path ? "selected" : ""
                     } ${openClassNameFor(item.path)}`}
+                    style={resultGridStyle}
                     key={item.path}
                     onClick={() => setSelectedPath(item.path)}
                     onDoubleClick={(event) => openFromDoubleClick(event, item.path)}
@@ -1883,18 +2406,34 @@ export function SearchView({
                     <span className="result-date-cell">{formatDate(item.modifiedAt)}</span>
                     <div className="result-row-action">
                       {item.isDirectory ? (
-                        <ThemedTooltip content="分析这个文件夹归属于哪个应用、用途与迁移风险">
-                          <button
-                            className="analyze-button"
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onAnalyze(item.path);
-                            }}
-                          >
-                            <Sparkles size={14} /> 分析
-                          </button>
-                        </ThemedTooltip>
+                        <>
+                          <ThemedTooltip content="分析这个文件夹归属于哪个应用、用途与迁移风险">
+                            <button
+                              className="result-quick-action"
+                              type="button"
+                              aria-label="分析目录归属"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onAnalyze(item.path);
+                              }}
+                            >
+                              <Sparkles size={15} />
+                            </button>
+                          </ThemedTooltip>
+                          <ThemedTooltip content="将这个目录带入可恢复的安全迁移流程">
+                            <button
+                              className="result-quick-action migrate"
+                              type="button"
+                              aria-label="进入安全迁移"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onMigrate(item.path);
+                              }}
+                            >
+                              <ArrowRightLeft size={15} />
+                            </button>
+                          </ThemedTooltip>
+                        </>
                       ) : (
                         <ThemedTooltip content="使用 Windows 当前默认应用打开文件">
                           <button
@@ -1914,6 +2453,12 @@ export function SearchView({
                   </div>
                 );
               })}
+              {virtualList.paddingBottom > 0 && (
+                <div
+                  className="virtual-list-spacer"
+                  style={{ height: virtualList.paddingBottom }}
+                />
+              )}
             </div>
           ) : mode === "content" && contentResults.length > 0 ? (
             <>
@@ -1922,8 +2467,19 @@ export function SearchView({
                 <span>文件 / 路径 / 命中内容</span>
                 <span>大小 / 修改时间</span>
               </div>
-              <div className="result-list content-results">
-                {contentResults.map((item) => {
+              <div
+                className="result-list content-results virtual-result-list"
+                ref={virtualList.containerRef}
+                onScroll={handleResultScroll}
+                aria-busy={loadingMore}
+              >
+                {virtualList.paddingTop > 0 && (
+                  <div
+                    className="virtual-list-spacer"
+                    style={{ height: virtualList.paddingTop }}
+                  />
+                )}
+                {virtualContentResults.map((item) => {
                 const contextItem: SearchResult = {
                   path: item.path,
                   name: item.name,
@@ -1959,6 +2515,12 @@ export function SearchView({
                   </div>
                 );
                 })}
+                {virtualList.paddingBottom > 0 && (
+                  <div
+                    className="virtual-list-spacer"
+                    style={{ height: virtualList.paddingBottom }}
+                  />
+                )}
               </div>
             </>
           ) : !loading ? (
@@ -2104,4 +2666,34 @@ function searchResultsEqual(current: SearchResult[], next: SearchResult[]): bool
       item.source === candidate.source
     );
   });
+}
+
+function mergeSearchResults(
+  current: SearchResult[],
+  next: SearchResult[]
+): SearchResult[] {
+  const paths = new Set(current.map((item) => normalizeScopePath(item.path)));
+  const merged = [...current];
+  for (const item of next) {
+    const key = normalizeScopePath(item.path);
+    if (paths.has(key)) continue;
+    paths.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
+function mergeContentResults(
+  current: ContentSearchResult[],
+  next: ContentSearchResult[]
+): ContentSearchResult[] {
+  const paths = new Set(current.map((item) => normalizeScopePath(item.path)));
+  const merged = [...current];
+  for (const item of next) {
+    const key = normalizeScopePath(item.path);
+    if (paths.has(key)) continue;
+    paths.add(key);
+    merged.push(item);
+  }
+  return merged;
 }

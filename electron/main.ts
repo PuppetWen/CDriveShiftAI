@@ -144,7 +144,9 @@ const effectColors: Record<
 > = {
   aurora: { background: "#183841", symbols: "#f2e7c6", nativeTheme: "dark" },
   matrix: { background: "#050815", symbols: "#a8eefa", nativeTheme: "dark" },
-  calm: { background: "#edf4f5", symbols: "#526f7e", nativeTheme: "light" }
+  calm: { background: "#edf4f5", symbols: "#526f7e", nativeTheme: "light" },
+  ember: { background: "#0b0705", symbols: "#ffb078", nativeTheme: "dark" },
+  ivory: { background: "#f6f2ea", symbols: "#75534b", nativeTheme: "light" }
 };
 
 function applyNativeEffect(
@@ -734,17 +736,20 @@ function createTray(): void {
       submenu: ([
         ["aurora", "方块 · 像素湖境"],
         ["matrix", "科技 · HUD 数据流"],
-        ["calm", "晶境 · 玻璃流光"]
+        ["calm", "晶境 · 玻璃流光"],
+        ["ember", "熔橙 · 熔芯蜂巢"],
+        ["ivory", "暖瓷 · 米白陶影"]
       ] as const).map(([effectMode, label]) => ({
         label,
         type: "radio" as const,
         checked: settings.effectMode === effectMode,
         icon: createTrayMenuIcon(
-          effectMode === "aurora"
-            ? "theme-aurora"
-            : effectMode === "matrix"
-              ? "theme-matrix"
-              : "theme-calm"
+          `theme-${effectMode}` as
+            | "theme-aurora"
+            | "theme-matrix"
+            | "theme-calm"
+            | "theme-ember"
+            | "theme-ivory"
         ),
         click: () => {
           void store.updateSettings({ effectMode }).then((updated) => {
@@ -1077,10 +1082,15 @@ function registerIpc(): void {
       ...previous,
       ...(safePatch as Partial<Omit<AppSettings, "ai">>)
     };
-    const shortcutFailures = applyGlobalShortcuts(candidate);
-    if (shortcutFailures.length > 0) {
-      applyGlobalShortcuts(previous);
-      throw new Error(shortcutFailures.join("；"));
+    const changesKeyboardShortcuts =
+      Object.prototype.hasOwnProperty.call(safePatch, "globalShortcut") ||
+      Object.prototype.hasOwnProperty.call(safePatch, "quickSearchShortcut");
+    if (changesKeyboardShortcuts) {
+      const shortcutFailures = applyGlobalShortcuts(candidate);
+      if (shortcutFailures.length > 0) {
+        applyGlobalShortcuts(previous);
+        throw new Error(shortcutFailures.join("；"));
+      }
     }
     try {
       const settings = await store.updateSettings(
@@ -1099,7 +1109,7 @@ function registerIpc(): void {
       createTray();
       return settings;
     } catch (error) {
-      applyGlobalShortcuts(previous);
+      if (changesKeyboardShortcuts) applyGlobalShortcuts(previous);
       throw error;
     }
   });
@@ -1519,7 +1529,7 @@ function registerIpc(): void {
 
   ipcMain.handle(
     "search:query",
-    async (_event, query: unknown, filters: unknown) => {
+    async (_event, query: unknown, filters: unknown, pageOptions?: unknown) => {
       const value = assertString(query, "搜索词", 512);
       const raw = (filters ?? {}) as Partial<SearchFilters>;
       const allowedCategories = new Set<SearchCategory>([
@@ -1542,6 +1552,9 @@ function registerIpc(): void {
         "type"
       ]);
       const allowedSortDirections = new Set<SearchSortDirection>(["asc", "desc"]);
+      const regex = raw.regex === true;
+      const fuzzy = !regex && raw.fuzzy === true;
+      const wholeWord = !regex && !fuzzy && raw.wholeWord === true;
       const safeFilters: SearchFilters = {
         kind: ["all", "folder", "file"].includes(raw.kind ?? "") ? raw.kind! : "all",
         scope: typeof raw.scope === "string" && raw.scope ? raw.scope : "*",
@@ -1568,9 +1581,10 @@ function registerIpc(): void {
         modifiedAfter: typeof raw.modifiedAfter === "string" ? raw.modifiedAfter : undefined,
         modifiedBefore: typeof raw.modifiedBefore === "string" ? raw.modifiedBefore : undefined,
         caseSensitive: raw.caseSensitive === true,
-        wholeWord: raw.wholeWord === true,
+        wholeWord,
+        fuzzy,
         matchPath: raw.matchPath === true,
-        regex: raw.regex === true,
+        regex,
         sortBy:
           raw.sortBy && allowedSortFields.has(raw.sortBy) ? raw.sortBy : "relevance",
         sortDirection:
@@ -1578,6 +1592,19 @@ function registerIpc(): void {
             ? raw.sortDirection
             : "desc"
       };
+      if (pageOptions && typeof pageOptions === "object") {
+        const rawPage = pageOptions as { cursor?: unknown; limit?: unknown };
+        return searchService!.searchPage(value, safeFilters, {
+          cursor:
+            typeof rawPage.cursor === "string" && rawPage.cursor.length <= 256
+              ? rawPage.cursor
+              : undefined,
+          limit:
+            typeof rawPage.limit === "number"
+              ? Math.min(10_000, Math.max(1, Math.trunc(rawPage.limit)))
+              : undefined
+        });
+      }
       return searchService!.search(value, safeFilters);
     }
   );
@@ -1642,6 +1669,59 @@ function registerIpc(): void {
           caseSensitive: raw.caseSensitive === true
         }
       )
+      );
+    }
+  );
+
+  ipcMain.handle(
+    "search:content-query-page",
+    (_event, query: unknown, scope: unknown, options: unknown, pageOptions: unknown) => {
+      const raw =
+        options && typeof options === "object"
+          ? (options as {
+              regex?: unknown;
+              caseSensitive?: unknown;
+              sortBy?: unknown;
+              sortDirection?: unknown;
+              minSize?: unknown;
+              maxSize?: unknown;
+              modifiedAfter?: unknown;
+              modifiedBefore?: unknown;
+            })
+          : {};
+      const rawPage =
+        pageOptions && typeof pageOptions === "object"
+          ? (pageOptions as { cursor?: unknown; limit?: unknown })
+          : {};
+      return searchService!.searchContentPage(
+        assertString(query, "内容搜索词", 2_048),
+        assertString(scope, "内容搜索目录"),
+        {
+          regex: raw.regex === true,
+          caseSensitive: raw.caseSensitive === true,
+          sortBy: ["relevance", "name", "path", "size", "modified", "type"].includes(
+            String(raw.sortBy)
+          )
+            ? (raw.sortBy as SearchSortField)
+            : "relevance",
+          sortDirection: ["asc", "desc"].includes(String(raw.sortDirection))
+            ? (raw.sortDirection as SearchSortDirection)
+            : "desc",
+          minSize: typeof raw.minSize === "number" ? Math.max(0, raw.minSize) : undefined,
+          maxSize: typeof raw.maxSize === "number" ? Math.max(0, raw.maxSize) : undefined,
+          modifiedAfter:
+            typeof raw.modifiedAfter === "string" ? raw.modifiedAfter : undefined,
+          modifiedBefore:
+            typeof raw.modifiedBefore === "string" ? raw.modifiedBefore : undefined,
+          cursor:
+            typeof rawPage.cursor === "string" && rawPage.cursor.length <= 256
+              ? rawPage.cursor
+              : undefined,
+          limit:
+            typeof rawPage.limit === "number"
+              ? Math.min(2_000, Math.max(1, Math.trunc(rawPage.limit)))
+              : undefined
+        }
       );
     }
   );
@@ -1855,17 +1935,7 @@ if (!singleInstance) {
     syncSearchBackgroundMode();
     triggerVisibleUpdateCheck("application-startup", 2_500);
     const shortcutFailures = applyGlobalShortcuts(store.getSettings());
-    if (shortcutFailures.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
-      void dialog.showMessageBox(mainWindow, {
-        type: "warning",
-        title: "全局快捷键未完全启用",
-        message: shortcutFailures.join("\n"),
-        detail: "可在设置中修改快捷键后重新保存。",
-        buttons: ["知道了"],
-        noLink: true
-      });
-    }
-    if (shortcutFailures.length > 0 && startupMinimized) {
+    if (shortcutFailures.length > 0) {
       logger.warn("shortcut.registration_incomplete", {
         startupMinimized,
         failures: shortcutFailures

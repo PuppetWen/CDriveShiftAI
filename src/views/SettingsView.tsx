@@ -30,6 +30,7 @@ import {
 import { api } from "../lib/api";
 import { effectDefinitions } from "../lib/effects";
 import { getAiProvider } from "../lib/aiProviders";
+import { bundledReleaseNotes } from "../lib/releaseNotes";
 import type {
   AiModelInfo,
   AiTestResult,
@@ -39,6 +40,7 @@ import type {
   IndexerStatus,
   MouseShortcutButton,
   MouseShortcutStatus,
+  SettingsModuleId,
   ShortcutCheckResult,
   ShortcutTarget
 } from "../types";
@@ -50,7 +52,9 @@ interface SettingsViewProps {
   settings: AppSettings;
   indexer: IndexerStatus;
   updateInfo?: AppUpdateInfo;
+  activeModule: SettingsModuleId;
   onCheckForUpdates: () => Promise<AppUpdateInfo>;
+  onModuleChange: (module: SettingsModuleId) => void;
   onSettings: (settings: AppSettings) => void;
   notify: (type: "success" | "error", message: string) => void;
 }
@@ -282,7 +286,9 @@ export function SettingsView({
   settings,
   indexer,
   updateInfo,
+  activeModule,
   onCheckForUpdates,
+  onModuleChange,
   onSettings,
   notify
 }: SettingsViewProps) {
@@ -299,6 +305,7 @@ export function SettingsView({
   >("idle");
   const [testingShortcut, setTestingShortcut] = useState<ShortcutTarget>();
   const [testingMouseShortcut, setTestingMouseShortcut] = useState(false);
+  const [activeReleaseModule, setActiveReleaseModule] = useState<string>();
   const [mouseShortcutStatus, setMouseShortcutStatus] =
     useState<MouseShortcutStatus>();
   const [showApiKey, setShowApiKey] = useState(false);
@@ -320,6 +327,26 @@ export function SettingsView({
   const updateBusy = ["downloading", "verifying", "ready", "installing"].includes(
     updateInfo?.phase ?? ""
   );
+  const bundledNotesMatch =
+    !updateInfo ||
+    updateInfo.latestVersion === bundledReleaseNotes.version ||
+    (!updateInfo.updateAvailable &&
+      updateInfo.currentVersion === bundledReleaseNotes.version);
+  const releaseSections = updateInfo?.releaseSections?.length
+    ? updateInfo.releaseSections
+    : bundledNotesMatch
+      ? bundledReleaseNotes.sections
+      : [];
+  const releaseSummary =
+    updateInfo?.releaseSummary ??
+    (bundledNotesMatch ? bundledReleaseNotes.summary : updateInfo?.releaseName);
+  const activeReleaseSection =
+    releaseSections.find((section) => section.title === activeReleaseModule) ??
+    releaseSections[0];
+
+  useEffect(() => {
+    document.querySelector(".view-scroll")?.scrollTo({ top: 0, behavior: "smooth" });
+  }, [activeModule]);
 
   useEffect(() => {
     const previous = persistedSettingsRef.current;
@@ -419,6 +446,11 @@ export function SettingsView({
     if (value === persistedSettingsRef.current[field]) return;
     const request = ++shortcutRequests.current[target];
     try {
+      if (value.trim()) {
+        const availability = await api.checkGlobalShortcut(value, target);
+        if (request !== shortcutRequests.current[target]) return;
+        if (!availability.available) return;
+      }
       const updated = await api.updateSettings({
         [field]: value
       });
@@ -437,11 +469,17 @@ export function SettingsView({
       );
     } catch (error) {
       if (request !== shortcutRequests.current[target]) return;
+      const message = error instanceof Error ? error.message : String(error);
+      if (/快捷键.*(?:占用|冲突|格式无效)/u.test(message)) {
+        // Keep the attempted value visible. ShortcutRecorder continuously
+        // checks it and renders the conflict as red inline guidance.
+        return;
+      }
       setDraft((current) => ({
         ...current,
         [field]: persistedSettingsRef.current[field]
       }));
-      notify("error", error instanceof Error ? error.message : String(error));
+      notify("error", message);
     }
   };
 
@@ -717,16 +755,73 @@ export function SettingsView({
     <div className="page settings-page">
       <PageTitle
         eyebrow="PREFERENCES"
-        title="让 CDriveShiftAI 按你的方式工作。"
-        description="选择类设置即时生效；输入类设置在焦点离开后自动校验并保存。"
+        title="按你的习惯设置 CDriveShiftAI。"
+        description="设置已按功能分组；选择项即时生效，输入项在离开焦点后自动校验并保存。"
       />
 
-      <section className="settings-section glass-card update-settings">
+      <nav className="settings-module-nav" aria-label="设置模块">
+        {[
+          {
+            id: "update" as const,
+            label: "更新与诊断",
+            description: updateInfo?.updateAvailable
+              ? `发现 v${updateInfo.latestVersion}`
+              : "版本、更新包与日志",
+            icon: Download,
+            tone: updateInfo?.updateAvailable ? "alert" : "mint"
+          },
+          {
+            id: "appearance" as const,
+            label: "界面外观",
+            description: "主题、材质与交互效果",
+            icon: Palette,
+            tone: "purple"
+          },
+          {
+            id: "system" as const,
+            label: "索引与快捷操作",
+            description: "索引、后台与全局唤起",
+            icon: Database,
+            tone: "blue"
+          },
+          {
+            id: "ai" as const,
+            label: "AI 服务",
+            description: draft.ai.enabled
+              ? `${provider.name} · ${draft.ai.model || "待选择模型"}`
+              : "厂商、模型与隐私",
+            icon: Bot,
+            tone: "cyan"
+          }
+        ].map(({ id, label, description, icon: Icon, tone }) => (
+          <button
+            type="button"
+            className={activeModule === id ? "active" : ""}
+            aria-current={activeModule === id ? "page" : undefined}
+            onClick={() => onModuleChange(id)}
+            key={id}
+          >
+            <span className={`settings-module-icon ${tone}`}>
+              <Icon size={17} />
+            </span>
+            <span>
+              <strong>{label}</strong>
+              <small>{description}</small>
+            </span>
+            <i />
+          </button>
+        ))}
+      </nav>
+
+      {activeModule === "update" && (
+      <section className="settings-section glass-card update-settings settings-module-panel">
         <div className="settings-section-head">
           <div
             className={
               updateInfo?.updateAvailable
                 ? "settings-icon update-alert"
+                : updateInfo?.status === "unavailable"
+                  ? "settings-icon update-warning"
                 : "settings-icon update-current"
             }
           >
@@ -740,6 +835,8 @@ export function SettingsView({
             className={
               updateInfo?.updateAvailable
                 ? "update-status-dot update-available"
+                : updateInfo?.status === "unavailable"
+                  ? "update-status-dot update-warning"
                 : "update-status-dot"
             }
           />
@@ -843,6 +940,59 @@ export function SettingsView({
             )}
           </div>
         </div>
+        {activeReleaseSection && (
+          <div className="update-release-notes" aria-label="版本更新内容">
+            <div className="update-release-heading">
+              <span className="update-release-title">
+                <Sparkles size={15} />
+                <span>
+                  <strong>
+                    {updateInfo?.updateAvailable ? "本次更新" : "当前版本说明"}
+                  </strong>
+                  <small title={releaseSummary}>
+                    {releaseSummary}
+                  </small>
+                </span>
+              </span>
+              {updateInfo?.releaseUrl && (
+                <button
+                  type="button"
+                  className="update-release-link"
+                  onClick={() => void api.openExternal(updateInfo.releaseUrl!)}
+                >
+                  完整说明
+                  <ExternalLink size={12} />
+                </button>
+              )}
+            </div>
+            <div className="update-release-body">
+              <div className="update-release-tabs" role="tablist" aria-label="更新模块">
+                {releaseSections.map((section) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={section.title === activeReleaseSection.title}
+                    className={
+                      section.title === activeReleaseSection.title ? "active" : ""
+                    }
+                    onClick={() => setActiveReleaseModule(section.title)}
+                    key={section.title}
+                  >
+                    {section.title}
+                  </button>
+                ))}
+              </div>
+              <div className="update-release-items" role="tabpanel">
+                {activeReleaseSection.items.map((item, index) => (
+                  <span title={item} key={`${activeReleaseSection.title}-${index}`}>
+                    <i />
+                    {item}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
         {updateInfo &&
           ["downloading", "verifying", "ready", "installing", "error", "cancelled"].includes(
             updateInfo.phase
@@ -980,8 +1130,10 @@ export function SettingsView({
           </button>
         </div>
       </section>
+      )}
 
-      <section className="settings-section glass-card">
+      {activeModule === "appearance" && (
+      <section className="settings-section glass-card settings-module-panel">
         <div className="settings-section-head">
           <div className="settings-icon purple">
             <Palette size={20} />
@@ -1014,9 +1166,11 @@ export function SettingsView({
           ))}
         </div>
       </section>
+      )}
 
-      <section className="settings-two-column">
-        <article className="settings-section glass-card">
+      {activeModule === "system" && (
+      <section className="settings-system-stack settings-module-panel">
+        <article className="settings-section glass-card index-settings-card">
           <div className="settings-section-head">
             <div className="settings-icon mint">
               <Database size={20} />
@@ -1026,29 +1180,31 @@ export function SettingsView({
               <p>自研 MFT 快速通道与并行扫描降级。</p>
             </div>
           </div>
-          <div className="index-settings-status">
-            <div>
-              <span className={indexer.state === "ready" ? "status-dot online" : "status-dot"} />
+          <div className="index-settings-controls">
+            <div className="index-settings-status">
               <div>
-                <strong>{indexer.state === "ready" ? "索引可用" : "索引处理中"}</strong>
-                <small>{indexer.message || `${indexer.entries.toLocaleString()} 个条目`}</small>
+                <span className={indexer.state === "ready" ? "status-dot online" : "status-dot"} />
+                <div>
+                  <strong>{indexer.state === "ready" ? "索引可用" : "索引处理中"}</strong>
+                  <small>{indexer.message || `${indexer.entries.toLocaleString()} 个条目`}</small>
+                </div>
               </div>
+              <Badge tone={["mft", "cached"].includes(indexer.mode) ? "good" : "warn"}>
+                {indexer.mode.toUpperCase()}
+              </Badge>
             </div>
-            <Badge tone={["mft", "cached"].includes(indexer.mode) ? "good" : "warn"}>
-              {indexer.mode.toUpperCase()}
-            </Badge>
-          </div>
-          <button className="secondary-button full" type="button" disabled={rebuilding} onClick={() => void rebuild()}>
-            <RefreshCw size={15} className={rebuilding ? "spin" : ""} />
-            {rebuilding ? "正在启动刷新…" : "重新扫描所有磁盘"}
-          </button>
-          <div className="setting-note">
-            <ShieldCheck size={15} />
-            <span>查询索引仅包含路径与基础元数据；指定目录全文索引与名称索引分开存储。</span>
+            <button className="secondary-button" type="button" disabled={rebuilding} onClick={() => void rebuild()}>
+              <RefreshCw size={15} className={rebuilding ? "spin" : ""} />
+              {rebuilding ? "正在启动刷新…" : "重新扫描所有磁盘"}
+            </button>
+            <div className="setting-note">
+              <ShieldCheck size={15} />
+              <span>名称索引仅保存路径与基础元数据；指定目录全文索引独立存储。</span>
+            </div>
           </div>
         </article>
 
-        <article className="settings-section glass-card">
+        <article className="settings-section glass-card behavior-settings-card">
           <div className="settings-section-head">
             <div className="settings-icon blue">
               <Laptop size={20} />
@@ -1058,6 +1214,7 @@ export function SettingsView({
               <p>控制登录启动与后台行为。</p>
             </div>
           </div>
+          <div className="behavior-setting-grid">
           <label className="setting-row">
             <div>
               <strong>登录时启动</strong>
@@ -1110,6 +1267,7 @@ export function SettingsView({
             />
             <span className="toggle" />
           </label>
+          </div>
           <div className="shortcut-settings">
             <div className="shortcut-settings-head">
               <Keyboard size={15} />
@@ -1118,6 +1276,7 @@ export function SettingsView({
                 <small>录入后自动检查 Windows 和其他程序是否已占用</small>
               </span>
             </div>
+            <div className="shortcut-recorder-grid">
             <ShortcutRecorder
               label="打开主界面"
               description="从任意程序唤起 CDriveShiftAI"
@@ -1144,6 +1303,7 @@ export function SettingsView({
               onCommit={(value) => void commitShortcut("quick-search", value)}
               onTest={() => void testShortcut("quick-search")}
             />
+            </div>
             <article className="mouse-shortcut-card">
               <header>
                 <span>
@@ -1251,8 +1411,10 @@ export function SettingsView({
           </div>
         </article>
       </section>
+      )}
 
-      <section className="settings-section glass-card ai-settings">
+      {activeModule === "ai" && (
+      <section className="settings-section glass-card ai-settings settings-module-panel">
         <div className="settings-section-head">
           <div className="settings-icon cyan">
             <Bot size={20} />
@@ -1539,6 +1701,7 @@ export function SettingsView({
           </div>
         </div>
       </section>
+      )}
     </div>
   );
 }

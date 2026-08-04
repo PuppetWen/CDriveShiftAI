@@ -15,7 +15,11 @@ vi.mock("electron", () => ({
   }
 }));
 
-import { summarizeProxyRules, UpdateService } from "../electron/update";
+import {
+  parseReleaseNotes,
+  summarizeProxyRules,
+  UpdateService
+} from "../electron/update";
 
 interface DownloadAttempt {
   downloadAttempt(
@@ -25,6 +29,14 @@ interface DownloadAttempt {
     attempt: number,
     signal: AbortSignal
   ): Promise<void>;
+}
+
+interface UpdateCheckFetcher {
+  fetchForUpdateCheck(
+    url: string,
+    currentVersion: string,
+    refreshRoute?: boolean
+  ): Promise<Response>;
 }
 
 const fixtureRoot = path.join(
@@ -54,6 +66,13 @@ function downloader(): DownloadAttempt {
   return new UpdateService(() => undefined, async () => undefined) as unknown as DownloadAttempt;
 }
 
+function updateCheckFetcher(): UpdateCheckFetcher {
+  return new UpdateService(
+    () => undefined,
+    async () => undefined
+  ) as unknown as UpdateCheckFetcher;
+}
+
 beforeEach(async () => {
   await rm(fixtureRoot, { recursive: true, force: true });
   await mkdir(fixtureRoot, { recursive: true });
@@ -68,6 +87,32 @@ afterEach(async () => {
 });
 
 describe("auto-update downloader", () => {
+  it("turns GitHub Markdown release notes into compact UI modules", () => {
+    const parsed = parseReleaseNotes(`# CDriveShiftAI 0.0.5
+
+本版完善更新、搜索与后台行为。
+
+## 自动更新
+- 遵循 Windows 系统代理。
+- 下载失败自动续传。
+
+## 极速搜索
+- 新增文件会实时进入当前排序。
+- 删除文件会从结果中移除。`);
+
+    expect(parsed.summary).toBe("本版完善更新、搜索与后台行为。");
+    expect(parsed.sections).toEqual([
+      {
+        title: "自动更新",
+        items: ["遵循 Windows 系统代理。", "下载失败自动续传。"]
+      },
+      {
+        title: "极速搜索",
+        items: ["新增文件会实时进入当前排序。", "删除文件会从结果中移除。"]
+      }
+    ]);
+  });
+
   it("recognizes Windows system proxy and direct routes", () => {
     expect(summarizeProxyRules("PROXY 127.0.0.1:7890; DIRECT")).toEqual({
       mode: "system-proxy",
@@ -78,6 +123,29 @@ describe("auto-update downloader", () => {
       label: "系统网络 · 直连"
     });
   });
+
+  it("retries a transient release endpoint failure", async () => {
+    let requests = 0;
+    const url = await listen((_request, response) => {
+      requests += 1;
+      if (requests === 1) {
+        response.writeHead(503);
+        response.end("temporarily unavailable");
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ tag_name: "v0.0.5" }));
+    });
+
+    const response = await updateCheckFetcher().fetchForUpdateCheck(
+      url,
+      "0.0.4",
+      true
+    );
+    expect(response.status).toBe(200);
+    expect(requests).toBe(2);
+  });
+
   it("resumes a partially downloaded package with an HTTP Range request", async () => {
     let requests = 0;
     let resumedFrom = -1;

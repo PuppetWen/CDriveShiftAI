@@ -30,7 +30,12 @@ await writeFile(
 );
 await writeFile(path.join(nested, "needle-photo.png"), "not a real image", "utf8");
 await writeFile(path.join(nested, "needle-script.ts"), "export const needle = true;", "utf8");
+await writeFile(path.join(nested, "needle-page-a.txt"), "page a", "utf8");
+await writeFile(path.join(nested, "needle-page-b.txt"), "page b", "utf8");
+await writeFile(path.join(nested, "needle-page-c.txt"), "page c", "utf8");
 await writeFile(path.join(nested, "portable-tool.exe"), "test executable fixture", "utf8");
+await writeFile(path.join(nested, "release-test.jsp"), "whole word fixture", "utf8");
+await writeFile(path.join(nested, "deleteStudy.md"), "substring-only fixture", "utf8");
 await writeFile(path.join(scoped, "shared-inside.log"), "inside", "utf8");
 await writeFile(path.join(similarlyNamedScope, "shared-outside.log"), "outside", "utf8");
 
@@ -52,6 +57,9 @@ lines.on("line", (line) => {
     if (message.ok === false) reject(new Error(message.error));
     else resolve(message);
   } else if (message.event) {
+    if (process.env.CSHIFT_SMOKE_TRACE === "1") {
+      console.error("[indexer-event]", JSON.stringify(message));
+    }
     events.push(message);
     for (const waiter of [...eventWaiters]) waiter(message);
   }
@@ -88,6 +96,10 @@ function request(payload, timeoutMs = 10_000) {
   });
 }
 
+function normalizeWindowsPath(value) {
+  return value.replace(/^\\\\\?\\/, "").replaceAll("/", "\\").toLocaleLowerCase();
+}
+
 try {
   await request({
     op: "init",
@@ -107,6 +119,36 @@ try {
   });
   if (!nameResult.results?.some((result) => result.name === "Needle-file.txt")) {
     throw new Error("Name index smoke test did not find the fixture file");
+  }
+  const firstPage = await request({
+    op: "query",
+    query: "needle-page",
+    kind: "file",
+    scope: fixture,
+    sortBy: "name",
+    sortDirection: "asc",
+    limit: 1
+  });
+  const secondPage = await request({
+    op: "query",
+    query: "needle-page",
+    kind: "file",
+    scope: fixture,
+    sortBy: "name",
+    sortDirection: "asc",
+    cursor: firstPage.nextCursor,
+    limit: 1
+  });
+  if (
+    firstPage.hasMore !== true ||
+    firstPage.totalMatches !== 3 ||
+    !firstPage.nextCursor ||
+    firstPage.results?.length !== 1 ||
+    secondPage.results?.length !== 1 ||
+    firstPage.results[0]?.path === secondPage.results[0]?.path ||
+    firstPage.results[0]?.name.localeCompare(secondPage.results[0]?.name) >= 0
+  ) {
+    throw new Error("Paged name search did not preserve the complete sorted result set");
   }
   const imageFilterResult = await request({
     op: "query",
@@ -165,6 +207,35 @@ try {
     regexResult.results[0]?.name !== "Needle-file.txt"
   ) {
     throw new Error("Case-sensitive regular expression filter returned incorrect results");
+  }
+  const completeWordResult = await request({
+    op: "query",
+    query: "test",
+    kind: "file",
+    scope: fixture,
+    wholeWord: true,
+    sortBy: "name",
+    sortDirection: "asc",
+    limit: 10
+  });
+  if (
+    completeWordResult.results?.length !== 1 ||
+    completeWordResult.results[0]?.name !== "release-test.jsp"
+  ) {
+    throw new Error("Generic complete-word matching included a partial identifier match");
+  }
+  const fuzzyResult = await request({
+    op: "query",
+    query: "ndlfle",
+    kind: "file",
+    scope: fixture,
+    fuzzy: true,
+    sortBy: "relevance",
+    sortDirection: "desc",
+    limit: 10
+  });
+  if (!fuzzyResult.results?.some((result) => result.name === "Needle-file.txt")) {
+    throw new Error("Generic fuzzy name matching did not return the expected subsequence");
   }
   const executableCatalog = await request({
     op: "executableCatalog",
@@ -229,6 +300,43 @@ try {
   if (!contentResult.results?.some((result) => result.name === "Needle-file.txt")) {
     throw new Error("Content index smoke test did not find the fixture content");
   }
+  const liveContentPath = path.join(nested, "live-content-change.txt");
+  events.length = 0;
+  await writeFile(liveContentPath, "dynamic-content-keyword-added", "utf8");
+  await waitForEvent(
+    (message) =>
+      message.event === "indexChanged" &&
+      message.contentScopes?.some(
+        (scope) => normalizeWindowsPath(scope) === normalizeWindowsPath(fixture)
+      )
+  );
+  const liveContentCreated = await request({
+    op: "contentQuery",
+    query: "dynamic-content-keyword-added",
+    scope: fixture,
+    limit: 10
+  });
+  if (!liveContentCreated.results?.some((result) => result.name === "live-content-change.txt")) {
+    throw new Error("Live content index did not add the changed text file");
+  }
+  events.length = 0;
+  await rm(liveContentPath, { force: true });
+  await waitForEvent(
+    (message) =>
+      message.event === "indexChanged" &&
+      message.contentScopes?.some(
+        (scope) => normalizeWindowsPath(scope) === normalizeWindowsPath(fixture)
+      )
+  );
+  const liveContentDeleted = await request({
+    op: "contentQuery",
+    query: "dynamic-content-keyword-added",
+    scope: fixture,
+    limit: 10
+  });
+  if (liveContentDeleted.results?.length !== 0) {
+    throw new Error("Live content index did not remove the deleted text file");
+  }
   const contentRegexResult = await request({
     op: "contentQuery",
     query: String.raw`cdriveshiftai\s+stable-content-(?:needle|missing)`,
@@ -264,14 +372,19 @@ try {
     JSON.stringify(
       {
         nameMatches: nameResult.results.length,
+        pagedNameTotal: firstPage.totalMatches,
         combinedFilterMatches: imageFilterResult.results.length,
         multiCategoryMatches: multiCategoryResult.results.length,
         scopedMatches: scopedResult.results.length,
         regexMatches: regexResult.results.length,
+        completeWordMatches: completeWordResult.results.length,
+        fuzzyMatches: fuzzyResult.results.length,
         executableCatalogMatches: executableCatalog.results.length,
         liveCreateMatches: liveCreated.results.length,
         liveDeleteMatches: liveDeleted.results.length,
         contentMatches: contentResult.results.length,
+        liveContentCreateMatches: liveContentCreated.results.length,
+        liveContentDeleteMatches: liveContentDeleted.results.length,
         contentRegexMatches: contentRegexResult.results.length,
         invalidRegexRejected,
         persistedContentDocuments: contentStatus.status.filesIndexed,

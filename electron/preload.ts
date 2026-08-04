@@ -62,8 +62,42 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
     ipcRenderer.invoke("shell:search-context-menu", targetPath, isDirectory),
   openExternal: (url: string) => ipcRenderer.invoke("shell:external", url),
   search: (query: string, filters: unknown) => ipcRenderer.invoke("search:query", query, filters),
+  searchPage: (query: string, filters: unknown, pageOptions?: unknown) =>
+    ipcRenderer.invoke("search:query", query, filters, pageOptions ?? {}),
   searchContent: (query: string, scope: string, options?: unknown) =>
     ipcRenderer.invoke("search:content-query", query, scope, options),
+  searchContentPage: (
+    query: string,
+    scope: string,
+    options?: {
+      regex?: boolean;
+      caseSensitive?: boolean;
+      sortBy?: string;
+      sortDirection?: string;
+      minSize?: number;
+      maxSize?: number;
+      modifiedAfter?: string;
+      modifiedBefore?: string;
+      cursor?: string;
+      limit?: number;
+    }
+  ) =>
+    ipcRenderer.invoke(
+      "search:content-query-page",
+      query,
+      scope,
+      {
+        regex: options?.regex,
+        caseSensitive: options?.caseSensitive,
+        sortBy: options?.sortBy,
+        sortDirection: options?.sortDirection,
+        minSize: options?.minSize,
+        maxSize: options?.maxSize,
+        modifiedAfter: options?.modifiedAfter,
+        modifiedBefore: options?.modifiedBefore
+      },
+      { cursor: options?.cursor, limit: options?.limit }
+    ),
   indexContent: (scope: string) => ipcRenderer.invoke("search:content-index", scope),
   contentIndexStatus: (scope: string) => ipcRenderer.invoke("search:content-status", scope),
   indexerStatus: () => ipcRenderer.invoke("search:status"),

@@ -4,7 +4,9 @@ import { api } from "./lib/api";
 import {
   effectBackgrounds,
   effectDefinitions,
-  effectLabels
+  effectLabels,
+  isEffectMode,
+  isLightEffect
 } from "./lib/effects";
 import type {
   AppSettings,
@@ -12,6 +14,7 @@ import type {
   EffectMode,
   IndexerStatus,
   MigrationRecord,
+  SettingsModuleId,
   SystemOverview,
   ViewId
 } from "./types";
@@ -50,7 +53,7 @@ const fallbackStatus: IndexerStatus = {
 
 function initialEffectMode(): EffectMode {
   const value = document.documentElement.dataset.effect;
-  return value === "matrix" || value === "calm" ? value : "aurora";
+  return isEffectMode(value) ? value : "aurora";
 }
 
 function initialView(): ViewId {
@@ -71,6 +74,8 @@ export default function App() {
   const [history, setHistory] = useState<MigrationRecord[]>([]);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo>();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [settingsModule, setSettingsModule] =
+    useState<SettingsModuleId>("update");
   const [selectedPath, setSelectedPath] = useState("");
   const [analysisRequest, setAnalysisRequest] = useState({
     path: "",
@@ -155,6 +160,7 @@ export default function App() {
       }
       setView(event.view);
       if (event.focus === "ai-settings") {
+        setSettingsModule("ai");
         window.setTimeout(() => {
           document.querySelector(".ai-settings")?.scrollIntoView({
             block: "start",
@@ -197,7 +203,7 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.effect = effectMode;
     document.documentElement.style.background = effectBackgrounds[effectMode];
-    document.documentElement.style.colorScheme = effectMode === "calm" ? "light" : "dark";
+    document.documentElement.style.colorScheme = isLightEffect(effectMode) ? "light" : "dark";
     document
       .querySelector('meta[name="theme-color"]')
       ?.setAttribute("content", effectBackgrounds[effectMode]);
@@ -305,7 +311,9 @@ export default function App() {
             settings={settings}
             indexer={indexer}
             updateInfo={updateInfo}
+            activeModule={settingsModule}
             onCheckForUpdates={refreshUpdate}
+            onModuleChange={setSettingsModule}
             onSettings={setSettings}
             notify={notify}
           />
@@ -324,6 +332,7 @@ export default function App() {
     refreshHistory,
     selectedPath,
     settings,
+    settingsModule,
     updateInfo,
     view
   ]);

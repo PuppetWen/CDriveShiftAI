@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { Database, Search, Sparkles } from "lucide-react";
+import { Database, Palette, Search, Sparkles } from "lucide-react";
 import { BackgroundFX } from "../components/BackgroundFX";
 import { Toasts, type ToastItem } from "../components/ui";
 import { api } from "../lib/api";
 import {
-  effectBackgrounds
+  effectBackgrounds,
+  effectDefinitions,
+  isEffectMode,
+  isLightEffect
 } from "../lib/effects";
 import type {
   AppSettings,
@@ -25,7 +28,7 @@ const initialIndexer: IndexerStatus = {
 
 function initialEffectMode(): EffectMode {
   const value = document.documentElement.dataset.effect;
-  return value === "matrix" || value === "calm" ? value : "aurora";
+  return isEffectMode(value) ? value : "aurora";
 }
 
 export function QuickSearchWindow() {
@@ -67,9 +70,23 @@ export function QuickSearchWindow() {
   useEffect(() => {
     document.documentElement.dataset.effect = effectMode;
     document.documentElement.style.background = effectBackgrounds[effectMode];
-    document.documentElement.style.colorScheme =
-      effectMode === "calm" ? "light" : "dark";
+    document.documentElement.style.colorScheme = isLightEffect(effectMode) ? "light" : "dark";
   }, [effectMode]);
+
+  const switchEffect = useCallback(
+    async (mode: EffectMode) => {
+      if (!settings || mode === settings.effectMode) return;
+      const previous = settings;
+      setSettings({ ...settings, effectMode: mode });
+      try {
+        setSettings(await api.updateSettings({ effectMode: mode }));
+      } catch (error) {
+        setSettings(previous);
+        notify("error", error instanceof Error ? error.message : String(error));
+      }
+    },
+    [notify, settings]
+  );
 
   const handoff = useCallback(
     async (view: "analyze" | "migrate", path: string) => {
@@ -91,12 +108,30 @@ export function QuickSearchWindow() {
           <Sparkles size={16} />
           <strong>CDriveShiftAI · 独立极速搜索</strong>
         </span>
-        <span className="quick-search-title-status">
-          <Database size={12} />
-          {indexer.state === "ready"
-            ? `${indexer.entries.toLocaleString()} 条索引`
-            : indexer.message ?? "正在准备索引"}
-        </span>
+        <div className="quick-search-title-actions">
+          <span className="quick-search-title-status">
+            <Database size={12} />
+            {indexer.state === "ready"
+              ? `${indexer.entries.toLocaleString()} 条索引`
+              : indexer.message ?? "正在准备索引"}
+          </span>
+          <div className="quick-search-effect-switcher" aria-label="切换界面主题">
+            <Palette size={12} aria-hidden="true" />
+            {effectDefinitions.map((effect) => (
+              <button
+                className={effect.id === effectMode ? "active" : ""}
+                key={effect.id}
+                type="button"
+                title={`${effect.title}：${effect.subtitle}`}
+                aria-label={`切换到${effect.title}`}
+                aria-pressed={effect.id === effectMode}
+                onClick={() => void switchEffect(effect.id)}
+              >
+                {effect.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </header>
 
       <section className="quick-search-workspace-body">

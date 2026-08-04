@@ -16,6 +16,7 @@ import type {
   SearchWorkspaceState,
   SystemOverview
 } from "../types";
+import { bundledReleaseNotes } from "./releaseNotes";
 
 const mockOverview: SystemOverview = {
   drives: [
@@ -210,6 +211,8 @@ const browserFallback: CDriveShiftApi = {
         releaseName: "CDriveShiftAI 0.0.5",
         releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
         publishedAt: new Date().toISOString(),
+        releaseSummary: bundledReleaseNotes.summary,
+        releaseSections: bundledReleaseNotes.sections,
         assets: [],
         selectedAsset: {
           name: "CDriveShiftAI-x64-portable.exe",
@@ -238,6 +241,8 @@ const browserFallback: CDriveShiftApi = {
       canAutoUpdate: false,
       releaseName: "CDriveShiftAI 0.0.5",
       releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
+      releaseSummary: bundledReleaseNotes.summary,
+      releaseSections: bundledReleaseNotes.sections,
       assets: [],
       message: "当前已是最新版本 0.0.5",
       checkedAt: new Date().toISOString()
@@ -508,6 +513,27 @@ const browserFallback: CDriveShiftApi = {
       }
     ] as SearchResult[];
   },
+  async searchPage(query) {
+    const items = query.trim()
+      ? ([
+          {
+            path: `C:\\Users\\You\\AppData\\Local\\${query}`,
+            name: query,
+            isDirectory: true,
+            size: 4.8 * 1024 ** 3,
+            score: 96,
+            modifiedAt: new Date().toISOString(),
+            source: "native-index"
+          }
+        ] as SearchResult[])
+      : [];
+    return {
+      items,
+      hasMore: false,
+      totalMatches: items.length,
+      generation: 1
+    };
+  },
   async searchContent(query, scope, options) {
     if (!query.trim() || !scope) return [];
     const preview = options?.regex
@@ -521,6 +547,15 @@ const browserFallback: CDriveShiftApi = {
         score: 1
       }
     ] as ContentSearchResult[];
+  },
+  async searchContentPage(query, scope, options) {
+    const items = await browserFallback.searchContent(query, scope, options);
+    return {
+      items,
+      hasMore: false,
+      totalMatches: items.length,
+      generation: 1
+    };
   },
   indexContent: () => Promise.resolve(),
   contentIndexStatus: async (scope) => ({
