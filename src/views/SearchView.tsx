@@ -1703,11 +1703,6 @@ export function SearchView({
                 </span>
               )}
             </div>
-            <div className="content-privacy-note">
-              <Info size={14} />
-              内容搜索只索引文本、代码、配置和日志；依赖或生成目录以及超过 8 MB
-              的文件不读取正文。名称搜索不受这些限制。
-            </div>
           </>
         )}
 

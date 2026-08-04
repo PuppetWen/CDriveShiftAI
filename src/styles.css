@@ -1714,7 +1714,6 @@ kbd { border: 1px solid var(--border); border-radius: 5px; color: var(--dim); ba
 .content-state { display: flex; align-items: center; gap: 7px; min-width: 195px; color: var(--dim); font-size: 8px; }
 .content-state.ready { color: var(--good); }
 .content-state.indexing { color: var(--amber); }
-.content-privacy-note { display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--border); color: var(--dim); padding: 8px 16px; font-size: 8px; }
 .content-match-options {
   display: flex;
   flex: 0 0 auto;
