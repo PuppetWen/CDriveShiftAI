@@ -1,5 +1,7 @@
 # CDriveShiftAI 中文说明
 
+[English](README.md) · [更新记录](CHANGELOG.md) · [正式发布](https://github.com/PuppetWen/CDriveShiftAI/releases)
+
 CDriveShiftAI 是面向 Windows 10/11 x64 的全盘文件搜索、目录归属分析与跨盘安全迁移工具。名称索引、内容索引和迁移记录都由项目自身维护，不依赖 Everything。
 
 当前版本：`0.0.6`

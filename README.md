@@ -1,178 +1,254 @@
 # CDriveShiftAI
 
-[简体中文使用说明](README.zh-CN.md) · [更新记录](CHANGELOG.md)
+[简体中文](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Releases](https://github.com/PuppetWen/CDriveShiftAI/releases)
 
-CDriveShiftAI 是一个 Windows 桌面端磁盘整理工具，用于：
+CDriveShiftAI is a Windows desktop application for finding, understanding, and safely relocating data across local drives. It combines a first-party file-name index, directory-scoped full-text search, application ownership analysis, and transactional cross-drive migration while preserving the original path through a Windows symbolic link or directory junction.
 
-- 搜索本机所有固定磁盘中的文件名、目录名和文件夹名；
-- 在用户明确指定的目录内建立本地全文索引，快速搜索文本、代码、配置与日志内容；
-- 分析任意目录更可能属于哪个已安装应用、应用数据还是用户/开发数据；
-- 把任意磁盘中的目录安全迁移到另一个磁盘，并在原路径建立 Windows 符号链接或目录联接；
-- 记录每一次迁移，并把数据恢复到原始位置。
+The search engine is developed specifically for CDriveShiftAI and does **not** call or bundle Everything.
 
-当前版本完全使用自研索引管线，不调用 Everything。
+Current release: **0.0.6**
 
-当前正式版本：`0.0.6`。安装包与便携包见
-[GitHub Releases](https://github.com/PuppetWen/CDriveShiftAI/releases)。
+## Download
 
-## 已实现能力
+Download the latest installer or portable build from [GitHub Releases](https://github.com/PuppetWen/CDriveShiftAI/releases/latest).
 
-### 全电脑名称搜索
+| Package | Intended use |
+| --- | --- |
+| `CDriveShiftAI-x64.exe` | Installer with a selectable installation directory and in-place upgrades |
+| `CDriveShiftAI-x64-portable.exe` | Single-file portable build that keeps application data beside the executable |
 
-- 自动发现本机固定磁盘和可移动本地磁盘；
-- NTFS 卷优先读取 MFT 元数据，快速建立名称索引；
-- 无法读取 MFT、没有相应权限或遇到其他文件系统时，自动降级为多线程目录扫描；
-- 索引持久化；仅首次运行、开机后的首次启动、缓存损坏、手动刷新或距离上次全量刷新超过 24 小时时重建；
-- 窗口隐藏或最小化到托盘后，名称/内容索引重活会协作式暂停，回到前台后从原阶段继续；Canvas 与 CSS 装饰动画也会停止；
-- 名称索引使用只读内存映射、紧凑元数据和固定大小名称签名；多百万条记录不会在内存中复制多份完整路径；
-- 使用 Windows 递归文件变更通知维护新增、删除、改名与移动结果；
-- 支持多盘符、多文件类型、多个扩展名、文件大小、修改时间、完整路径、大小写、完整单词和正则表达式组合筛选；
-- 同组条件按“或”匹配，不同筛选组按“且”匹配；结果可按相关度、名称、路径、类型、大小或修改时间排序；
-- 结果固定展示类型、大小和修改时间。文件大小直接读取元数据；文件夹大小在结果出现后后台批量递归统计，超时或无权限时使用 `≥ 已统计大小` 明确标记不完整值；
-- 主题化右键菜单会高亮当前结果并显示完整目标信息，支持默认打开、资源管理器定位、打开方式、目录内搜索、归属分析、安全迁移、复制路径/名称、复制到、同名查找、扩展名过滤、重命名、属性和删除到回收站；
-- 搜索模式、关键词、组合筛选、排序、内容目录范围、当前结果和选中项会自动保存到项目数据目录；切换页面或重启应用后自动恢复，并在结果栏显示恢复状态；
-- 大目录创建/删除的增量更新使用共享读取与分批写入，避免长时间阻塞前台查询。
+Local builds also produce `release-ready\win-unpacked\CDriveShiftAI.exe`. Run that unpacked executable when temporary extraction by the single-file portable wrapper is undesirable.
 
-### 指定目录内容搜索
+Requirements:
 
-- 用户必须显式选择目录，不会默认扫描整台电脑的文件正文；
-- 支持常见文本、代码、配置、日志、CSV、JSON、XML、脚本等格式；
-- 使用本地 SQLite FTS5 trigram 全文索引，支持中文和任意正文片段；
-- 内容结果展示文件大小和修改时间；
-- 单文件上限 8 MB，跳过二进制文件、重解析点和无权限条目；
-- 默认跳过 `node_modules`、`.git`、`dist`、`build`、`target`、缓存和虚拟环境等依赖或生成目录；
-- 每个目录使用独立数据库，可随时手动刷新。
+- Windows 10 or Windows 11, x64
+- NTFS is recommended for the fastest initial index and link-based migration
+- Administrator privileges may be required to read MFT metadata, access protected paths, or create symbolic links
 
-### 数据存储位置
+The current binaries are not signed with a commercial Authenticode certificate, so Windows SmartScreen may display an “Unknown publisher” warning.
 
-应用不会把持久化数据写入 `%APPDATA%\CDriveShiftAI`。开发工作区中的配置、缓存、日志、迁移记录、名称索引和内容索引统一存放在：
+## What it does
+
+- Searches file and folder names across all local drives.
+- Builds a local full-text index for directories explicitly selected by the user.
+- Determines whether a directory is an application installation, application data, cache, user data, development data, or a protected system component.
+- Correlates directories with installed applications, including applications installed on another drive.
+- Moves a directory to another drive and preserves its original path with a symbolic link or junction.
+- Records each migration and supports restore, repeated migration, and recovery after interruption.
+- Provides five complete visual themes shared by the main window, quick-search window, dialogs, menus, tooltips, and progress views.
+
+## Whole-computer name search
+
+CDriveShiftAI automatically discovers fixed and removable local drives and builds a persistent metadata index:
+
+- NTFS volumes use MFT metadata when available.
+- Other file systems, unavailable MFT access, and restricted volumes fall back to a multithreaded directory walker.
+- A full rebuild normally runs only on first use, the first launch after a Windows restart, cache corruption, manual refresh, or when the last full refresh is more than 24 hours old.
+- Windows recursive file-system notifications keep additions, deletions, renames, and moves synchronized after the initial build.
+- A memory-mapped, compact metadata layout avoids keeping several complete copies of millions of paths in memory.
+- Heavy indexing work pauses cooperatively while the application is hidden or minimized, then resumes from its current stage when the UI returns.
+
+### Query modes
+
+Name search supports four modes for any query, not only predefined terms:
+
+- **Contains** — the query appears as a continuous substring.
+- **Whole word** — the query must form a complete word or name segment.
+- **Fuzzy** — tolerates partial or approximate input.
+- **Regular expression** — supports advanced patterns and includes templates and inline guidance for users who do not already know regex syntax.
+
+Filters can be combined by drive, file type, extension, size, modified date, full path, and case sensitivity. Conditions within one group use OR; different groups use AND. Sorting is available by relevance, name, path, type, size, or modified time.
+
+Search, filtering, and sorting are executed against the complete result set in the native backend. Results use cursor-based pagination and load automatically near the end of the list, so a query is not limited to the first 800 matches. The UI virtualizes long lists to keep scrolling and memory use stable. Live index changes are deduplicated and reinserted according to the active sort order.
+
+Result tables provide:
+
+- Resizable columns whose widths are remembered.
+- File type, size, and modified time for every result.
+- Background folder-size calculation with an explicit `>= calculated size` marker when access or time limits prevent a complete total.
+- Double-click open behavior and per-row shortcuts for opening, ownership analysis, and safe migration.
+- A themed context menu with Open, Show in File Explorer, Open with, Search inside, Analyze ownership, Safe migration, Copy path/name, Copy to, Find same name, Filter by extension, Rename, Properties, and Move to Recycle Bin.
+- Saved searches that preserve the query, mode, filters, and sorting. Saved searches can be organized into folders and restored with one click.
+- Automatic persistence of the current query, filters, sort order, selected result, content-search scope, and layout across page switches and application restarts.
+
+## Directory-scoped content search
+
+Content search only reads directories explicitly selected by the user; it never scans every file body on the computer by default.
+
+- Uses a local SQLite FTS5 trigram index for Chinese text and arbitrary text fragments.
+- Supports common text, source code, configuration, log, CSV, JSON, XML, and script formats.
+- Shows file size and modified time in results.
+- Uses an independent database for each selected directory and supports manual refresh.
+- Skips binary files, reparse points, inaccessible entries, and files larger than 8 MB.
+- Skips dependency and generated directories such as `node_modules`, `.git`, `dist`, `build`, `target`, caches, and virtual environments.
+
+These exclusions affect only file-body indexing. File and folder **name search** still includes those paths.
+
+## Disk ownership map and AI analysis
+
+The ownership map scans drive roots, `Program Files`, `ProgramData`, the current user profile, and AppData locations. It classifies entries as application installations, application data, cache, system components, user data, development data, or unresolved directories.
+
+Local analysis correlates:
+
+- Windows uninstall registry entries
+- AppX/MSIX package metadata
+- Application names, publishers, and installation locations
+- App Paths and portable application evidence
+- Directory structure, top-level items, extension distribution, file count, and size
+- Known AppData, cache, package-manager, development, and system-directory patterns
+
+The correlation is not restricted by drive letter. For example, an application installed on `F:` can still be identified as the owner of data stored on `C:`.
+
+Each result includes evidence, confidence, purpose, likely origin, and migration risk. Results are saved and reused until the user explicitly analyzes again or the source directory has changed enough to make the saved result unreliable.
+
+### Optional AI providers
+
+AI is a secondary judgment layer and is disabled by default. Supported protocols include:
+
+- OpenAI-compatible APIs: OpenAI, DeepSeek, Moonshot/Kimi, Zhipu GLM, Alibaba Cloud Model Studio, Volcengine Ark, Tencent Hunyuan, Baidu Qianfan, MiniMax, SiliconFlow, OpenRouter, Mistral, Groq, xAI, and custom compatible endpoints
+- Anthropic Messages API
+- Google Gemini Models and GenerateContent APIs
+- Local OpenAI-compatible services such as Ollama and LM Studio
+
+Configuration flow:
+
+1. Select a provider.
+2. Enter or edit the Base URL and API key.
+3. Fetch the available models from the provider.
+4. Select a model.
+5. Send a minimal test conversation.
+6. Save the verified configuration.
+
+If a compatible provider does not expose a model-list endpoint, its published model ID can be entered manually and verified with the test conversation. Changing the URL, key, or model invalidates the previous test.
+
+Privacy mode sends only redacted metadata by default and never sends file bodies. API keys remain in the Electron main process and are encrypted through `safeStorage`; the renderer can only see whether a key has been saved.
+
+## Safe cross-drive migration
+
+Migration accepts a source directory on any local drive and a destination base directory on a different drive. The destination uses the source folder name directly instead of reproducing the complete source hierarchy:
 
 ```text
-<项目根目录>\.cdriveshiftai-data
+Source:           C:\Users\Example\AppData\Local\SampleCache
+Destination base: E:\MovedData
+Actual data:      E:\MovedData\SampleCache
+Original path:    C:\Users\Example\AppData\Local\SampleCache
+                  -> symbolic link or junction -> E:\MovedData\SampleCache
 ```
 
-便携版优先使用 `PORTABLE_EXECUTABLE_DIR`；如果从当前仓库的 `release-ready` 运行，会向上识别项目根目录并共用上述数据目录。安装版使用安装目录旁的 `.cdriveshiftai-data`，因此安装时应选择具有写权限的非系统盘目录。也可以通过 `CDRIVESHIFTAI_DATA_DIR` 环境变量指定绝对数据目录。
+The transaction is performed in this order:
 
-单文件便携版由 NSIS 在应用启动前解包，可能由打包器短暂使用 Windows 临时目录。若要求运行阶段也不产生这类系统临时文件，请直接运行 `release-ready\win-unpacked\CDriveShiftAI.exe`。
+1. Validate the source, destination space, protected paths, and reparse points.
+2. Copy to a temporary directory with multithreaded Robocopy.
+3. Compare file count, directory count, and total bytes.
+4. Atomically rename the original directory beside the source.
+5. Create a directory symbolic link, falling back to a Windows directory junction when necessary.
+6. Verify that the original path resolves to the destination.
+7. Delete the verified old copy from the source drive to release space.
+8. Persist the migration record.
 
-### 应用与数据归属分析
+If the application exits during a transaction, the next run inspects the unfinished state and attempts recovery. Restore copies the complete data back, verifies it, removes the link, and deletes the no-longer-needed destination copy. A history entry can move between **Restore** and **Migrate again**, with a migration counter tracking repeated operations.
 
-本地分析会交叉使用：
+### Safety boundaries
 
-- Windows 卸载注册表与 AppX/MSIX 包中的应用名、发布者和安装位置；
-- 目录路径、一级项目、扩展名分布、文件数量和空间；
-- AppData、缓存、开发依赖、用户数据与应用安装目录规则。
+- Drive roots, the Windows directory, System Volume Information, the Recycle Bin, default/public user profiles, and critical Microsoft data are blocked.
+- Application installation subdirectories can be analyzed but are marked high risk for migration.
+- Source reparse points are not followed, preventing loops and out-of-scope copies.
+- Source and destination drives must differ.
+- The destination must retain an additional 3% or at least 512 MB of free space.
+- AI output cannot override hard local path protections.
 
-AI 是可选的二次判断层，支持三类真实协议：
+Prefer an application's built-in Move command or reinstall workflow for its installation directory. Services, drivers, databases, synchronizers, and self-updaters may use resolved physical paths even when the application itself works through a symbolic link.
 
-- OpenAI 兼容接口：OpenAI、DeepSeek、Moonshot/Kimi、智谱 GLM、阿里云百炼、火山方舟、腾讯混元、百度千帆、MiniMax、SiliconFlow、OpenRouter、Mistral、Groq、xAI，以及用户自定义服务；
-- Anthropic 原生 Messages API；
-- Google Gemini 原生 Models / GenerateContent API；
-- 本地 OpenAI 兼容服务：Ollama 与 LM Studio。
+## Themes and interaction effects
 
-设置流程为“选择厂商 → 填写或修改 Base URL 与 API Key → 从服务端获取模型 → 选择模型 → 发送最小测试对话 → 保存”。厂商与模型列表都使用应用内自绘的可搜索、限高选择器，并随三套视觉主题切换，不调用系统原生白色下拉菜单。模型输入框会显示远程列表建议；如果某个兼容服务没有实现模型列表接口，也可手动填写该服务公布的模型 ID，再用测试对话验证。URL、Key 或模型发生变化后必须重新测试，未通过测试的配置不能启用。默认关闭；默认隐私模式仅发送脱敏元数据，不发送文件正文。
+CDriveShiftAI includes five complete themes:
 
-### 磁盘目录归属地图
+- **Pixel Lake** — pixel-art sky, lake, distant hills, terrain accents, and stepped interaction feedback.
+- **Future Hub** — holographic perspective grids, scanning light, HUD rings, and data nodes.
+- **Moonlit Crystal** — bright frosted glass, contour lines, and restrained ambient light.
+- **Ember Hive** — dark orange industrial HUD, honeycomb geometry, faceted controls, and energy-style progress effects.
+- **Warm Ivory** — warm paper-like surfaces, terracotta accents, soft cards, and low-distraction motion.
 
-- 独立页面按盘符扫描根目录、`Program Files`、`ProgramData`、当前用户目录和 AppData；
-- 明确区分应用安装目录、应用数据、缓存、系统组件、用户数据、开发数据和待识别目录；
-- 应用归属不受盘符限制，例如可以识别“程序安装在 F 盘，但运行数据保存在 C 盘”的关系；
-- 快速地图不递归读取文件正文；耗时取决于注册表、AppX 包数量和磁盘状态，当前机器冷扫描通常为数秒；
-- 每个条目可以在文件资源管理器中定位、进入详细 AI 归属分析或转入安全迁移。
-- 归属地图右键菜单为应用内自绘菜单，会高亮对应目录并展示分类、风险、所属应用与本地证据，材质和颜色随方块、科技、晶境主题切换。
+Themes apply consistently to the main window, standalone quick-search window, tray and context menus, tooltips, property dialogs, migration progress, and update progress. The quick-search title bar includes a compact theme switcher that shares and persists the selection with the main window.
 
-### 跨磁盘安全迁移
+Animations remain responsive during interaction, reduce their frame rate while idle or unfocused, stop when minimized, and respect Windows reduced-motion preferences.
 
-迁移不限制源盘符，只要求目标目录位于另一个磁盘。目标目录直接使用源目录名称，不再附加盘符和完整源路径：
+## Global shortcuts, mouse activation, and tray mode
+
+- Global shortcuts can be configured independently for the main window and standalone quick search.
+- New shortcuts are test-registered before saving. Conflicts with another CDriveShiftAI action, Windows, or another application remain visible as an inline error instead of interrupting unrelated settings.
+- Quick search can also be opened by holding the mouse Back, Forward, or Middle button for a configurable 0.5–10 seconds, or the feature can be disabled.
+- Mouse activation uses passive Windows Raw Input and does not block normal short clicks in other applications.
+- Settings save automatically when a field loses focus or a selection is completed, then take effect immediately.
+- Closing to the notification area releases the Chromium renderer and GPU surfaces while retaining the native index watcher, tray menu, and global shortcuts.
+
+## Data location and privacy
+
+CDriveShiftAI does not store its persistent data in `%APPDATA%\CDriveShiftAI`.
+
+The development workspace stores configuration, caches, logs, migration history, name indexes, and content indexes in:
 
 ```text
-源：E:\Apps\Example\Data
-目标基础目录：D:\Archive
-实际目标：D:\Archive\Data
-原路径：E:\Apps\Example\Data -> 符号链接 -> 实际目标
+<project root>\.cdriveshiftai-data
 ```
 
-事务顺序：
+Runtime selection follows these rules:
 
-1. 校验源目录、目标磁盘空间、保护路径和重解析点；
-2. 使用 Robocopy 多线程复制到临时目录；
-3. 比较文件数、目录数和总字节数；
-4. 在源目录同级执行原子重命名；
-5. 创建目录符号链接；权限不允许时降级为 Windows 目录联接；
-6. 验证原路径真实指向目标；
-7. 删除已经验证的源盘旧副本，实际释放空间；
-8. 写入迁移记录。
+1. `CDRIVESHIFTAI_DATA_DIR`, when set to an absolute path.
+2. The portable executable directory from `PORTABLE_EXECUTABLE_DIR`.
+3. The repository root when running a build from this project's `release-ready` directory.
+4. A `.cdriveshiftai-data` directory beside the installed application.
 
-应用异常退出时会检查未完成事务并尝试恢复。回滚会先把数据完整复制回源盘、校验并移除链接，再删除已验证不再需要的目标盘副本；同一条记录可在“恢复”和“再次迁移”之间往返，并累计迁移次数。
+Choose a writable, non-system installation directory when using the installer. Migration history is persisted across restarts and is not cleared when the application exits.
 
-### 更新与安装
+The single-file portable package is wrapped by NSIS and may briefly extract application files to the Windows temporary directory before launch. Use the unpacked build if the runtime must not perform that temporary extraction.
 
-- 首次运行安装包时可自行选择安装路径；
-- 使用相同 `appId` 的后续安装包会读取已安装项的 `InstallLocation`，沿用原路径覆盖升级；
-- 每次打开主界面时只检查一次官方 GitHub Release，不在托盘后台循环联网；
-- 更新检查、清单与下载使用 Windows 系统网络会话，自动遵循系统代理/PAC；没有代理时使用直连；
-- 设置入口右侧绿点表示当前没有发现更新，红点表示存在更高版本；主题化悬浮提示会显示当前版与最新版；
-- 安装版支持静默原路径升级，便携版支持原文件自替换；下载中断后按已有字节断点续传并最多自动重试三次；
-- 更新包由主程序和独立更新助手分别执行 SHA-512 校验，文件大小或摘要不符时拒绝安装；
-- 替换前在同一磁盘的安装目录外备份旧程序；只有新版本成功启动并回报正确版本后才删除更新包与备份，失败时自动恢复旧版本；
-- 设置页使用与方块、科技、晶境主题一致的分段进度界面，显示下载量、速度、重试次数以及下载、校验、备份、替换和清理阶段；
-- 覆盖安装会保留用户此前“不创建桌面快捷方式”的选择；登录时启动可单独配置为直接最小化到托盘；
-- 当前安装包未使用商业 Authenticode 证书，Windows 可能显示 SmartScreen“未知发布者”提示。
+Local diagnostic logs are rotated by date, automatically cleaned, and redact API keys, authorization tokens, search queries, and file contents. The Settings page can open the log directory or export a diagnostic report containing system information, path-permission checks, updater/index status, summarized migration stages, and crash-file metadata.
 
-### 全局快捷唤起
+## Automatic updates
 
-- 主窗口与独立极速搜索分别使用 Windows 全局快捷键，录入时会试注册并检查应用内重复、系统或其他程序占用；冲突配置不会保存；
-- 独立极速搜索也可通过鼠标后退侧键、前进侧键或中键长按唤起，时长可在 0.5–10 秒之间配置，也可以完全关闭；
-- 鼠标快捷操作使用 Windows Raw Input 被动监听，只在达到长按阈值时触发，不拦截原程序的短按前进、后退或中键行为；
-- 所有快捷设置在控件失焦或选择完成后自动保存并立即生效，并提供实际唤起测试按钮。
+- The main window checks the official GitHub Release on startup and whenever it is restored from the tray or minimized state; it does not continuously poll while idle in the tray.
+- Update checks, manifests, and downloads use Electron's Windows system network session, including system proxy and PAC settings, with direct access as fallback.
+- The status dot is green when the current version is up to date and red when a newer release is available. The themed tooltip shows both versions.
+- Release notes are displayed inside the application before updating.
+- Installed builds update silently in the existing installation directory. Portable builds replace the executable at its original path.
+- Interrupted downloads resume from the existing byte count and retry automatically up to three times.
+- The main application and the standalone update helper both validate file size and SHA-512; invalid packages are rejected.
+- The previous application is backed up on the same drive before replacement. The package and backup are deleted only after the new version starts and reports the expected version; otherwise the old version is restored.
+- Progress UI shows downloaded bytes, speed, retry count, validation, backup, replacement, relaunch, and cleanup stages.
+- Reinstalling preserves the user's previous desktop-shortcut choice and installed location.
 
-### 性能与进程生命周期
+## Performance model
 
-- 主窗口优先完成首帧显示，全盘索引在界面可交互后延迟启动，加载内容和搜索准确率不变；
-- 磁盘盘符、文件系统和空间信息合并查询并短时缓存，避免空间总览为每个盘符重复拉起 PowerShell；
-- 非首页功能按需加载，降低首次启动时 Chromium 解析的 JavaScript 数量和渲染进程常驻内存；
-- 像素湖境、未来中枢和月白晶境在交互期间保持流畅，闲置或失焦时自动降低背景帧率，最小化后完全暂停；
-- 关闭到通知区域后释放 Chromium 渲染进程和 GPU 表面；原生增量索引、文件变化监听、托盘菜单与全局快捷键继续运行；
-- 原生索引在载入和全量构建期间使用较低 Windows 进程优先级，完成后恢复正常搜索优先级；
-- 托盘退出会先关闭索引通信管道并等待原生进程退出，避免 `write EPIPE` 主进程异常。
+- The first window frame is displayed before full-disk index startup.
+- Drive discovery, file-system type, and capacity queries are combined and briefly cached.
+- Non-home routes are loaded on demand.
+- Native indexing uses a lower Windows process priority during cache loading and full builds, then returns to normal search priority.
+- Dynamic refresh events are batched before re-querying a visible search, while hidden and tray-idle sessions do not poll or run dynamic UI searches.
+- Large directory changes use shared reads and batched persistence so foreground queries remain responsive.
+- Canvas and CSS background effects reduce work while idle and stop while minimized.
+- A clean tray exit closes the index communication pipe before waiting for the native process, preventing shutdown-time `EPIPE` errors.
 
-## 安全边界
+## Development
 
-- 盘符根目录、Windows 目录、系统卷信息、回收站、默认/公共用户目录和关键 Microsoft 系统数据会被硬性拦截；
-- 普通应用安装子目录允许分析，但迁移会标记为高风险；
-- 不跟随源目录中的符号链接或目录联接，避免循环与越界复制；
-- 源盘与目标盘必须不同；
-- 目标空间需要额外保留 3% 或至少 512 MB 安全余量；
-- AI 不能覆盖本地系统路径硬拦截；
-- API Key 只在 Electron 主进程中使用，并通过 `safeStorage` 调用 Windows 安全存储加密；渲染进程只能看到“是否已保存”，不能读回明文 Key；
-- 模型测试会发送固定的最小文本，不包含磁盘路径、文件名或正文；测试通过后主进程签发短时一次性验证标识，只有完全相同的 URL、Key 和模型才能保存；
+### Prerequisites
 
-迁移应用安装目录前，应优先使用应用自带的“移动”或重新安装功能。包含服务、驱动、数据库、同步器或持续更新器的目录即使能通过符号链接运行，也可能被厂商更新程序按真实路径处理。
+- Windows 10/11 x64
+- Node.js 20 or newer
+- Rust 1.75 or newer
+- Visual Studio 2022 C++ build tools
+- Windows SDK
 
-## 界面特效
+The native build script searches standard Windows SDK locations and can also use an existing adjacent xwin SDK workspace.
 
-- 像素湖境：蓝天湖水、像素远山、泥土与植被点缀，以及阶梯式交互反馈；
-- 未来中枢：全息透视网格、扫描光带、HUD 环和数据节点；
-- 月白晶境：明亮雾面玻璃、等高线与柔和微光。
-
-三套效果可以在顶栏或设置中即时切换，并尊重 Windows 的“减少动画”辅助功能。
-
-## 开发与构建
-
-要求：
-
-- Windows 10/11 x64；
-- Node.js 20+；
-- Rust 1.75+；
-- Visual Studio 2022 C++ 工具；
-- Windows SDK。构建脚本会先查找标准 Windows SDK，也兼容工作区旁已存在的 xwin SDK。
+### Run locally
 
 ```powershell
 npm install
 npm run dev
 ```
 
-检查与构建：
+### Validate and build
 
 ```powershell
 npm run lint
@@ -181,20 +257,27 @@ npm run build:native
 npm run test:native
 npm run test:indexer
 npm run build:app
-npm run dist
+npm run dist:all
 ```
 
-安装包输出在 `release-ready`。当前本地安装包未使用商业代码签名证书，Windows 可能显示 SmartScreen 提示；正式发布前应配置 Authenticode 证书。
+Additional smoke tests cover cache reuse, packaged search state, background CPU, tray idle performance, clean exit, ownership persistence, installed and portable updates, update rejection, and rollback. See `package.json` for the complete command list.
 
-## 项目结构
+Build artifacts are written to `release-ready`.
+
+## Project structure
 
 ```text
-electron/              Electron 主进程、IPC、安全存储、分析与迁移事务
-native/indexer/        Rust 多磁盘名称索引、变更监听、全文索引
-src/                   React 界面、纯搜索逻辑模块和三套视觉效果
-scripts/               原生构建与索引联调脚本
-tests/                 路径保护单元测试
-docs/                  架构和安全设计
+electron/              Electron main process, IPC, secure storage, analysis, migration, and updater orchestration
+native/indexer/        Rust multi-drive name index, file-system change tracking, and content index
+native/updater/        Rust update helper for verified replacement and rollback
+src/                   React UI, search logic, shared components, and five visual themes
+scripts/               Native build, packaging, release-manifest, and smoke-test scripts
+tests/                 Path-protection and application behavior tests
+docs/                  Architecture and security design notes
 ```
 
-详细设计见 [架构说明](docs/ARCHITECTURE.md)。
+The implementation design is documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (Chinese).
+
+## License
+
+CDriveShiftAI is released under the [MIT License](LICENSE).
