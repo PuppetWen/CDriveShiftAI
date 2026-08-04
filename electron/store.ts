@@ -93,6 +93,9 @@ function sanitizeFilters(value: unknown): SearchFilters {
   const sortBy = searchSortFields.has(String(input.sortBy))
     ? (input.sortBy as SearchFilters["sortBy"])
     : "relevance";
+  const regex = Boolean(input.regex);
+  const fuzzy = !regex && Boolean(input.fuzzy);
+  const wholeWord = !regex && !fuzzy && Boolean(input.wholeWord);
   return {
     kind,
     scope: safeString(input.scope, 32_768) || "*",
@@ -106,9 +109,10 @@ function sanitizeFilters(value: unknown): SearchFilters {
     modifiedBefore:
       typeof input.modifiedBefore === "string" ? input.modifiedBefore.slice(0, 64) : undefined,
     caseSensitive: Boolean(input.caseSensitive),
-    wholeWord: Boolean(input.wholeWord),
+    wholeWord,
+    fuzzy,
     matchPath: Boolean(input.matchPath),
-    regex: Boolean(input.regex),
+    regex,
     sortBy,
     sortDirection: input.sortDirection === "desc" ? "desc" : "asc"
   };
@@ -288,6 +292,36 @@ function sanitizeUiLayout(value: unknown): UiLayoutState {
   const result: UiLayoutState = {};
   if (typeof input.sidebarCollapsed === "boolean") {
     result.sidebarCollapsed = input.sidebarCollapsed;
+  }
+  if (
+    input.searchResultColumnWidths &&
+    typeof input.searchResultColumnWidths === "object"
+  ) {
+    const widths = input.searchResultColumnWidths as Record<string, unknown>;
+    const keys = ["name", "path", "type", "size", "modified", "action"] as const;
+    if (
+      keys.every(
+        (key) =>
+          typeof widths[key] === "number" &&
+          Number.isFinite(widths[key]) &&
+          Number(widths[key]) >= 4 &&
+          Number(widths[key]) <= 60
+      )
+    ) {
+      const total = keys.reduce((sum, key) => sum + Number(widths[key]), 0);
+      if (total >= 80 && total <= 120) {
+        const normalized = (key: (typeof keys)[number]) =>
+          (Number(widths[key]) / total) * 100;
+        result.searchResultColumnWidths = {
+          name: normalized("name"),
+          path: normalized("path"),
+          type: normalized("type"),
+          size: normalized("size"),
+          modified: normalized("modified"),
+          action: normalized("action")
+        };
+      }
+    }
   }
   if (
     position &&

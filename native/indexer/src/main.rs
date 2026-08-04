@@ -167,6 +167,7 @@ struct Request {
     extensions: Option<Vec<String>>,
     case_sensitive: Option<bool>,
     whole_word: Option<bool>,
+    fuzzy: Option<bool>,
     match_path: Option<bool>,
     regex: Option<bool>,
     background: Option<bool>,
@@ -734,6 +735,52 @@ fn contains_whole_word(target: &str, needle: &str) -> bool {
     })
 }
 
+/// Matches `needle` as an ordered subsequence of `target` and returns a
+/// relevance score. Consecutive, early and compact matches rank above widely
+/// scattered matches, while every query uses the same generic algorithm.
+fn fuzzy_subsequence_score(target: &str, needle: &str) -> Option<f64> {
+    let mut expected = needle.chars();
+    let mut next = expected.next()?;
+    let needle_length = needle.chars().count().max(1);
+    let mut first_position = None;
+    let mut last_position = 0usize;
+    let mut matched = 0usize;
+    let mut consecutive_pairs = 0usize;
+
+    for (position, character) in target.chars().enumerate() {
+        if character != next {
+            continue;
+        }
+        if first_position.is_none() {
+            first_position = Some(position);
+        } else if position == last_position + 1 {
+            consecutive_pairs += 1;
+        }
+        last_position = position;
+        matched += 1;
+        match expected.next() {
+            Some(character) => next = character,
+            None => {
+                let first = first_position.unwrap_or(0);
+                let span = last_position.saturating_sub(first) + 1;
+                let compactness = needle_length as f64 / span.max(1) as f64;
+                let consecutive =
+                    consecutive_pairs as f64 / needle_length.saturating_sub(1).max(1) as f64;
+                let prefix = 1.0 / (1.0 + first as f64 * 0.15);
+                let length_fit = needle.len() as f64 / target.len().max(needle.len()) as f64;
+                return Some(
+                    48.0 + compactness * 22.0
+                        + consecutive * 15.0
+                        + prefix * 9.0
+                        + length_fit * 6.0,
+                );
+            }
+        }
+    }
+    debug_assert!(matched < needle_length);
+    None
+}
+
 fn trigram_hash(chars: [char; 3]) -> u32 {
     let mut hash = 2_166_136_261u32;
     for character in chars {
@@ -984,6 +1031,7 @@ impl SearchIndex {
         extensions: &[String],
         case_sensitive: bool,
         whole_word: bool,
+        fuzzy_mode: bool,
         match_path: bool,
         regex_mode: bool,
         sort_by: &str,
@@ -1036,12 +1084,15 @@ impl SearchIndex {
         };
 
         let first_token_lower = tokens[0].to_lowercase();
-        let query_signature =
-            if !regex_mode && !match_path && first_token_lower.chars().count() >= 3 {
-                name_signature(&first_token_lower)
-            } else {
-                0
-            };
+        let query_signature = if !regex_mode
+            && !fuzzy_mode
+            && !match_path
+            && first_token_lower.chars().count() >= 3
+        {
+            name_signature(&first_token_lower)
+        } else {
+            0
+        };
 
         let keep = offset.saturating_add(limit).saturating_add(1).max(1);
         let prune_at = keep.saturating_mul(2).max(4_096);
@@ -1051,36 +1102,29 @@ impl SearchIndex {
             || max_size.is_some()
             || modified_after_ms.is_some()
             || modified_before_ms.is_some();
-        let mut matches = Vec::with_capacity(keep.min(8_192));
-        let mut total_matches = 0usize;
-        for index in 0..self.entries.len() {
+        let scoring_needle = text.to_lowercase();
+        let candidate_at = |index: usize| -> Option<SearchCandidate> {
             if !self.live.get(index).copied().unwrap_or(false) {
-                continue;
+                return None;
             }
             if query_signature != 0
                 && self.name_signatures.get(index).map_or(true, |candidate| {
                     candidate & query_signature != query_signature
                 })
             {
-                continue;
+                return None;
             }
-            let entry = match self.entries.get(index).copied() {
-                Some(value) => value,
-                None => continue,
-            };
-            let path_value = match self.path(index) {
-                Some(value) => value,
-                None => continue,
-            };
+            let entry = self.entries.get(index).copied()?;
+            let path_value = self.path(index)?;
             if self.path_is_removed(path_value) {
-                continue;
+                return None;
             }
             let is_directory = entry.is_directory();
             if kind == "folder" && !is_directory {
-                continue;
+                return None;
             }
             if kind == "file" && is_directory {
-                continue;
+                return None;
             }
             let entry_path_lower = if !scope_values.is_empty() || match_path {
                 Some(normalized(path_value))
@@ -1097,17 +1141,17 @@ impl SearchIndex {
                             .is_some_and(|suffix| suffix.starts_with(['\\', '/']))
                 })
             {
-                continue;
+                return None;
             }
             if !category_values.is_empty()
                 && !category_values.contains(file_category(is_directory, path_value))
             {
-                continue;
+                return None;
             }
             if !extension_values.is_empty()
                 && (is_directory || !extension_values.contains(&extension_name(path_value)))
             {
-                continue;
+                return None;
             }
             let original_target = if match_path {
                 path_value
@@ -1121,8 +1165,19 @@ impl SearchIndex {
                 folded_target = original_target.to_lowercase();
                 &folded_target
             };
+            let fuzzy_score = if fuzzy_mode {
+                let mut total = 0.0;
+                for token in &tokens {
+                    total += fuzzy_subsequence_score(target, token)?;
+                }
+                Some(total / tokens.len().max(1) as f64)
+            } else {
+                None
+            };
             let matches_query = if let Some(regex) = &expression {
                 regex.is_match(original_target)
+            } else if fuzzy_mode {
+                fuzzy_score.is_some()
             } else if whole_word {
                 tokens
                     .iter()
@@ -1131,31 +1186,28 @@ impl SearchIndex {
                 tokens.iter().all(|token| target.contains(token))
             };
             if !matches_query {
-                continue;
+                return None;
             }
 
-            let mut score = 60.0;
-            let scoring_needle = text.to_lowercase();
+            let mut score = fuzzy_score.unwrap_or(60.0);
             let entry_name_lower = file_name(path_value).to_lowercase();
-            if entry_name_lower == scoring_needle {
+            if entry_name_lower == scoring_needle.as_str() {
                 score = 100.0;
-            } else if entry_name_lower.starts_with(&scoring_needle) {
+            } else if entry_name_lower.starts_with(scoring_needle.as_str()) {
                 score = 92.0;
-            } else if entry_name_lower.contains(&scoring_needle) {
+            } else if entry_name_lower.contains(scoring_needle.as_str()) {
                 score = 82.0;
             } else if entry_path_lower
                 .as_deref()
-                .is_some_and(|path_value| path_value.ends_with(&scoring_needle))
-                || (!match_path && normalized(path_value).ends_with(&scoring_needle))
+                .is_some_and(|path_value| path_value.ends_with(scoring_needle.as_str()))
+                || (!match_path && normalized(path_value).ends_with(scoring_needle.as_str()))
             {
                 score = 76.0;
             }
             score -= (path_value.len().min(400) as f64) * 0.01;
 
             let (size, modified_ms) = if needs_metadata {
-                let Ok(metadata) = fs::metadata(path_value) else {
-                    continue;
-                };
+                let metadata = fs::metadata(path_value).ok()?;
                 let modified_ms = metadata
                     .modified()
                     .ok()
@@ -1171,23 +1223,71 @@ impl SearchIndex {
                 || modified_after_ms.is_some_and(|minimum| modified_ms < minimum)
                 || modified_before_ms.is_some_and(|maximum| modified_ms > maximum)
             {
-                continue;
+                return None;
             }
 
-            total_matches = total_matches.saturating_add(1);
-            matches.push(SearchCandidate {
+            Some(SearchCandidate {
                 index,
                 score,
                 size,
                 modified_ms,
-            });
-            if matches.len() >= prune_at {
-                matches.sort_by(|first, second| {
+            })
+        };
+        let process_range = |range: std::ops::Range<usize>| {
+            let mut partial = Vec::with_capacity(keep.min(4_096));
+            let mut count = 0usize;
+            for index in range {
+                let Some(candidate) = candidate_at(index) else {
+                    continue;
+                };
+                count = count.saturating_add(1);
+                partial.push(candidate);
+                if partial.len() >= prune_at {
+                    partial.sort_by(|first, second| {
+                        self.compare_search_candidates(first, second, sort_by, sort_direction)
+                    });
+                    partial.truncate(keep);
+                }
+            }
+            (partial, count)
+        };
+        let entry_count = self.entries.len();
+        let worker_count = thread::available_parallelism()
+            .map(|count| count.get().clamp(2, 8))
+            .unwrap_or(4)
+            .min(entry_count.max(1));
+        let chunk_size = entry_count.div_ceil(worker_count);
+        let ranges = (0..entry_count)
+            .step_by(chunk_size.max(1))
+            .map(|start| start..(start + chunk_size).min(entry_count))
+            .collect::<Vec<_>>();
+        let (mut matches, total_matches) = if entry_count >= 250_000 && ranges.len() > 1 {
+            let partials = thread::scope(|scope| {
+                let process = &process_range;
+                let handles = ranges
+                    .into_iter()
+                    .map(|range| scope.spawn(move || process(range)))
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join())
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(|_| "并行搜索线程异常退出".to_string())?;
+            let mut merged = Vec::with_capacity(keep.min(4_096));
+            let mut merged_count = 0usize;
+            for (mut partial, count) in partials {
+                merged_count = merged_count.saturating_add(count);
+                merged.append(&mut partial);
+                merged.sort_by(|first, second| {
                     self.compare_search_candidates(first, second, sort_by, sort_direction)
                 });
-                matches.truncate(keep);
+                merged.truncate(keep);
             }
-        }
+            (merged, merged_count)
+        } else {
+            process_range(0..entry_count)
+        };
         matches.sort_by(|first, second| {
             self.compare_search_candidates(first, second, sort_by, sort_direction)
         });
@@ -3558,6 +3658,7 @@ fn run_server() -> io::Result<()> {
                         &extensions,
                         request.case_sensitive.unwrap_or(false),
                         request.whole_word.unwrap_or(false),
+                        request.fuzzy.unwrap_or(false),
                         request.match_path.unwrap_or(false),
                         request.regex.unwrap_or(false),
                         &sort_by,
@@ -3751,7 +3852,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        lowercase_name_signature, name_signature, normalized_path_hash, Entry, SearchIndex,
+        contains_whole_word, fuzzy_subsequence_score, lowercase_name_signature, name_signature,
+        normalized_path_hash, Entry, SearchIndex,
     };
     use std::sync::atomic::AtomicBool;
 
@@ -3771,6 +3873,29 @@ mod tests {
             normalized_path_hash("C:/Users/Puppet/AppData"),
             normalized_path_hash("c:\\users\\puppet\\appdata")
         );
+    }
+
+    #[test]
+    fn complete_word_matching_uses_generic_character_boundaries() {
+        assert!(contains_whole_word("test.jsp", "test"));
+        assert!(contains_whole_word("report-test-final", "test"));
+        assert!(contains_whole_word("admin.config", "admin"));
+        assert!(contains_whole_word("sql-injection.md", "sql"));
+        assert!(!contains_whole_word("deleteStudy", "test"));
+        assert!(!contains_whole_word("testing", "test"));
+        assert!(!contains_whole_word("administrator", "admin"));
+        assert!(!contains_whole_word("mysql", "sql"));
+        assert!(!contains_whole_word("test_value", "test"));
+    }
+
+    #[test]
+    fn fuzzy_matching_is_generic_and_rewards_compact_matches() {
+        let compact = fuzzy_subsequence_score("redscope", "rdscp").expect("fuzzy match");
+        let scattered =
+            fuzzy_subsequence_score("red-super-copied-project", "rdscp").expect("fuzzy match");
+        assert!(compact > scattered);
+        assert!(fuzzy_subsequence_score("administrator", "admn").is_some());
+        assert!(fuzzy_subsequence_score("redscope", "rdx").is_none());
     }
 
     #[test]
@@ -3811,6 +3936,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 "name",
                 "asc",
                 None,
@@ -3828,6 +3954,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                false,
                 false,
                 false,
                 false,
@@ -3890,6 +4017,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     "relevance",
                     "desc",
                     None,
@@ -3912,6 +4040,7 @@ mod tests {
                     &[],
                     &[],
                     &[],
+                    false,
                     false,
                     false,
                     false,

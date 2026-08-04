@@ -42,6 +42,54 @@ async function fileExists(candidate: string): Promise<boolean> {
   }
 }
 
+const wordCharacterPattern = /[\p{L}\p{N}_]/u;
+
+function containsCompleteWord(target: string, needle: string): boolean {
+  let start = target.indexOf(needle);
+  while (start >= 0) {
+    const before = Array.from(target.slice(0, start)).at(-1);
+    const after = Array.from(target.slice(start + needle.length))[0];
+    if (
+      (!before || !wordCharacterPattern.test(before)) &&
+      (!after || !wordCharacterPattern.test(after))
+    ) {
+      return true;
+    }
+    start = target.indexOf(needle, start + Math.max(1, needle.length));
+  }
+  return false;
+}
+
+function fuzzySubsequenceScore(target: string, needle: string): number | undefined {
+  const wanted = Array.from(needle);
+  if (wanted.length === 0) return undefined;
+  let wantedIndex = 0;
+  let first = -1;
+  let last = -1;
+  let consecutivePairs = 0;
+  let position = 0;
+  for (const character of target) {
+    if (character === wanted[wantedIndex]) {
+      if (first < 0) first = position;
+      if (last >= 0 && position === last + 1) consecutivePairs += 1;
+      last = position;
+      wantedIndex += 1;
+      if (wantedIndex === wanted.length) {
+        const span = last - first + 1;
+        return (
+          48 +
+          (wanted.length / Math.max(1, span)) * 22 +
+          (consecutivePairs / Math.max(1, wanted.length - 1)) * 15 +
+          (1 / (1 + first * 0.15)) * 9 +
+          (needle.length / Math.max(needle.length, target.length)) * 6
+        );
+      }
+    }
+    position += 1;
+  }
+  return undefined;
+}
+
 export class SearchService {
   private child?: ChildProcessWithoutNullStreams;
   private requestId = 0;
@@ -438,6 +486,7 @@ export class SearchService {
           extensions: filters.extensions ?? [],
           caseSensitive: filters.caseSensitive ?? false,
           wholeWord: filters.wholeWord ?? false,
+          fuzzy: filters.fuzzy ?? false,
           matchPath: filters.matchPath ?? false,
           regex: filters.regex ?? false,
           sortBy: filters.sortBy ?? "relevance",
@@ -471,7 +520,7 @@ export class SearchService {
       generation = response.generation ?? 0;
       cursorReset = response.cursorReset === true;
     } else {
-      results = await this.liveSearch(trimmed, filters.scope || "*", filters.kind);
+      results = await this.liveSearch(trimmed, filters.scope || "*", filters);
     }
 
     const enriched: SearchResult[] = [];
@@ -685,10 +734,14 @@ export class SearchService {
   private async liveSearch(
     query: string,
     root: string,
-    kind: SearchFilters["kind"]
+    filters: SearchFilters
   ): Promise<SearchResult[]> {
     const deadline = Date.now() + 2_500;
-    const normalizedQuery = query.toLocaleLowerCase();
+    const normalizedQuery = filters.caseSensitive ? query : query.toLocaleLowerCase();
+    const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+    const expression = filters.regex
+      ? new RegExp(query, filters.caseSensitive ? "u" : "iu")
+      : undefined;
     const queue = root === "*" ? await getLocalDriveRoots() : [root];
     const results: SearchResult[] = [];
     while (queue.length > 0 && Date.now() < deadline && results.length < 80) {
@@ -700,16 +753,39 @@ export class SearchService {
           const entryPath = path.join(current, entry.name);
           if (entry.isDirectory()) queue.push(entryPath);
           const kindMatches =
-            kind === "all" ||
-            (kind === "folder" && entry.isDirectory()) ||
-            (kind === "file" && entry.isFile());
-          if (kindMatches && entry.name.toLocaleLowerCase().includes(normalizedQuery)) {
+            filters.kind === "all" ||
+            (filters.kind === "folder" && entry.isDirectory()) ||
+            (filters.kind === "file" && entry.isFile());
+          const originalTarget = filters.matchPath ? entryPath : entry.name;
+          const target = filters.caseSensitive
+            ? originalTarget
+            : originalTarget.toLocaleLowerCase();
+          let score: number | undefined;
+          if (expression?.test(originalTarget)) {
+            score = 72;
+          } else if (!expression && filters.fuzzy) {
+            const tokenScores = tokens.map((token) => fuzzySubsequenceScore(target, token));
+            if (tokenScores.every((value) => value != null)) {
+              score = tokenScores.reduce((sum, value) => sum + (value ?? 0), 0) /
+                Math.max(1, tokenScores.length);
+            }
+          } else if (
+            !expression &&
+            filters.wholeWord &&
+            tokens.every((token) => containsCompleteWord(target, token))
+          ) {
+            score = 82;
+          } else if (!expression && !filters.fuzzy && !filters.wholeWord &&
+            tokens.every((token) => target.includes(token))) {
+            score = target === normalizedQuery ? 100 : target.startsWith(normalizedQuery) ? 92 : 70;
+          }
+          if (kindMatches && score != null) {
             results.push({
               path: entryPath,
               name: entry.name,
               isDirectory: entry.isDirectory(),
               size: 0,
-              score: entry.name.toLocaleLowerCase() === normalizedQuery ? 100 : 70,
+              score,
               source: "live-scan"
             });
             if (results.length >= 80) break;

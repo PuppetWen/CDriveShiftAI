@@ -4,8 +4,11 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type UIEvent
 } from "react";
 import { createPortal } from "react-dom";
@@ -79,6 +82,7 @@ import type {
   SearchBookmarkFolder,
   SearchFilters,
   SearchResult,
+  SearchResultColumnWidths,
   SearchSortDirection,
   SearchSortField,
   SearchWorkspaceState
@@ -95,6 +99,30 @@ interface SearchViewProps {
 
 const NAME_PAGE_SIZE = 240;
 const CONTENT_PAGE_SIZE = 80;
+const SEARCH_COLUMN_KEYS = [
+  "name",
+  "path",
+  "type",
+  "size",
+  "modified",
+  "action"
+] as const satisfies ReadonlyArray<keyof SearchResultColumnWidths>;
+const DEFAULT_SEARCH_COLUMN_WIDTHS: SearchResultColumnWidths = {
+  name: 22,
+  path: 34,
+  type: 9,
+  size: 9,
+  modified: 16,
+  action: 10
+};
+const MIN_SEARCH_COLUMN_WIDTHS: SearchResultColumnWidths = {
+  name: 12,
+  path: 16,
+  type: 6,
+  size: 7,
+  modified: 10,
+  action: 7
+};
 
 const categoryDefinitions: Array<{
   value: SearchCategory;
@@ -125,6 +153,15 @@ const sortLabels: Record<SearchSortField, string> = {
   type: "类型"
 };
 
+type NameMatchMode = "contains" | "whole" | "fuzzy" | "regex";
+
+const nameMatchModeLabels: Record<NameMatchMode, string> = {
+  contains: "包含匹配",
+  whole: "完整词匹配",
+  fuzzy: "模糊匹配",
+  regex: "正则匹配"
+};
+
 export function SearchView({
   indexer,
   drives,
@@ -137,6 +174,7 @@ export function SearchView({
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>(defaultFilters);
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const [matchModeMenuOpen, setMatchModeMenuOpen] = useState(false);
   const [extensionInput, setExtensionInput] = useState("");
   const [datePreset, setDatePreset] = useState<DatePreset>("any");
   const [contentScope, setContentScope] = useState("*");
@@ -149,6 +187,9 @@ export function SearchView({
   const [nameTotal, setNameTotal] = useState<number>();
   const [contentTotal, setContentTotal] = useState<number>();
   const [loadingMore, setLoadingMore] = useState(false);
+  const [columnWidths, setColumnWidths] = useState<SearchResultColumnWidths>({
+    ...DEFAULT_SEARCH_COLUMN_WIDTHS
+  });
   const [directorySizes, setDirectorySizes] = useState<Map<string, DirectorySizeResult>>(
     new Map()
   );
@@ -195,10 +236,19 @@ export function SearchView({
   const skipRestoredSizesRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const bookmarkPanelRef = useRef<HTMLElement>(null);
+  const matchModePickerRef = useRef<HTMLDivElement>(null);
   const workspaceSnapshotRef = useRef<SearchWorkspaceState | undefined>(undefined);
   const liveRefreshRef = useRef(false);
   const resultsRef = useRef<SearchResult[]>([]);
   const contentResultsRef = useRef<ContentSearchResult[]>([]);
+  const columnWidthsRef = useRef(columnWidths);
+  const columnResizeRef = useRef<{
+    boundary: number;
+    pointerId: number;
+    startX: number;
+    tableWidth: number;
+    widths: SearchResultColumnWidths;
+  } | undefined>(undefined);
   const {
     feedback: openFeedback,
     openPath,
@@ -226,6 +276,32 @@ export function SearchView({
   }, [contentResults]);
 
   useEffect(() => {
+    columnWidthsRef.current = columnWidths;
+  }, [columnWidths]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getUiLayout()
+      .then((layout) => {
+        if (cancelled || !layout.searchResultColumnWidths) return;
+        columnWidthsRef.current = layout.searchResultColumnWidths;
+        setColumnWidths(layout.searchResultColumnWidths);
+      })
+      .catch((reason) =>
+        console.warn("Unable to restore search result column widths", reason)
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(
+    () => () => document.documentElement.classList.remove("resizing-search-columns"),
+    []
+  );
+
+  useEffect(() => {
     if (!bookmarkPanelOpen) return;
     const close = (event: PointerEvent) => {
       const target = event.target as Node;
@@ -239,6 +315,24 @@ export function SearchView({
     window.addEventListener("pointerdown", close, true);
     return () => window.removeEventListener("pointerdown", close, true);
   }, [bookmarkPanelOpen]);
+
+  useEffect(() => {
+    if (!matchModeMenuOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!matchModePickerRef.current?.contains(event.target as Node)) {
+        setMatchModeMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMatchModeMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", close, true);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [matchModeMenuOpen]);
   const contentIndexingCurrentScope =
     mode === "content" && contentStatus.state === "indexing" && contentStatusMatchesScope;
   const regexValidation = useMemo(
@@ -952,11 +1046,146 @@ export function SearchView({
     });
   };
 
+  const resultGridStyle = useMemo<CSSProperties>(
+    () => ({
+      gridTemplateColumns: SEARCH_COLUMN_KEYS.map(
+        (key) => `${columnWidths[key]}fr`
+      ).join(" ")
+    }),
+    [columnWidths]
+  );
+
+  const resizeColumnBoundary = useCallback(
+    (
+      boundary: number,
+      deltaPercentage: number,
+      base = columnWidthsRef.current
+    ) => {
+      const leftKey = SEARCH_COLUMN_KEYS[boundary];
+      const rightKey = SEARCH_COLUMN_KEYS[boundary + 1];
+      if (!leftKey || !rightKey) return;
+      const pairWidth = base[leftKey] + base[rightKey];
+      const leftWidth = Math.min(
+        pairWidth - MIN_SEARCH_COLUMN_WIDTHS[rightKey],
+        Math.max(
+          MIN_SEARCH_COLUMN_WIDTHS[leftKey],
+          base[leftKey] + deltaPercentage
+        )
+      );
+      const next = {
+        ...base,
+        [leftKey]: leftWidth,
+        [rightKey]: pairWidth - leftWidth
+      };
+      columnWidthsRef.current = next;
+      setColumnWidths(next);
+    },
+    []
+  );
+
+  const beginColumnResize = useCallback(
+    (boundary: number, event: ReactPointerEvent<HTMLSpanElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const table = event.currentTarget.closest(".result-columns");
+      if (!(table instanceof HTMLElement) || table.clientWidth <= 0) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      columnResizeRef.current = {
+        boundary,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        tableWidth: table.clientWidth,
+        widths: { ...columnWidthsRef.current }
+      };
+      document.documentElement.classList.add("resizing-search-columns");
+    },
+    []
+  );
+
+  const moveColumnResize = useCallback(
+    (event: ReactPointerEvent<HTMLSpanElement>) => {
+      const resize = columnResizeRef.current;
+      if (!resize || resize.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      resizeColumnBoundary(
+        resize.boundary,
+        ((event.clientX - resize.startX) / resize.tableWidth) * 100,
+        resize.widths
+      );
+    },
+    [resizeColumnBoundary]
+  );
+
+  const finishColumnResize = useCallback(
+    (event: ReactPointerEvent<HTMLSpanElement>) => {
+      const resize = columnResizeRef.current;
+      if (!resize || resize.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      columnResizeRef.current = undefined;
+      document.documentElement.classList.remove("resizing-search-columns");
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      void api
+        .updateUiLayout({ searchResultColumnWidths: columnWidthsRef.current })
+        .catch((reason) =>
+          console.warn("Unable to save search result column widths", reason)
+        );
+    },
+    []
+  );
+
+  const resetColumnWidths = useCallback((event: ReactPointerEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = { ...DEFAULT_SEARCH_COLUMN_WIDTHS };
+    columnWidthsRef.current = next;
+    setColumnWidths(next);
+    void api
+      .updateUiLayout({ searchResultColumnWidths: next })
+      .catch((reason) =>
+        console.warn("Unable to reset search result column widths", reason)
+      );
+  }, []);
+
+  const adjustColumnWidthByKeyboard = useCallback(
+    (boundary: number, event: ReactKeyboardEvent<HTMLSpanElement>) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      event.stopPropagation();
+      resizeColumnBoundary(boundary, event.key === "ArrowLeft" ? -1 : 1);
+      void api
+        .updateUiLayout({ searchResultColumnWidths: columnWidthsRef.current })
+        .catch((reason) =>
+          console.warn("Unable to save search result column widths", reason)
+        );
+    },
+    [resizeColumnBoundary]
+  );
+
   const resetFilters = () => {
     setFilters(defaultFilters());
     setExtensionInput("");
     setDatePreset("any");
   };
+
+  const nameMatchMode: NameMatchMode = filters.regex
+    ? "regex"
+    : filters.fuzzy
+      ? "fuzzy"
+      : filters.wholeWord
+        ? "whole"
+        : "contains";
+
+  const selectNameMatchMode = useCallback((value: NameMatchMode) => {
+    setFilters((current) => ({
+      ...current,
+      wholeWord: value === "whole",
+      fuzzy: value === "fuzzy",
+      regex: value === "regex"
+    }));
+  }, []);
 
   const insertRegexToken = (token: string) => {
     const input = searchInputRef.current;
@@ -987,6 +1216,7 @@ export function SearchView({
     Number(filters.modifiedAfter != null || filters.modifiedBefore != null) +
     Number(filters.caseSensitive) +
     Number(filters.wholeWord) +
+    Number(filters.fuzzy) +
     Number(filters.matchPath) +
     Number(filters.regex);
 
@@ -1303,6 +1533,22 @@ export function SearchView({
     totalCount != null
       ? `已加载 ${count.toLocaleString()} / 共 ${totalCount.toLocaleString()} 个`
       : `${count.toLocaleString()}${activeHasMore ? "+" : ""} 个结果`;
+  const columnResizeHandle = (boundary: number, label: string) => (
+    <span
+      className="result-column-resizer"
+      role="separator"
+      aria-label={`调整${label}列宽`}
+      aria-orientation="vertical"
+      tabIndex={0}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={resetColumnWidths}
+      onPointerDown={(event) => beginColumnResize(boundary, event)}
+      onPointerMove={moveColumnResize}
+      onPointerUp={finishColumnResize}
+      onPointerCancel={finishColumnResize}
+      onKeyDown={(event) => adjustColumnWidthByKeyboard(boundary, event)}
+    />
+  );
 
   return (
     <div className={standalone ? "page search-page standalone-search-page" : "page search-page"}>
@@ -1531,6 +1777,8 @@ export function SearchView({
               mode === "name"
                 ? filters.regex
                   ? "输入正则表达式，例如 ^报告.*\\.pdf$"
+                  : filters.fuzzy
+                    ? "输入模糊关键词，例如 rdscp 可匹配 redscope"
                   : "搜索任意磁盘中的文件、目录或文件夹名字…"
                 : filters.regex
                   ? "输入正文正则，例如 error\\s+[45]\\d{2}"
@@ -1581,16 +1829,62 @@ export function SearchView({
                   </button>
                 ))}
               </div>
-              <button
-                type="button"
-                className={filterPanelOpen ? "advanced-filter-button active" : "advanced-filter-button"}
-                onClick={() => setFilterPanelOpen((value) => !value)}
-              >
-                <SlidersHorizontal size={14} />
-                高级筛选
-                {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
-                <ChevronDown size={13} className={filterPanelOpen ? "flip" : ""} />
-              </button>
+              <div className="search-filter-actions">
+                <div className="match-mode-picker" ref={matchModePickerRef}>
+                  <ThemedTooltip content="选择包含、完整词、模糊或正则匹配；完整词按通用字符边界判断，不针对特定关键词">
+                    <button
+                      type="button"
+                      className={`match-mode-control ${nameMatchMode}`}
+                      aria-haspopup="menu"
+                      aria-expanded={matchModeMenuOpen}
+                      onClick={() => setMatchModeMenuOpen((value) => !value)}
+                    >
+                      <FileSearch size={13} />
+                      <span>{nameMatchModeLabels[nameMatchMode]}</span>
+                      <ChevronDown size={12} className={matchModeMenuOpen ? "flip" : ""} />
+                    </button>
+                  </ThemedTooltip>
+                  {matchModeMenuOpen && (
+                    <div className="match-mode-menu" role="menu">
+                      {(Object.keys(nameMatchModeLabels) as NameMatchMode[]).map((value) => (
+                        <button
+                          type="button"
+                          className={nameMatchMode === value ? "active" : ""}
+                          role="menuitemradio"
+                          aria-checked={nameMatchMode === value}
+                          onClick={() => {
+                            selectNameMatchMode(value);
+                            setMatchModeMenuOpen(false);
+                          }}
+                          key={value}
+                        >
+                          <span />
+                          <strong>{nameMatchModeLabels[value]}</strong>
+                          <small>
+                            {value === "contains"
+                              ? "关键词连续出现在名称中"
+                              : value === "whole"
+                                ? "只匹配独立完整词"
+                                : value === "fuzzy"
+                                  ? "按字符顺序智能匹配"
+                                  : "使用正则表达式规则"}
+                          </small>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className={filterPanelOpen ? "advanced-filter-button active" : "advanced-filter-button"}
+                  onClick={() => setFilterPanelOpen((value) => !value)}
+                >
+                  <SlidersHorizontal size={14} />
+                  高级筛选
+                  {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
+                  <ChevronDown size={13} className={filterPanelOpen ? "flip" : ""} />
+                </button>
+              </div>
             </div>
 
             <div className="search-filters name-filter-row">
@@ -1783,9 +2077,7 @@ export function SearchView({
                     <div className="search-option-toggles">
                       {[
                         ["matchPath", "匹配完整路径"],
-                        ["caseSensitive", "区分大小写"],
-                        ["wholeWord", "完整单词"],
-                        ["regex", "正则表达式"]
+                        ["caseSensitive", "区分大小写"]
                       ].map(([field, label]) => (
                         <button
                           type="button"
@@ -1807,7 +2099,7 @@ export function SearchView({
                 </div>
                 <div className="advanced-filter-footer">
                   <span>
-                    同一组内按“或”组合，不同组之间按“且”组合；正则和完整路径模式可能稍慢。
+                    同一组内按“或”组合，不同组之间按“且”组合；模糊、正则和完整路径模式可能稍慢。
                   </span>
                   <button type="button" onClick={resetFilters}>
                     <RotateCcw size={13} /> 重置全部筛选
@@ -1859,6 +2151,29 @@ export function SearchView({
                     修改时间 <X size={11} />
                   </button>
                 )}
+                {nameMatchMode !== "contains" && (
+                  <button type="button" onClick={() => selectNameMatchMode("contains")}>
+                    {nameMatchModeLabels[nameMatchMode]} <X size={11} />
+                  </button>
+                )}
+                {filters.caseSensitive && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFilters((current) => ({ ...current, caseSensitive: false }))
+                    }
+                  >
+                    区分大小写 <X size={11} />
+                  </button>
+                )}
+                {filters.matchPath && (
+                  <button
+                    type="button"
+                    onClick={() => setFilters((current) => ({ ...current, matchPath: false }))}
+                  >
+                    匹配完整路径 <X size={11} />
+                  </button>
+                )}
               </div>
             )}
           </>
@@ -1893,7 +2208,12 @@ export function SearchView({
                   type="button"
                   className={filters.regex ? "active" : ""}
                   onClick={() =>
-                    setFilters((current) => ({ ...current, regex: !current.regex }))
+                    setFilters((current) => ({
+                      ...current,
+                      regex: !current.regex,
+                      wholeWord: false,
+                      fuzzy: false
+                    }))
                   }
                 >
                   <span />
@@ -2015,34 +2335,39 @@ export function SearchView({
                 <Info size={13} /> {contentStatus.message}
               </span>
             )}
-            <span className="result-help">单击选中 · 双击打开 · 右键更多操作</span>
+            <span className="result-help">单击选中 · 双击打开 · 右键操作 · 拖动表头分隔线调列宽</span>
           </div>
           {mode === "name" && !error && displayedResults.length > 0 && (
-            <div className="result-columns">
+            <div className="result-columns" style={resultGridStyle}>
               <button type="button" onClick={() => setSort("name")}>
                 名称
                 {filters.sortBy === "name" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(0, "名称")}
               </button>
               <button type="button" onClick={() => setSort("path")}>
                 路径
                 {filters.sortBy === "path" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(1, "路径")}
               </button>
               <button type="button" onClick={() => setSort("type")}>
                 类型
                 {filters.sortBy === "type" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(2, "类型")}
               </button>
               <button type="button" onClick={() => setSort("size")}>
                 大小
                 {filters.sortBy === "size" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(3, "大小")}
               </button>
               <button type="button" onClick={() => setSort("modified")}>
                 修改时间
                 {filters.sortBy === "modified" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                {columnResizeHandle(4, "修改时间")}
               </button>
               <span>操作</span>
             </div>
@@ -2081,6 +2406,7 @@ export function SearchView({
                     className={`result-row result-grid-row path-openable ${
                       selectedPath === item.path ? "selected" : ""
                     } ${openClassNameFor(item.path)}`}
+                    style={resultGridStyle}
                     key={item.path}
                     onClick={() => setSelectedPath(item.path)}
                     onDoubleClick={(event) => openFromDoubleClick(event, item.path)}

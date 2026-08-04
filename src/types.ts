@@ -70,6 +70,7 @@ export interface SearchFilters {
   modifiedBefore?: string;
   caseSensitive?: boolean;
   wholeWord?: boolean;
+  fuzzy?: boolean;
   matchPath?: boolean;
   regex?: boolean;
   sortBy?: SearchSortField;
@@ -117,6 +118,7 @@ export interface SearchBookmarkFolder {
 
 export interface UiLayoutState {
   sidebarCollapsed?: boolean;
+  searchResultColumnWidths?: SearchResultColumnWidths;
   searchRenamePosition?: {
     x: number;
     y: number;
@@ -141,6 +143,15 @@ export interface SearchResult {
   modifiedAt?: string;
   score: number;
   source: "native-index" | "live-scan";
+}
+
+export interface SearchResultColumnWidths {
+  name: number;
+  path: number;
+  type: number;
+  size: number;
+  modified: number;
+  action: number;
 }
 
 export interface SearchPageOptions {

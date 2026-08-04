@@ -1908,6 +1908,99 @@ kbd { border: 1px solid var(--border); border-radius: 5px; color: var(--dim); ba
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mint) 3%, transparent);
 }
 
+.search-filter-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.match-mode-picker { position: relative; flex: 0 0 auto; }
+
+.match-mode-control {
+  display: inline-flex;
+  height: 31px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface-hover) 40%, transparent);
+  min-width: 112px;
+  justify-content: space-between;
+  padding: 0 8px;
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.match-mode-control > span { flex: 1; color: var(--text); font-weight: 650; white-space: nowrap; }
+.match-mode-control > svg:last-child { transition: transform 150ms ease; }
+.match-mode-control > svg:last-child.flip { transform: rotate(180deg); }
+
+.match-mode-control:hover,
+.match-mode-control.whole,
+.match-mode-control.fuzzy,
+.match-mode-control.regex {
+  border-color: var(--border-strong);
+  color: var(--mint);
+  background: color-mix(in srgb, var(--mint) 8%, var(--surface));
+}
+
+.match-mode-menu {
+  position: absolute;
+  z-index: 60;
+  display: grid;
+  width: 224px;
+  gap: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: 11px;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--mint) 5%, transparent), transparent 55%),
+    color-mix(in srgb, var(--surface-solid) 96%, transparent);
+  box-shadow: var(--shadow), 0 0 18px color-mix(in srgb, var(--mint) 8%, transparent);
+  padding: 5px;
+  inset: calc(100% + 7px) 0 auto auto;
+  animation: filter-panel-in 130ms ease both;
+  backdrop-filter: blur(18px);
+}
+
+.match-mode-menu button {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 7px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  padding: 7px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.match-mode-menu button > span {
+  grid-row: 1 / 3;
+  width: 10px;
+  height: 10px;
+  align-self: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+}
+
+.match-mode-menu button strong { color: var(--text); font-size: 8px; }
+.match-mode-menu button small { margin-top: 2px; color: var(--dim); font-size: 7px; }
+.match-mode-menu button:hover,
+.match-mode-menu button.active {
+  border-color: color-mix(in srgb, var(--mint) 22%, var(--border));
+  background: color-mix(in srgb, var(--mint) 8%, transparent);
+}
+
+.match-mode-menu button.active > span {
+  border: 3px solid color-mix(in srgb, var(--mint) 25%, var(--surface-solid));
+  background: var(--mint);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--mint) 50%, transparent);
+}
+
 .advanced-filter-button {
   display: inline-flex;
   flex: 0 0 auto;
@@ -2225,6 +2318,11 @@ kbd { border: 1px solid var(--border); border-radius: 5px; color: var(--dim); ba
   letter-spacing: 0.03em;
 }
 
+.result-columns > * {
+  position: relative;
+  min-width: 0;
+}
+
 .result-columns button {
   display: inline-flex;
   align-items: center;
@@ -2238,6 +2336,39 @@ kbd { border: 1px solid var(--border); border-radius: 5px; color: var(--dim); ba
 }
 
 .result-columns button:hover { color: var(--mint); }
+
+.result-column-resizer {
+  position: absolute;
+  z-index: 4;
+  width: 14px;
+  cursor: col-resize;
+  inset: -8px -13px -8px auto;
+  touch-action: none;
+}
+
+.result-column-resizer::after {
+  position: absolute;
+  width: 1px;
+  background: color-mix(in srgb, var(--mint) 42%, var(--border));
+  content: "";
+  inset: 7px auto 7px 6px;
+  opacity: 0;
+  transition: opacity 100ms ease, box-shadow 100ms ease;
+}
+
+.result-column-resizer:hover::after,
+.result-column-resizer:focus-visible::after,
+:root.resizing-search-columns .result-column-resizer::after {
+  opacity: 1;
+  box-shadow: 0 0 7px color-mix(in srgb, var(--mint) 50%, transparent);
+}
+
+:root.resizing-search-columns,
+:root.resizing-search-columns * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 .result-grid-row {
   min-height: 53px;
   gap: 0;

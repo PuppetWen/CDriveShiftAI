@@ -1547,6 +1547,9 @@ function registerIpc(): void {
         "type"
       ]);
       const allowedSortDirections = new Set<SearchSortDirection>(["asc", "desc"]);
+      const regex = raw.regex === true;
+      const fuzzy = !regex && raw.fuzzy === true;
+      const wholeWord = !regex && !fuzzy && raw.wholeWord === true;
       const safeFilters: SearchFilters = {
         kind: ["all", "folder", "file"].includes(raw.kind ?? "") ? raw.kind! : "all",
         scope: typeof raw.scope === "string" && raw.scope ? raw.scope : "*",
@@ -1573,9 +1576,10 @@ function registerIpc(): void {
         modifiedAfter: typeof raw.modifiedAfter === "string" ? raw.modifiedAfter : undefined,
         modifiedBefore: typeof raw.modifiedBefore === "string" ? raw.modifiedBefore : undefined,
         caseSensitive: raw.caseSensitive === true,
-        wholeWord: raw.wholeWord === true,
+        wholeWord,
+        fuzzy,
         matchPath: raw.matchPath === true,
-        regex: raw.regex === true,
+        regex,
         sortBy:
           raw.sortBy && allowedSortFields.has(raw.sortBy) ? raw.sortBy : "relevance",
         sortDirection:

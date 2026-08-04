@@ -34,6 +34,8 @@ await writeFile(path.join(nested, "needle-page-a.txt"), "page a", "utf8");
 await writeFile(path.join(nested, "needle-page-b.txt"), "page b", "utf8");
 await writeFile(path.join(nested, "needle-page-c.txt"), "page c", "utf8");
 await writeFile(path.join(nested, "portable-tool.exe"), "test executable fixture", "utf8");
+await writeFile(path.join(nested, "release-test.jsp"), "whole word fixture", "utf8");
+await writeFile(path.join(nested, "deleteStudy.md"), "substring-only fixture", "utf8");
 await writeFile(path.join(scoped, "shared-inside.log"), "inside", "utf8");
 await writeFile(path.join(similarlyNamedScope, "shared-outside.log"), "outside", "utf8");
 
@@ -206,6 +208,35 @@ try {
   ) {
     throw new Error("Case-sensitive regular expression filter returned incorrect results");
   }
+  const completeWordResult = await request({
+    op: "query",
+    query: "test",
+    kind: "file",
+    scope: fixture,
+    wholeWord: true,
+    sortBy: "name",
+    sortDirection: "asc",
+    limit: 10
+  });
+  if (
+    completeWordResult.results?.length !== 1 ||
+    completeWordResult.results[0]?.name !== "release-test.jsp"
+  ) {
+    throw new Error("Generic complete-word matching included a partial identifier match");
+  }
+  const fuzzyResult = await request({
+    op: "query",
+    query: "ndlfle",
+    kind: "file",
+    scope: fixture,
+    fuzzy: true,
+    sortBy: "relevance",
+    sortDirection: "desc",
+    limit: 10
+  });
+  if (!fuzzyResult.results?.some((result) => result.name === "Needle-file.txt")) {
+    throw new Error("Generic fuzzy name matching did not return the expected subsequence");
+  }
   const executableCatalog = await request({
     op: "executableCatalog",
     limit: 100
@@ -346,6 +377,8 @@ try {
         multiCategoryMatches: multiCategoryResult.results.length,
         scopedMatches: scopedResult.results.length,
         regexMatches: regexResult.results.length,
+        completeWordMatches: completeWordResult.results.length,
+        fuzzyMatches: fuzzyResult.results.length,
         executableCatalogMatches: executableCatalog.results.length,
         liveCreateMatches: liveCreated.results.length,
         liveDeleteMatches: liveDeleted.results.length,

@@ -189,7 +189,16 @@ try {
     await waitFor('document.querySelector(".result-grid-row") !== null');
     await clickButton("高级筛选");
     await waitFor('document.querySelector(".advanced-filter-panel") !== null');
-    await clickButton("正则表达式");
+    await clickButton("包含匹配");
+    await waitFor('document.querySelector(".match-mode-menu") !== null');
+    const regexModeSelected = await evaluate(`(() => {
+      const button = [...document.querySelectorAll(".match-mode-menu button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "正则匹配");
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`);
+    if (!regexModeSelected) throw new Error("Regex name match mode was unavailable");
     await waitFor('document.querySelector(".regex-assistant") !== null');
     await wait(220);
     await capture("cdriveshiftai-search-regex-assistant.png");
@@ -276,8 +285,52 @@ try {
       ...document.querySelectorAll(".result-columns button")
     ].some((item) => item.textContent?.includes("大小"))`);
     if (!searchSizeColumn) throw new Error("Search result size column was not rendered");
+    const columnResize = await evaluate(`(() => {
+      const header = document.querySelector(".result-columns button");
+      const handle = header?.querySelector(".result-column-resizer");
+      if (!header || !handle) return null;
+      const headerBounds = header.getBoundingClientRect();
+      const handleBounds = handle.getBoundingClientRect();
+      return {
+        before: headerBounds.width,
+        x: handleBounds.left + handleBounds.width / 2,
+        y: handleBounds.top + handleBounds.height / 2
+      };
+    })()`);
+    if (!columnResize) throw new Error("Search result column resize handle was not rendered");
+    await send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: columnResize.x,
+      y: columnResize.y,
+      button: "left",
+      clickCount: 1
+    });
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: columnResize.x + 48,
+      y: columnResize.y,
+      button: "left",
+      buttons: 1
+    });
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: columnResize.x + 48,
+      y: columnResize.y,
+      button: "left",
+      clickCount: 1
+    });
+    const resizedColumnWidth = await evaluate(
+      'document.querySelector(".result-columns button")?.getBoundingClientRect().width'
+    );
+    if (!(resizedColumnWidth > columnResize.before + 20)) {
+      throw new Error(`Search result column did not resize: ${columnResize.before} -> ${resizedColumnWidth}`);
+    }
     await capture("cdriveshiftai-search-bookmark-folders.png");
-    await evaluate('document.querySelector(".search-bookmark-toggle")?.click()');
+    await evaluate(`(() => {
+      if (!document.querySelector(".search-bookmark-dropdown")) return true;
+      document.querySelector(".search-bookmark-toggle")?.click();
+      return true;
+    })()`);
     await waitFor('document.querySelector(".search-bookmark-dropdown") === null');
     const compactBookmarkHeight = await evaluate(
       'document.querySelector(".search-bookmark-strip")?.getBoundingClientRect().height'
