@@ -30,6 +30,7 @@ import {
 import { api } from "../lib/api";
 import { effectDefinitions } from "../lib/effects";
 import { getAiProvider } from "../lib/aiProviders";
+import { bundledReleaseNotes } from "../lib/releaseNotes";
 import type {
   AiModelInfo,
   AiTestResult,
@@ -299,6 +300,7 @@ export function SettingsView({
   >("idle");
   const [testingShortcut, setTestingShortcut] = useState<ShortcutTarget>();
   const [testingMouseShortcut, setTestingMouseShortcut] = useState(false);
+  const [activeReleaseModule, setActiveReleaseModule] = useState<string>();
   const [mouseShortcutStatus, setMouseShortcutStatus] =
     useState<MouseShortcutStatus>();
   const [showApiKey, setShowApiKey] = useState(false);
@@ -320,6 +322,22 @@ export function SettingsView({
   const updateBusy = ["downloading", "verifying", "ready", "installing"].includes(
     updateInfo?.phase ?? ""
   );
+  const bundledNotesMatch =
+    !updateInfo ||
+    updateInfo.latestVersion === bundledReleaseNotes.version ||
+    (!updateInfo.updateAvailable &&
+      updateInfo.currentVersion === bundledReleaseNotes.version);
+  const releaseSections = updateInfo?.releaseSections?.length
+    ? updateInfo.releaseSections
+    : bundledNotesMatch
+      ? bundledReleaseNotes.sections
+      : [];
+  const releaseSummary =
+    updateInfo?.releaseSummary ??
+    (bundledNotesMatch ? bundledReleaseNotes.summary : updateInfo?.releaseName);
+  const activeReleaseSection =
+    releaseSections.find((section) => section.title === activeReleaseModule) ??
+    releaseSections[0];
 
   useEffect(() => {
     const previous = persistedSettingsRef.current;
@@ -738,6 +756,8 @@ export function SettingsView({
             className={
               updateInfo?.updateAvailable
                 ? "settings-icon update-alert"
+                : updateInfo?.status === "unavailable"
+                  ? "settings-icon update-warning"
                 : "settings-icon update-current"
             }
           >
@@ -751,6 +771,8 @@ export function SettingsView({
             className={
               updateInfo?.updateAvailable
                 ? "update-status-dot update-available"
+                : updateInfo?.status === "unavailable"
+                  ? "update-status-dot update-warning"
                 : "update-status-dot"
             }
           />
@@ -854,6 +876,64 @@ export function SettingsView({
             )}
           </div>
         </div>
+        {activeReleaseSection && (
+          <div className="update-release-notes" aria-label="版本更新内容">
+            <div className="update-release-heading">
+              <span className="update-release-title">
+                <Sparkles size={15} />
+                <span>
+                  <strong>
+                    {updateInfo?.updateAvailable ? "本次更新" : "当前版本说明"}
+                  </strong>
+                  <small title={releaseSummary}>
+                    {releaseSummary}
+                  </small>
+                </span>
+              </span>
+              {updateInfo?.releaseUrl && (
+                <button
+                  type="button"
+                  className="update-release-link"
+                  onClick={() => void api.openExternal(updateInfo.releaseUrl!)}
+                >
+                  完整说明
+                  <ExternalLink size={12} />
+                </button>
+              )}
+            </div>
+            <div className="update-release-body">
+              <div className="update-release-tabs" role="tablist" aria-label="更新模块">
+                {releaseSections.map((section) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={section.title === activeReleaseSection.title}
+                    className={
+                      section.title === activeReleaseSection.title ? "active" : ""
+                    }
+                    onClick={() => setActiveReleaseModule(section.title)}
+                    key={section.title}
+                  >
+                    {section.title}
+                  </button>
+                ))}
+              </div>
+              <div className="update-release-items" role="tabpanel">
+                {activeReleaseSection.items.slice(0, 4).map((item, index) => (
+                  <span title={item} key={`${activeReleaseSection.title}-${index}`}>
+                    <i />
+                    {item}
+                  </span>
+                ))}
+                {activeReleaseSection.items.length > 4 && (
+                  <span className="update-release-more">
+                    另有 {activeReleaseSection.items.length - 4} 项，完整内容见 Release
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         {updateInfo &&
           ["downloading", "verifying", "ready", "installing", "error", "cancelled"].includes(
             updateInfo.phase

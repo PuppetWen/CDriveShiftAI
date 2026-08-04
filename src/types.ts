@@ -528,6 +528,11 @@ export interface AppUpdateProgress {
   maxRetries: number;
 }
 
+export interface AppUpdateReleaseSection {
+  title: string;
+  items: string[];
+}
+
 export interface AppUpdateInfo {
   status: "checking" | "current" | "available" | "unavailable";
   phase: UpdatePhase;
@@ -539,6 +544,8 @@ export interface AppUpdateInfo {
   releaseName?: string;
   releaseUrl?: string;
   publishedAt?: string;
+  releaseSummary?: string;
+  releaseSections?: AppUpdateReleaseSection[];
   assets: AppUpdateAsset[];
   selectedAsset?: AppUpdateAsset;
   progress?: AppUpdateProgress;

@@ -16,6 +16,7 @@ import type {
   SearchWorkspaceState,
   SystemOverview
 } from "../types";
+import { bundledReleaseNotes } from "./releaseNotes";
 
 const mockOverview: SystemOverview = {
   drives: [
@@ -210,6 +211,8 @@ const browserFallback: CDriveShiftApi = {
         releaseName: "CDriveShiftAI 0.0.5",
         releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
         publishedAt: new Date().toISOString(),
+        releaseSummary: bundledReleaseNotes.summary,
+        releaseSections: bundledReleaseNotes.sections,
         assets: [],
         selectedAsset: {
           name: "CDriveShiftAI-x64-portable.exe",
@@ -238,6 +241,8 @@ const browserFallback: CDriveShiftApi = {
       canAutoUpdate: false,
       releaseName: "CDriveShiftAI 0.0.5",
       releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
+      releaseSummary: bundledReleaseNotes.summary,
+      releaseSections: bundledReleaseNotes.sections,
       assets: [],
       message: "当前已是最新版本 0.0.5",
       checkedAt: new Date().toISOString()
