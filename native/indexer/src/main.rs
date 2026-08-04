@@ -7,6 +7,7 @@ use regex::RegexBuilder;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cmp::Ordering as CompareOrdering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -18,7 +19,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CACHE_MAGIC: &[u8; 8] = b"CSIDX02\0";
-const CONTENT_INDEX_VERSION: u32 = 2;
+const CONTENT_INDEX_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -139,6 +140,9 @@ struct SharedState {
     backgrounded: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     delta_lock: Mutex<()>,
+    generation: AtomicU64,
+    content_generation: AtomicU64,
+    content_roots: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -172,6 +176,13 @@ struct Request {
     mouse_button: Option<String>,
     mouse_hold_ms: Option<u64>,
     limit: Option<usize>,
+    cursor: Option<String>,
+    sort_by: Option<String>,
+    sort_direction: Option<String>,
+    min_size: Option<u64>,
+    max_size: Option<u64>,
+    modified_after_ms: Option<u64>,
+    modified_before_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -185,6 +196,20 @@ struct SearchResult {
     source: &'static str,
 }
 
+struct SearchPage {
+    results: Vec<SearchResult>,
+    has_more: bool,
+    total_matches: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SearchCandidate {
+    index: usize,
+    score: f64,
+    size: u64,
+    modified_ms: u64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ContentSearchResult {
@@ -192,6 +217,14 @@ struct ContentSearchResult {
     name: String,
     preview: String,
     score: f64,
+    size: u64,
+    modified_at_ms: u64,
+}
+
+struct ContentSearchPage {
+    results: Vec<ContentSearchResult>,
+    has_more: bool,
+    total_matches: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -602,8 +635,7 @@ fn trim_process_tree_working_sets(root_pid: u32) {
     let mut opened = 0usize;
     let mut trimmed = 0usize;
     for pid in tree {
-        let handle =
-            unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, 0, pid) };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, 0, pid) };
         if handle == 0 {
             continue;
         }
@@ -954,8 +986,15 @@ impl SearchIndex {
         whole_word: bool,
         match_path: bool,
         regex_mode: bool,
+        sort_by: &str,
+        sort_direction: &str,
+        min_size: Option<u64>,
+        max_size: Option<u64>,
+        modified_after_ms: Option<u64>,
+        modified_before_ms: Option<u64>,
+        offset: usize,
         limit: usize,
-    ) -> Result<Vec<SearchResult>, String> {
+    ) -> Result<SearchPage, String> {
         let needle = if case_sensitive {
             text.to_string()
         } else {
@@ -966,7 +1005,11 @@ impl SearchIndex {
             .filter(|part| !part.is_empty())
             .collect();
         if tokens.is_empty() {
-            return Ok(Vec::new());
+            return Ok(SearchPage {
+                results: Vec::new(),
+                has_more: false,
+                total_matches: 0,
+            });
         }
         let scope_values: Vec<String> = scopes
             .iter()
@@ -1000,7 +1043,16 @@ impl SearchIndex {
                 0
             };
 
-        let mut matches = Vec::with_capacity(limit.saturating_mul(2));
+        let keep = offset.saturating_add(limit).saturating_add(1).max(1);
+        let prune_at = keep.saturating_mul(2).max(4_096);
+        let needs_metadata = sort_by == "size"
+            || sort_by == "modified"
+            || min_size.is_some()
+            || max_size.is_some()
+            || modified_after_ms.is_some()
+            || modified_before_ms.is_some();
+        let mut matches = Vec::with_capacity(keep.min(8_192));
+        let mut total_matches = 0usize;
         for index in 0..self.entries.len() {
             if !self.live.get(index).copied().unwrap_or(false) {
                 continue;
@@ -1099,26 +1151,113 @@ impl SearchIndex {
                 score = 76.0;
             }
             score -= (path_value.len().min(400) as f64) * 0.01;
-            matches.push(SearchResult {
-                path: path_value.to_string(),
-                name: file_name(path_value).to_string(),
-                is_directory,
-                size: entry.size,
+
+            let (size, modified_ms) = if needs_metadata {
+                let Ok(metadata) = fs::metadata(path_value) else {
+                    continue;
+                };
+                let modified_ms = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                    .map(|value| value.as_millis().min(u64::MAX as u128) as u64)
+                    .unwrap_or(0);
+                (if is_directory { 0 } else { metadata.len() }, modified_ms)
+            } else {
+                (entry.size, 0)
+            };
+            if min_size.is_some_and(|minimum| size < minimum)
+                || max_size.is_some_and(|maximum| size > maximum)
+                || modified_after_ms.is_some_and(|minimum| modified_ms < minimum)
+                || modified_before_ms.is_some_and(|maximum| modified_ms > maximum)
+            {
+                continue;
+            }
+
+            total_matches = total_matches.saturating_add(1);
+            matches.push(SearchCandidate {
+                index,
                 score,
-                source: "native-index",
+                size,
+                modified_ms,
             });
-            if matches.len() >= limit.saturating_mul(40).clamp(2_000, 50_000) {
-                break;
+            if matches.len() >= prune_at {
+                matches.sort_by(|first, second| {
+                    self.compare_search_candidates(first, second, sort_by, sort_direction)
+                });
+                matches.truncate(keep);
             }
         }
-        matches.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.path.len().cmp(&b.path.len()))
+        matches.sort_by(|first, second| {
+            self.compare_search_candidates(first, second, sort_by, sort_direction)
         });
-        matches.truncate(limit);
-        Ok(matches)
+        matches.truncate(keep);
+
+        let page_end = offset.saturating_add(limit).min(matches.len());
+        let results = if offset >= page_end {
+            Vec::new()
+        } else {
+            matches[offset..page_end]
+                .iter()
+                .filter_map(|candidate| {
+                    let entry = self.entries.get(candidate.index).copied()?;
+                    let path_value = self.path(candidate.index)?;
+                    Some(SearchResult {
+                        path: path_value.to_string(),
+                        name: file_name(path_value).to_string(),
+                        is_directory: entry.is_directory(),
+                        size: candidate.size,
+                        score: candidate.score,
+                        source: "native-index",
+                    })
+                })
+                .collect()
+        };
+        Ok(SearchPage {
+            has_more: total_matches > offset.saturating_add(results.len()),
+            results,
+            total_matches,
+        })
+    }
+
+    fn compare_search_candidates(
+        &self,
+        first: &SearchCandidate,
+        second: &SearchCandidate,
+        sort_by: &str,
+        sort_direction: &str,
+    ) -> CompareOrdering {
+        let first_path = self.path(first.index).unwrap_or_default();
+        let second_path = self.path(second.index).unwrap_or_default();
+        let first_name = file_name(first_path);
+        let second_name = file_name(second_path);
+        let first_directory = self
+            .entries
+            .get(first.index)
+            .is_some_and(|entry| entry.is_directory());
+        let second_directory = self
+            .entries
+            .get(second.index)
+            .is_some_and(|entry| entry.is_directory());
+        let primary = match sort_by {
+            "name" => first_name.to_lowercase().cmp(&second_name.to_lowercase()),
+            "path" => normalized(first_path).cmp(&normalized(second_path)),
+            "size" => first.size.cmp(&second.size),
+            "modified" => first.modified_ms.cmp(&second.modified_ms),
+            "type" => file_category(first_directory, first_path)
+                .cmp(file_category(second_directory, second_path))
+                .then_with(|| extension_name(first_path).cmp(&extension_name(second_path))),
+            _ => first
+                .score
+                .partial_cmp(&second.score)
+                .unwrap_or(CompareOrdering::Equal),
+        };
+        let directed = if sort_direction == "desc" {
+            primary.reverse()
+        } else {
+            primary
+        };
+        directed.then_with(|| normalized(first_path).cmp(&normalized(second_path)))
     }
 
     fn executable_catalog(&self, limit: usize) -> Vec<SearchResult> {
@@ -1393,12 +1532,37 @@ fn content_database_path(cache_dir: &Path, root: &str) -> PathBuf {
     ))
 }
 
+fn remove_legacy_content_databases(cache_dir: &Path, root: &str, current: &Path) {
+    let prefix = format!("{:016x}-v", stable_hash(root));
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if name.starts_with(&prefix) && name.ends_with(".sqlite") {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn content_index_status(
     state: &SharedState,
     root_input: &str,
 ) -> Result<ContentIndexStatus, String> {
     let root = fs::canonicalize(root_input).map_err(|error| error.to_string())?;
     let root_text = root.to_string_lossy().to_string();
+    state
+        .content_roots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(root_text.clone());
     let database_path = content_database_path(&state.content_cache_dir, &root_text);
     if !database_path.exists() {
         return Ok(ContentIndexStatus {
@@ -1629,6 +1793,11 @@ fn start_content_index(
         return Err("内容索引范围必须是目录".to_string());
     }
 
+    state
+        .content_roots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(root.to_string_lossy().to_string());
     thread::spawn(move || {
         let root_text = root.to_string_lossy().to_string();
         emit_content_status(
@@ -1655,14 +1824,21 @@ fn start_content_index(
                      PRAGMA synchronous=OFF;
                      PRAGMA temp_store=MEMORY;
                      CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                     CREATE VIRTUAL TABLE docs USING fts5(path UNINDEXED, content, tokenize='trigram');",
+                     CREATE VIRTUAL TABLE docs USING fts5(
+                       path UNINDEXED,
+                       name UNINDEXED,
+                       content,
+                       size UNINDEXED,
+                       modified_ms UNINDEXED,
+                       tokenize='trigram'
+                     );",
                 )
                 .map_err(|error| format!("无法创建全文索引：{}", error))?;
 
             let queue = Arc::new(Mutex::new(VecDeque::from([root.clone()])));
             let active = Arc::new(AtomicUsize::new(0));
             let visited = Arc::new(AtomicUsize::new(0));
-            let (sender, receiver) = mpsc::sync_channel::<(String, String)>(12);
+            let (sender, receiver) = mpsc::sync_channel::<(String, String, String, u64, u64)>(12);
             let workers = thread::available_parallelism()
                 .map(|count| count.get().clamp(2, 8))
                 .unwrap_or(4);
@@ -1720,10 +1896,23 @@ fn start_content_index(
                                 visited.fetch_add(1, Ordering::Relaxed);
                                 if is_content_candidate(&item_path) {
                                     if let Some(content) = read_text_document(&item_path) {
+                                        let metadata = item.metadata().ok();
+                                        let size =
+                                            metadata.as_ref().map(|value| value.len()).unwrap_or(0);
+                                        let modified_ms = metadata
+                                            .and_then(|value| value.modified().ok())
+                                            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                                            .map(|value| {
+                                                value.as_millis().min(u64::MAX as u128) as u64
+                                            })
+                                            .unwrap_or(0);
                                         if sender
                                             .send((
                                                 item_path.to_string_lossy().to_string(),
+                                                item.file_name().to_string_lossy().to_string(),
                                                 content,
+                                                size,
+                                                modified_ms,
                                             ))
                                             .is_err()
                                         {
@@ -1745,14 +1934,17 @@ fn start_content_index(
             let mut indexed = 0usize;
             {
                 let mut statement = transaction
-                    .prepare("INSERT INTO docs(path, content) VALUES (?1, ?2)")
+                    .prepare(
+                        "INSERT INTO docs(path, name, content, size, modified_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                    )
                     .map_err(|error| error.to_string())?;
-                for (document_path, content) in receiver {
+                for (document_path, name, content, size, modified_ms) in receiver {
                     if wait_while_backgrounded(&state.backgrounded, &state.stopping) {
                         return Err("indexer is stopping".to_string());
                     }
                     statement
-                        .execute(params![document_path, content])
+                        .execute(params![document_path, name, content, size, modified_ms])
                         .map_err(|error| error.to_string())?;
                     indexed += 1;
                     if indexed % 250 == 0 {
@@ -1800,9 +1992,13 @@ fn start_content_index(
             if backup_path.exists() {
                 let _ = fs::remove_file(backup_path);
             }
+            remove_legacy_content_databases(&state.content_cache_dir, &root_text, &database_path);
             Ok(indexed)
         })();
 
+        if result.is_ok() {
+            state.content_generation.fetch_add(1, Ordering::AcqRel);
+        }
         match result {
             Ok(indexed) => emit_content_status(
                 &output,
@@ -1825,10 +2021,22 @@ fn query_content(
     query: &str,
     regex_mode: bool,
     case_sensitive: bool,
+    sort_by: &str,
+    sort_direction: &str,
+    min_size: Option<u64>,
+    max_size: Option<u64>,
+    modified_after_ms: Option<u64>,
+    modified_before_ms: Option<u64>,
+    offset: usize,
     limit: usize,
-) -> Result<Vec<ContentSearchResult>, String> {
+) -> Result<ContentSearchPage, String> {
     let root = fs::canonicalize(root_input).map_err(|error| error.to_string())?;
     let root_text = root.to_string_lossy().to_string();
+    state
+        .content_roots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(root_text.clone());
     let database_path = content_database_path(&state.content_cache_dir, &root_text);
     if !database_path.exists() {
         return Err("该目录尚未建立内容索引，请先点击“建立内容索引”".to_string());
@@ -1836,6 +2044,8 @@ fn query_content(
     let connection =
         Connection::open_with_flags(database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| error.to_string())?;
+    let keep = offset.saturating_add(limit).saturating_add(1).max(1);
+    let prune_at = keep.saturating_mul(2).max(4_096);
 
     if regex_mode {
         let pattern = query.trim();
@@ -1857,53 +2067,324 @@ fn query_content(
         }
 
         let mut statement = connection
-            .prepare("SELECT path, content FROM docs")
+            .prepare(
+                "SELECT path, name, content, CAST(size AS INTEGER),
+                        CAST(modified_ms AS INTEGER) FROM docs",
+            )
             .map_err(|error| error.to_string())?;
         let mut rows = statement.query([]).map_err(|error| error.to_string())?;
         let mut results = Vec::new();
+        let mut total_matches = 0usize;
         while let Some(row) = rows.next().map_err(|error| error.to_string())? {
             let path_value: String = row.get(0).map_err(|error| error.to_string())?;
-            let content: String = row.get(1).map_err(|error| error.to_string())?;
+            let name: String = row.get(1).map_err(|error| error.to_string())?;
+            let content: String = row.get(2).map_err(|error| error.to_string())?;
+            let size = row.get::<_, i64>(3).unwrap_or(0).max(0) as u64;
+            let modified_at_ms = row.get::<_, i64>(4).unwrap_or(0).max(0) as u64;
             let Some(found) = expression.find(&content) else {
                 continue;
             };
+            if min_size.is_some_and(|minimum| size < minimum)
+                || max_size.is_some_and(|maximum| size > maximum)
+                || modified_after_ms.is_some_and(|minimum| modified_at_ms < minimum)
+                || modified_before_ms.is_some_and(|maximum| modified_at_ms > maximum)
+            {
+                continue;
+            }
+            total_matches = total_matches.saturating_add(1);
             results.push(ContentSearchResult {
-                name: file_name(&path_value).to_string(),
+                name,
                 path: path_value,
                 preview: regex_content_preview(&content, found),
                 score: 1.0 / (1.0 + found.start() as f64),
+                size,
+                modified_at_ms,
             });
-            if results.len() >= limit {
-                break;
-            }
+            prune_content_results(&mut results, keep, prune_at, sort_by, sort_direction);
         }
-        return Ok(results);
+        return Ok(paginate_content_results(
+            results,
+            sort_by,
+            sort_direction,
+            offset,
+            limit,
+            total_matches,
+        ));
     }
 
     let expression = format!("\"{}\"", query.trim().replace('"', "\"\""));
     let mut statement = connection
         .prepare(
-            "SELECT path, snippet(docs, 1, '〔', '〕', ' … ', 22), bm25(docs)
-             FROM docs WHERE docs MATCH ?1 ORDER BY bm25(docs) LIMIT ?2",
+            "SELECT path, name, snippet(docs, 2, '[', ']', ' … ', 22), bm25(docs),
+                    CAST(size AS INTEGER), CAST(modified_ms AS INTEGER)
+             FROM docs WHERE docs MATCH ?1",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![expression, limit as i64], |row| {
+        .query_map(params![expression], |row| {
             let path_value: String = row.get(0)?;
-            let rank: f64 = row.get(2)?;
+            let rank: f64 = row.get(3)?;
             Ok(ContentSearchResult {
-                name: file_name(&path_value).to_string(),
+                name: row.get(1)?,
                 path: path_value,
-                preview: row.get(1)?,
+                preview: row.get(2)?,
                 score: -rank,
+                size: row.get::<_, i64>(4)?.max(0) as u64,
+                modified_at_ms: row.get::<_, i64>(5)?.max(0) as u64,
             })
         })
         .map_err(|error| error.to_string())?;
     let mut results = Vec::new();
+    let mut total_matches = 0usize;
     for row in rows {
-        results.push(row.map_err(|error| error.to_string())?);
+        let result = row.map_err(|error| error.to_string())?;
+        if min_size.is_some_and(|minimum| result.size < minimum)
+            || max_size.is_some_and(|maximum| result.size > maximum)
+            || modified_after_ms.is_some_and(|minimum| result.modified_at_ms < minimum)
+            || modified_before_ms.is_some_and(|maximum| result.modified_at_ms > maximum)
+        {
+            continue;
+        }
+        total_matches = total_matches.saturating_add(1);
+        results.push(result);
+        prune_content_results(&mut results, keep, prune_at, sort_by, sort_direction);
     }
-    Ok(results)
+    Ok(paginate_content_results(
+        results,
+        sort_by,
+        sort_direction,
+        offset,
+        limit,
+        total_matches,
+    ))
+}
+
+fn prune_content_results(
+    results: &mut Vec<ContentSearchResult>,
+    keep: usize,
+    prune_at: usize,
+    sort_by: &str,
+    sort_direction: &str,
+) {
+    if results.len() < prune_at {
+        return;
+    }
+    sort_content_results(results, sort_by, sort_direction);
+    results.truncate(keep);
+}
+
+fn sort_content_results(results: &mut [ContentSearchResult], sort_by: &str, sort_direction: &str) {
+    results.sort_by(|first, second| {
+        let primary = match sort_by {
+            "name" => first.name.to_lowercase().cmp(&second.name.to_lowercase()),
+            "path" => normalized(&first.path).cmp(&normalized(&second.path)),
+            "size" => first.size.cmp(&second.size),
+            "modified" => first.modified_at_ms.cmp(&second.modified_at_ms),
+            "type" => extension_name(&first.name).cmp(&extension_name(&second.name)),
+            _ => first
+                .score
+                .partial_cmp(&second.score)
+                .unwrap_or(CompareOrdering::Equal),
+        };
+        let directed = if sort_direction == "desc" {
+            primary.reverse()
+        } else {
+            primary
+        };
+        directed.then_with(|| normalized(&first.path).cmp(&normalized(&second.path)))
+    });
+}
+
+fn paginate_content_results(
+    mut results: Vec<ContentSearchResult>,
+    sort_by: &str,
+    sort_direction: &str,
+    offset: usize,
+    limit: usize,
+    total_matches: usize,
+) -> ContentSearchPage {
+    sort_content_results(&mut results, sort_by, sort_direction);
+    results.truncate(offset.saturating_add(limit).saturating_add(1));
+    let page_end = offset.saturating_add(limit).min(total_matches);
+    let page_results = if offset >= page_end {
+        Vec::new()
+    } else {
+        results.drain(offset..page_end).collect()
+    };
+    ContentSearchPage {
+        has_more: total_matches > offset.saturating_add(page_results.len()),
+        results: page_results,
+        total_matches: Some(total_matches),
+    }
+}
+
+fn load_content_roots(cache_dir: &Path) -> HashSet<String> {
+    let mut roots = HashSet::new();
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return roots;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("sqlite") {
+            continue;
+        }
+        let Ok(connection) =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            continue;
+        };
+        if let Ok(root) =
+            connection.query_row("SELECT value FROM meta WHERE key = 'root'", [], |row| {
+                row.get::<_, String>(0)
+            })
+        {
+            roots.insert(root);
+        }
+    }
+    roots
+}
+
+fn path_is_within(root: &str, candidate: &str) -> bool {
+    let normalize_content_path = |value: &str| {
+        let normalized_value = normalized(value);
+        normalized_value
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&normalized_value)
+            .to_string()
+    };
+    let root = normalize_content_path(root);
+    let candidate = normalize_content_path(candidate);
+    candidate == root
+        || candidate
+            .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with('\\'))
+}
+
+fn content_path_is_excluded(root: &str, candidate: &Path) -> bool {
+    let root_path = Path::new(root);
+    let relative = candidate.strip_prefix(root_path).unwrap_or(candidate);
+    relative
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .any(|component| is_excluded_content_directory(Path::new(component.as_os_str())))
+}
+
+fn update_content_indexes(state: &SharedState, deltas: &[IndexDelta]) -> Vec<String> {
+    let roots: Vec<String> = state
+        .content_roots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .cloned()
+        .collect();
+    let mut changed_roots = Vec::new();
+    for root in roots {
+        let relevant: Vec<&IndexDelta> = deltas
+            .iter()
+            .filter(|delta| match delta {
+                IndexDelta::Upsert { path, .. } | IndexDelta::Remove { path, .. } => {
+                    path_is_within(&root, path)
+                }
+            })
+            .collect();
+        if relevant.is_empty() {
+            continue;
+        }
+        let database_path = content_database_path(&state.content_cache_dir, &root);
+        if !database_path.exists() {
+            continue;
+        }
+        let Ok(mut connection) = Connection::open(database_path) else {
+            continue;
+        };
+        let Ok(transaction) = connection.transaction() else {
+            continue;
+        };
+        let mut changed = false;
+        for delta in relevant {
+            match delta {
+                IndexDelta::Remove { path, tree } => {
+                    let result = if *tree {
+                        let prefix = format!("{}\\", path);
+                        transaction.execute(
+                            "DELETE FROM docs WHERE path = ?1 OR substr(path, 1, ?3) = ?2",
+                            params![path, prefix, prefix.chars().count() as i64],
+                        )
+                    } else {
+                        transaction.execute("DELETE FROM docs WHERE path = ?1", params![path])
+                    };
+                    changed |= result.is_ok();
+                }
+                IndexDelta::Upsert {
+                    path, is_directory, ..
+                } => {
+                    let _ = transaction.execute("DELETE FROM docs WHERE path = ?1", params![path]);
+                    if !*is_directory {
+                        let path_value = Path::new(path);
+                        if is_content_candidate(path_value)
+                            && !content_path_is_excluded(&root, path_value)
+                        {
+                            if let Some(content) = read_text_document(path_value) {
+                                let metadata = fs::metadata(path_value).ok();
+                                let size = metadata.as_ref().map(|value| value.len()).unwrap_or(0);
+                                let modified_ms = metadata
+                                    .and_then(|value| value.modified().ok())
+                                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                                    .map(|value| value.as_millis().min(u64::MAX as u128) as u64)
+                                    .unwrap_or(0);
+                                let _ = transaction.execute(
+                                    "INSERT INTO docs(path, name, content, size, modified_ms)
+                                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                                    params![path, file_name(path), content, size, modified_ms],
+                                );
+                            }
+                        }
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            continue;
+        }
+        let documents = transaction
+            .query_row("SELECT count(*) FROM docs", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0)
+            .max(0);
+        let _ = transaction.execute(
+            "INSERT INTO meta(key, value) VALUES ('updatedAt', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![now_iso_like()],
+        );
+        let _ = transaction.execute(
+            "INSERT INTO meta(key, value) VALUES ('documents', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![documents.to_string()],
+        );
+        if transaction.commit().is_ok() {
+            changed_roots.push(root);
+        }
+    }
+    if !changed_roots.is_empty() {
+        state.content_generation.fetch_add(1, Ordering::AcqRel);
+    }
+    changed_roots
+}
+
+fn cursor_offset(cursor: Option<&str>, generation: u64) -> (usize, bool) {
+    let Some(cursor) = cursor else {
+        return (0, false);
+    };
+    let Some((cursor_generation, cursor_offset)) = cursor.split_once(':') else {
+        return (0, true);
+    };
+    let parsed_generation = cursor_generation.parse::<u64>().ok();
+    let parsed_offset = cursor_offset.parse::<usize>().ok();
+    match (parsed_generation, parsed_offset) {
+        (Some(value), Some(offset)) if value == generation => (offset, false),
+        _ => (0, true),
+    }
 }
 
 fn regex_content_preview(content: &str, found: regex::Match<'_>) -> String {
@@ -2571,7 +3052,9 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                     drop(index);
                     thread::yield_now();
                 }
+                let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
                 drop(delta_guard);
+                let content_scopes = update_content_indexes(&state, &deltas);
                 if let Some(error) = delta_error {
                     let mut status = state
                         .status
@@ -2584,7 +3067,9 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                 if !state.backgrounded.load(Ordering::Relaxed) {
                     output.send(&json!({
                         "event": "indexChanged",
-                        "changedCount": deltas.len()
+                        "changedCount": deltas.len(),
+                        "generation": generation,
+                        "contentScopes": content_scopes
                     }));
                 }
             }
@@ -2641,6 +3126,7 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
                     .index
                     .write()
                     .unwrap_or_else(|error| error.into_inner()) = index;
+                state.generation.fetch_add(1, Ordering::AcqRel);
                 trim_process_working_set();
                 update_status(
                     &state,
@@ -2855,6 +3341,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     .index
                     .write()
                     .unwrap_or_else(|error| error.into_inner()) = index;
+                state.generation.fetch_add(1, Ordering::AcqRel);
                 drop(delta_guard);
                 trim_process_working_set();
                 let cache_message = match (cache_error, delta_result.err()) {
@@ -2957,6 +3444,7 @@ fn run_server() -> io::Result<()> {
                         .content_cache_dir
                         .unwrap_or_else(|| "content-indexes".to_string()),
                 );
+                let content_roots = load_content_roots(&content_cache_dir);
                 let initial_status = Status {
                     mode: "loading".to_string(),
                     state: "idle".to_string(),
@@ -2980,6 +3468,9 @@ fn run_server() -> io::Result<()> {
                     backgrounded: Arc::new(AtomicBool::new(request.background.unwrap_or(false))),
                     stopping: Arc::new(AtomicBool::new(false)),
                     delta_lock: Mutex::new(()),
+                    generation: AtomicU64::new(1),
+                    content_generation: AtomicU64::new(1),
+                    content_roots: Mutex::new(content_roots),
                 });
                 output.status(&initial_status);
 
@@ -3050,7 +3541,11 @@ fn run_server() -> io::Result<()> {
                     .unwrap_or_else(|| vec![request.scope.unwrap_or_else(|| "*".to_string())]);
                 let categories = request.categories.unwrap_or_default();
                 let extensions = request.extensions.unwrap_or_default();
-                let limit = request.limit.unwrap_or(120).clamp(1, 2_000);
+                let limit = request.limit.unwrap_or(240).clamp(1, 10_000);
+                let generation = shared.generation.load(Ordering::Acquire);
+                let (offset, cursor_reset) = cursor_offset(request.cursor.as_deref(), generation);
+                let sort_by = request.sort_by.unwrap_or_else(|| "relevance".to_string());
+                let sort_direction = request.sort_direction.unwrap_or_else(|| "desc".to_string());
                 let results = shared
                     .index
                     .read()
@@ -3065,11 +3560,32 @@ fn run_server() -> io::Result<()> {
                         request.whole_word.unwrap_or(false),
                         request.match_path.unwrap_or(false),
                         request.regex.unwrap_or(false),
+                        &sort_by,
+                        &sort_direction,
+                        request.min_size,
+                        request.max_size,
+                        request.modified_after_ms,
+                        request.modified_before_ms,
+                        offset,
                         limit,
                     );
                 match results {
-                    Ok(results) => {
-                        output.send(&json!({ "id": request.id, "ok": true, "results": results }))
+                    Ok(page) => {
+                        let next_cursor = if page.has_more {
+                            Some(format!("{}:{}", generation, offset + page.results.len()))
+                        } else {
+                            None
+                        };
+                        output.send(&json!({
+                            "id": request.id,
+                            "ok": true,
+                            "results": page.results,
+                            "hasMore": page.has_more,
+                            "nextCursor": next_cursor,
+                            "totalMatches": page.total_matches,
+                            "generation": generation,
+                            "cursorReset": cursor_reset
+                        }))
                     }
                     Err(error) => {
                         output.send(&json!({ "id": request.id, "ok": false, "error": error }))
@@ -3132,16 +3648,53 @@ fn run_server() -> io::Result<()> {
                 };
                 let query = request.query.unwrap_or_default();
                 let root = request.scope.unwrap_or_default();
-                let limit = request.limit.unwrap_or(120).clamp(1, 500);
+                let limit = request.limit.unwrap_or(80).clamp(1, 2_000);
                 let regex_mode = request.regex.unwrap_or(false);
                 let case_sensitive = request.case_sensitive.unwrap_or(false);
+                let sort_by = request.sort_by.unwrap_or_else(|| "relevance".to_string());
+                let sort_direction = request.sort_direction.unwrap_or_else(|| "desc".to_string());
+                let min_size = request.min_size;
+                let max_size = request.max_size;
+                let modified_after_ms = request.modified_after_ms;
+                let modified_before_ms = request.modified_before_ms;
+                let generation = shared.content_generation.load(Ordering::Acquire);
+                let (offset, cursor_reset) = cursor_offset(request.cursor.as_deref(), generation);
                 let shared = Arc::clone(shared);
                 let output = output.clone();
                 let request_id = request.id;
                 thread::spawn(move || {
-                    match query_content(&shared, &root, &query, regex_mode, case_sensitive, limit) {
-                        Ok(results) => output
-                            .send(&json!({ "id": request_id, "ok": true, "results": results })),
+                    match query_content(
+                        &shared,
+                        &root,
+                        &query,
+                        regex_mode,
+                        case_sensitive,
+                        &sort_by,
+                        &sort_direction,
+                        min_size,
+                        max_size,
+                        modified_after_ms,
+                        modified_before_ms,
+                        offset,
+                        limit,
+                    ) {
+                        Ok(page) => {
+                            let next_cursor = if page.has_more {
+                                Some(format!("{}:{}", generation, offset + page.results.len()))
+                            } else {
+                                None
+                            };
+                            output.send(&json!({
+                                "id": request_id,
+                                "ok": true,
+                                "results": page.results,
+                                "hasMore": page.has_more,
+                                "nextCursor": next_cursor,
+                                "totalMatches": page.total_matches,
+                                "generation": generation,
+                                "cursorReset": cursor_reset
+                            }))
+                        }
                         Err(error) => {
                             output.send(&json!({ "id": request_id, "ok": false, "error": error }))
                         }
@@ -3221,6 +3774,82 @@ mod tests {
     }
 
     #[test]
+    fn paged_query_keeps_global_sort_and_reports_more_results() {
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let index = SearchIndex::from_entries_controlled(
+            vec![
+                Entry {
+                    path: r"C:\Data\match-c.txt".to_string(),
+                    is_directory: false,
+                    size: 3,
+                },
+                Entry {
+                    path: r"C:\Data\match-a.txt".to_string(),
+                    is_directory: false,
+                    size: 1,
+                },
+                Entry {
+                    path: r"C:\Data\match-b.txt".to_string(),
+                    is_directory: false,
+                    size: 2,
+                },
+            ],
+            &backgrounded,
+            &stopping,
+        )
+        .expect("test index");
+
+        let first = index
+            .query(
+                "match-",
+                "file",
+                &[],
+                &[],
+                &[],
+                false,
+                false,
+                false,
+                false,
+                "name",
+                "asc",
+                None,
+                None,
+                None,
+                None,
+                0,
+                1,
+            )
+            .expect("first page");
+        let second = index
+            .query(
+                "match-",
+                "file",
+                &[],
+                &[],
+                &[],
+                false,
+                false,
+                false,
+                false,
+                "name",
+                "asc",
+                None,
+                None,
+                None,
+                None,
+                1,
+                1,
+            )
+            .expect("second page");
+
+        assert_eq!(first.total_matches, 3);
+        assert!(first.has_more);
+        assert_eq!(first.results[0].name, "match-a.txt");
+        assert_eq!(second.results[0].name, "match-b.txt");
+    }
+
+    #[test]
     fn directory_tombstone_hides_descendants_without_eager_full_scan() {
         let backgrounded = AtomicBool::new(false);
         let stopping = AtomicBool::new(false);
@@ -3261,9 +3890,17 @@ mod tests {
                     false,
                     false,
                     false,
+                    "relevance",
+                    "desc",
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
                     20,
                 )
                 .expect("query")
+                .results
                 .len(),
             0
         );
@@ -3279,9 +3916,17 @@ mod tests {
                     false,
                     false,
                     false,
+                    "relevance",
+                    "desc",
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
                     20,
                 )
                 .expect("query")
+                .results
                 .len(),
             1
         );

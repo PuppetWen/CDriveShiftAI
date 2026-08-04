@@ -7,6 +7,7 @@ import { uptime } from "node:os";
 import path from "node:path";
 import type {
   ContentIndexerStatus,
+  ContentSearchOptions,
   ContentSearchResult,
   DirectorySizeResult,
   IndexerStatus,
@@ -15,6 +16,8 @@ import type {
   NativeResponse,
   SearchIndexChangedEvent,
   SearchFilters,
+  SearchPage,
+  SearchPageOptions,
   SearchResult
 } from "./types";
 import { getLocalDriveRoots } from "./system";
@@ -344,6 +347,15 @@ export class SearchService {
     scope: string,
     options: { regex?: boolean; caseSensitive?: boolean } = {}
   ): Promise<ContentSearchResult[]> {
+    return (await this.searchContentPage(query, scope, options)).items;
+  }
+
+  async searchContentPage(
+    query: string,
+    scope: string,
+    options: ContentSearchOptions & SearchPageOptions = {}
+  ): Promise<SearchPage<ContentSearchResult>> {
+    const limit = Math.min(2_000, Math.max(1, Math.trunc(options.limit ?? 80)));
     if (!this.child) throw new Error("原生索引核心不可用");
     const response = await this.request(
       {
@@ -352,13 +364,24 @@ export class SearchService {
         scope,
         regex: options.regex === true,
         caseSensitive: options.caseSensitive === true,
-        limit: 160
+        sortBy: options.sortBy ?? "relevance",
+        sortDirection: options.sortDirection ?? "desc",
+        minSize: options.minSize,
+        maxSize: options.maxSize,
+        modifiedAfterMs: options.modifiedAfter
+          ? Date.parse(options.modifiedAfter)
+          : undefined,
+        modifiedBeforeMs: options.modifiedBefore
+          ? Date.parse(options.modifiedBefore)
+          : undefined,
+        cursor: options.cursor,
+        limit
       },
       options.regex ? 30_000 : 15_000
     );
-    const results = (response.results ?? []) as ContentSearchResult[];
-    return Promise.all(
-      results.map(async (result) => {
+    const nativeResults = (response.results ?? []) as ContentSearchResult[];
+    const results = await Promise.all(
+      nativeResults.map(async (result) => {
         try {
           const stats = await lstat(result.path);
           return {
@@ -371,13 +394,39 @@ export class SearchService {
         }
       })
     );
+    return {
+      items: results,
+      hasMore: response.hasMore === true,
+      nextCursor: response.nextCursor,
+      totalMatches: response.totalMatches,
+      generation: response.generation ?? 0,
+      cursorReset: response.cursorReset === true
+    };
   }
 
   async search(query: string, filters: SearchFilters): Promise<SearchResult[]> {
+    return (await this.searchPage(query, filters)).items;
+  }
+
+  async searchPage(
+    query: string,
+    filters: SearchFilters,
+    options: SearchPageOptions = {}
+  ): Promise<SearchPage<SearchResult>> {
     const trimmed = query.trim();
-    if (!trimmed) return [];
+    if (!trimmed) {
+      return { items: [], hasMore: false, generation: 0 };
+    }
+    const limit = Math.min(10_000, Math.max(1, Math.trunc(options.limit ?? 240)));
     let results: SearchResult[];
+    let hasMore = false;
+    let nextCursor: string | undefined;
+    let totalMatches: number | undefined;
+    let generation = 0;
+    let cursorReset = false;
+    let usingNative = false;
     if (this.child && this.status.state !== "error") {
+      usingNative = true;
       const response = await this.request(
         {
           op: "query",
@@ -391,11 +440,36 @@ export class SearchService {
           wholeWord: filters.wholeWord ?? false,
           matchPath: filters.matchPath ?? false,
           regex: filters.regex ?? false,
-          limit: 800
+          sortBy: filters.sortBy ?? "relevance",
+          sortDirection: filters.sortDirection ?? "desc",
+          minSize: filters.minSize,
+          maxSize: filters.maxSize,
+          modifiedAfterMs: filters.modifiedAfter
+            ? Date.parse(filters.modifiedAfter)
+            : undefined,
+          modifiedBeforeMs: filters.modifiedBefore
+            ? Date.parse(filters.modifiedBefore)
+            : undefined,
+          cursor: options.cursor,
+          limit
         },
-        filters.regex || filters.matchPath ? 20_000 : 8_000
+        filters.regex ||
+          filters.matchPath ||
+          filters.sortBy === "size" ||
+          filters.sortBy === "modified" ||
+          filters.minSize != null ||
+          filters.maxSize != null ||
+          filters.modifiedAfter != null ||
+          filters.modifiedBefore != null
+          ? 60_000
+          : 20_000
       );
       results = (response.results ?? []) as SearchResult[];
+      hasMore = response.hasMore === true;
+      nextCursor = response.nextCursor;
+      totalMatches = response.totalMatches;
+      generation = response.generation ?? 0;
+      cursorReset = response.cursorReset === true;
     } else {
       results = await this.liveSearch(trimmed, filters.scope || "*", filters.kind);
     }
@@ -424,6 +498,8 @@ export class SearchService {
       );
     }
 
+    let pageItems = enriched;
+    if (!usingNative) {
     const modifiedThreshold = filters.modifiedAfter
       ? new Date(filters.modifiedAfter).getTime()
       : undefined;
@@ -480,7 +556,20 @@ export class SearchService {
       }
       return comparison * direction || first.name.localeCompare(second.name, "zh-CN");
     });
-    return filtered.slice(0, 500);
+      const fallbackOffset = Number.parseInt(options.cursor?.split(":").at(-1) ?? "0", 10) || 0;
+      totalMatches = filtered.length;
+      pageItems = filtered.slice(fallbackOffset, fallbackOffset + limit);
+      hasMore = fallbackOffset + pageItems.length < filtered.length;
+      nextCursor = hasMore ? `fallback:${fallbackOffset + pageItems.length}` : undefined;
+    }
+    return {
+      items: pageItems,
+      hasMore,
+      nextCursor,
+      totalMatches,
+      generation,
+      cursorReset
+    };
   }
 
   async directorySizes(inputPaths: string[]): Promise<DirectorySizeResult[]> {
@@ -730,7 +819,9 @@ export class SearchService {
       this.executableCatalogCache = undefined;
       this.onIndexChanged({
         changedCount: Math.max(1, response.changedCount ?? 1),
-        observedAt: new Date().toISOString()
+        observedAt: new Date().toISOString(),
+        generation: response.generation,
+        contentScopes: response.contentScopes
       });
       return;
     }

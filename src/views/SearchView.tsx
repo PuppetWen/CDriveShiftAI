@@ -5,7 +5,8 @@ import {
   useRef,
   useState,
   type DragEvent,
-  type MouseEvent
+  type MouseEvent,
+  type UIEvent
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -52,6 +53,7 @@ import {
 import { Badge, EmptyState, PageTitle } from "../components/ui";
 import { api } from "../lib/api";
 import { formatBytes, formatDate } from "../lib/format";
+import { useVirtualList } from "../lib/virtual-list";
 import {
   bookmarkConditionCount,
   bookmarkSignature,
@@ -90,6 +92,9 @@ interface SearchViewProps {
   notify: (type: "success" | "error", message: string) => void;
   standalone?: boolean;
 }
+
+const NAME_PAGE_SIZE = 240;
+const CONTENT_PAGE_SIZE = 80;
 
 const categoryDefinitions: Array<{
   value: SearchCategory;
@@ -137,6 +142,13 @@ export function SearchView({
   const [contentScope, setContentScope] = useState("*");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [contentResults, setContentResults] = useState<ContentSearchResult[]>([]);
+  const [nameCursor, setNameCursor] = useState<string>();
+  const [contentCursor, setContentCursor] = useState<string>();
+  const [nameHasMore, setNameHasMore] = useState(false);
+  const [contentHasMore, setContentHasMore] = useState(false);
+  const [nameTotal, setNameTotal] = useState<number>();
+  const [contentTotal, setContentTotal] = useState<number>();
+  const [loadingMore, setLoadingMore] = useState(false);
   const [directorySizes, setDirectorySizes] = useState<Map<string, DirectorySizeResult>>(
     new Map()
   );
@@ -176,6 +188,8 @@ export function SearchView({
   const [propertyPath, setPropertyPath] = useState("");
   const [liveIndexRevision, setLiveIndexRevision] = useState(0);
   const requestSequence = useRef(0);
+  const pageRequestSequence = useRef(0);
+  const loadingMoreRef = useRef(false);
   const sizeSequence = useRef(0);
   const skipRestoredSearchRef = useRef(false);
   const skipRestoredSizesRef = useRef(false);
@@ -183,6 +197,8 @@ export function SearchView({
   const bookmarkPanelRef = useRef<HTMLElement>(null);
   const workspaceSnapshotRef = useRef<SearchWorkspaceState | undefined>(undefined);
   const liveRefreshRef = useRef(false);
+  const resultsRef = useRef<SearchResult[]>([]);
+  const contentResultsRef = useRef<ContentSearchResult[]>([]);
   const {
     feedback: openFeedback,
     openPath,
@@ -200,6 +216,14 @@ export function SearchView({
     mode === "content" && contentStatus.state === "ready" && contentStatusMatchesScope
       ? `${normalizeScopePath(contentStatus.root)}:${contentStatus.filesIndexed}`
       : "";
+
+  useEffect(() => {
+    resultsRef.current = results;
+  }, [results]);
+
+  useEffect(() => {
+    contentResultsRef.current = contentResults;
+  }, [contentResults]);
 
   useEffect(() => {
     if (!bookmarkPanelOpen) return;
@@ -225,20 +249,50 @@ export function SearchView({
   useEffect(() => api.onContentIndexerStatus(setContentStatus), []);
 
   useEffect(() => {
-    if (mode !== "name" || !query.trim()) return;
+    if (!query.trim()) return;
     let timer: number | undefined;
-    const unsubscribe = api.onSearchIndexChanged(() => {
+    const unsubscribe = api.onSearchIndexChanged((event) => {
+      if (mode === "content") {
+        const currentScope = normalizeScopePath(contentScope);
+        if (
+          contentScope === "*" ||
+          !event.contentScopes?.some(
+            (scope) => normalizeScopePath(scope) === currentScope
+          )
+        ) {
+          return;
+        }
+      }
       if (timer != null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         liveRefreshRef.current = true;
         setLiveIndexRevision((revision) => revision + 1);
-      }, 180);
+      }, 240);
     });
     return () => {
       if (timer != null) window.clearTimeout(timer);
       unsubscribe();
     };
-  }, [mode, query]);
+  }, [contentScope, mode, query]);
+
+  useEffect(() => {
+    if (!query.trim()) return;
+    let lastRefresh = 0;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "hidden") return;
+      const now = Date.now();
+      if (now - lastRefresh < 1_000) return;
+      lastRefresh = now;
+      liveRefreshRef.current = true;
+      setLiveIndexRevision((revision) => revision + 1);
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -290,6 +344,12 @@ export function SearchView({
         setContentScope(workspace.contentScope);
         setResults(workspace.results);
         setContentResults(workspace.contentResults);
+        setNameCursor(undefined);
+        setContentCursor(undefined);
+        setNameHasMore(workspace.mode === "name" && workspace.results.length >= NAME_PAGE_SIZE);
+        setContentHasMore(
+          workspace.mode === "content" && workspace.contentResults.length >= CONTENT_PAGE_SIZE
+        );
         const restoredSizes = workspace.directorySizes ?? [];
         setDirectorySizes(
           new Map(
@@ -455,12 +515,23 @@ export function SearchView({
     if (!workspaceReady) return;
     if (skipRestoredSearchRef.current) {
       skipRestoredSearchRef.current = false;
+      liveRefreshRef.current = true;
+      window.setTimeout(
+        () => setLiveIndexRevision((revision) => revision + 1),
+        0
+      );
       return;
     }
     const value = query.trim();
     if (!value) {
       setResults([]);
       setContentResults([]);
+      setNameCursor(undefined);
+      setContentCursor(undefined);
+      setNameHasMore(false);
+      setContentHasMore(false);
+      setNameTotal(undefined);
+      setContentTotal(undefined);
       setElapsed(undefined);
       setError("");
       return;
@@ -485,41 +556,74 @@ export function SearchView({
     }
 
     const sequence = ++requestSequence.current;
+    ++pageRequestSequence.current;
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
     const backgroundRefresh = liveRefreshRef.current;
     liveRefreshRef.current = false;
     const timer = window.setTimeout(() => {
       const started = performance.now();
-      if (!backgroundRefresh) setLoading(true);
+      if (!backgroundRefresh) {
+        setLoading(true);
+        setDirectorySizes(new Map());
+      }
       setError("");
+      const refreshLimit =
+        mode === "name"
+          ? Math.max(NAME_PAGE_SIZE, resultsRef.current.length)
+          : Math.max(CONTENT_PAGE_SIZE, contentResultsRef.current.length);
       const request =
         mode === "name"
-          ? api.search(value, {
-              ...filters,
-              kind: deriveKind(categories),
-              scope: scopes[0] ?? "*",
-              scopes
-            })
-          : api.searchContent(value, contentScope, {
+          ? api.searchPage(
+              value,
+              {
+                ...filters,
+                kind: deriveKind(categories),
+                scope: scopes[0] ?? "*",
+                scopes
+              },
+              { limit: backgroundRefresh ? refreshLimit : NAME_PAGE_SIZE }
+            )
+          : api.searchContentPage(value, contentScope, {
               regex: filters.regex,
-              caseSensitive: filters.caseSensitive
+              caseSensitive: filters.caseSensitive,
+              sortBy: filters.sortBy,
+              sortDirection: filters.sortDirection,
+              minSize: filters.minSize,
+              maxSize: filters.maxSize,
+              modifiedAfter: filters.modifiedAfter,
+              modifiedBefore: filters.modifiedBefore,
+              limit: backgroundRefresh ? refreshLimit : CONTENT_PAGE_SIZE
             });
       void request
-        .then((items) => {
+        .then((page) => {
           if (sequence !== requestSequence.current) return;
           if (mode === "name") {
-            const next = items as SearchResult[];
+            const next = page.items as SearchResult[];
             setResults((current) =>
               searchResultsEqual(current, next) ? current : next
             );
+            setNameCursor(page.nextCursor);
+            setNameHasMore(page.hasMore);
+            setNameTotal(page.totalMatches);
             setSelectedPath((current) =>
               current && next.some((item) => item.path === current)
                 ? current
                 : next[0]?.path ?? ""
             );
             setContentResults([]);
+            setContentCursor(undefined);
+            setContentHasMore(false);
+            setContentTotal(undefined);
           } else {
-            setContentResults(items as ContentSearchResult[]);
+            setContentResults(page.items as ContentSearchResult[]);
+            setContentCursor(page.nextCursor);
+            setContentHasMore(page.hasMore);
+            setContentTotal(page.totalMatches);
             setResults([]);
+            setNameCursor(undefined);
+            setNameHasMore(false);
+            setNameTotal(undefined);
           }
           setElapsed(performance.now() - started);
         })
@@ -554,9 +658,14 @@ export function SearchView({
       setDirectorySizesLoading(false);
       return;
     }
-    const paths = results.filter((item) => item.isDirectory).map((item) => item.path);
+    const paths = results
+      .filter(
+        (item) =>
+          item.isDirectory && !directorySizes.has(normalizeScopePath(item.path))
+      )
+      .slice(0, 180)
+      .map((item) => item.path);
     const sequence = ++sizeSequence.current;
-    setDirectorySizes(new Map());
     if (paths.length === 0) {
       setDirectorySizesLoading(false);
       return;
@@ -567,9 +676,13 @@ export function SearchView({
         .directorySizes(paths)
         .then((items) => {
           if (sequence !== sizeSequence.current) return;
-          setDirectorySizes(
-            new Map(items.map((item) => [normalizeScopePath(item.path), item]))
-          );
+          setDirectorySizes((current) => {
+            const next = new Map(current);
+            for (const item of items) {
+              next.set(normalizeScopePath(item.path), item);
+            }
+            return next;
+          });
         })
         .catch((reason) => {
           if (sequence === sizeSequence.current) {
@@ -587,51 +700,149 @@ export function SearchView({
   }, [notify, results, workspaceReady]);
 
   const displayedResults = useMemo(() => {
-    const enriched = results
-      .map((item) => {
-        const directorySize = item.isDirectory
-          ? directorySizes.get(normalizeScopePath(item.path))
-          : undefined;
-        return directorySize ? { ...item, size: directorySize.bytes } : item;
-      })
-      .filter((item) => {
-        if (!item.isDirectory) return true;
-        const size = directorySizes.get(normalizeScopePath(item.path));
-        if (!size?.complete) return true;
-        if (filters.minSize != null && size.bytes < filters.minSize) return false;
-        if (filters.maxSize != null && size.bytes > filters.maxSize) return false;
-        return true;
-      });
-    const field = filters.sortBy ?? "relevance";
-    const direction = filters.sortDirection === "desc" ? -1 : 1;
-    enriched.sort((first, second) => {
-      let comparison = 0;
-      if (field === "name") {
-        comparison = first.name.localeCompare(second.name, "zh-CN", {
-          numeric: true,
-          sensitivity: "base"
-        });
-      } else if (field === "path") {
-        comparison = first.path.localeCompare(second.path, "zh-CN", {
-          numeric: true,
-          sensitivity: "base"
-        });
-      } else if (field === "size") {
-        comparison = first.size - second.size;
-      } else if (field === "modified") {
-        comparison =
-          (first.modifiedAt ? Date.parse(first.modifiedAt) : 0) -
-          (second.modifiedAt ? Date.parse(second.modifiedAt) : 0);
-      } else if (field === "type") {
-        comparison = categoryOf(first).localeCompare(categoryOf(second));
-      } else {
-        comparison = second.score - first.score;
-        return comparison || first.path.length - second.path.length;
-      }
-      return comparison * direction || first.name.localeCompare(second.name, "zh-CN");
+    return results.map((item) => {
+      const directorySize = item.isDirectory
+        ? directorySizes.get(normalizeScopePath(item.path))
+        : undefined;
+      return directorySize ? { ...item, size: directorySize.bytes } : item;
     });
-    return enriched;
-  }, [directorySizes, filters.maxSize, filters.minSize, filters.sortBy, filters.sortDirection, results]);
+  }, [directorySizes, results]);
+
+  const activeResultCount =
+    mode === "name" ? displayedResults.length : contentResults.length;
+  const activeHasMore = mode === "name" ? nameHasMore : contentHasMore;
+  const virtualList = useVirtualList(
+    activeResultCount,
+    mode === "name" ? 58 : 82,
+    10
+  );
+  const virtualNameResults = displayedResults.slice(
+    virtualList.start,
+    virtualList.end
+  );
+  const virtualContentResults = contentResults.slice(
+    virtualList.start,
+    virtualList.end
+  );
+
+  useEffect(() => {
+    virtualList.resetScroll();
+  }, [contentScope, filters, mode, query, virtualList.resetScroll]);
+
+  const loadMoreResults = useCallback(async () => {
+    const value = query.trim();
+    const hasMore = mode === "name" ? nameHasMore : contentHasMore;
+    if (!value || !hasMore || loading || loadingMoreRef.current) return;
+    const sequence = ++pageRequestSequence.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    setError("");
+    try {
+      if (mode === "name") {
+        const restoredBootstrap = !nameCursor && resultsRef.current.length > 0;
+        const page = await api.searchPage(
+          value,
+          {
+            ...filters,
+            kind: deriveKind(categories),
+            scope: scopes[0] ?? "*",
+            scopes
+          },
+          {
+            cursor: nameCursor,
+            limit: restoredBootstrap
+              ? Math.min(10_000, resultsRef.current.length + NAME_PAGE_SIZE)
+              : NAME_PAGE_SIZE
+          }
+        );
+        if (sequence !== pageRequestSequence.current) return;
+        setResults((current) =>
+          restoredBootstrap || page.cursorReset
+            ? page.items
+            : mergeSearchResults(current, page.items)
+        );
+        setNameCursor(page.nextCursor);
+        setNameHasMore(page.hasMore);
+        setNameTotal(page.totalMatches);
+      } else {
+        const restoredBootstrap = !contentCursor && contentResultsRef.current.length > 0;
+        const page = await api.searchContentPage(value, contentScope, {
+          regex: filters.regex,
+          caseSensitive: filters.caseSensitive,
+          sortBy: filters.sortBy,
+          sortDirection: filters.sortDirection,
+          minSize: filters.minSize,
+          maxSize: filters.maxSize,
+          modifiedAfter: filters.modifiedAfter,
+          modifiedBefore: filters.modifiedBefore,
+          cursor: contentCursor,
+          limit: restoredBootstrap
+            ? Math.min(2_000, contentResultsRef.current.length + CONTENT_PAGE_SIZE)
+            : CONTENT_PAGE_SIZE
+        });
+        if (sequence !== pageRequestSequence.current) return;
+        setContentResults((current) =>
+          restoredBootstrap || page.cursorReset
+            ? page.items
+            : mergeContentResults(current, page.items)
+        );
+        setContentCursor(page.nextCursor);
+        setContentHasMore(page.hasMore);
+        setContentTotal(page.totalMatches);
+      }
+    } catch (reason) {
+      if (sequence === pageRequestSequence.current) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      if (sequence === pageRequestSequence.current) {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
+    }
+  }, [
+    categories,
+    contentCursor,
+    contentHasMore,
+    contentScope,
+    filters,
+    loading,
+    loadingMore,
+    mode,
+    nameCursor,
+    nameHasMore,
+    query,
+    scopes
+  ]);
+
+  const handleResultScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      virtualList.onScroll(event);
+      const element = event.currentTarget;
+      if (element.scrollHeight - element.scrollTop - element.clientHeight < 720) {
+        void loadMoreResults();
+      }
+    },
+    [loadMoreResults, virtualList]
+  );
+
+  useEffect(() => {
+    if (!activeHasMore || loading || loadingMore) return;
+    const frame = window.requestAnimationFrame(() => {
+      const element = virtualList.containerRef.current;
+      if (element && element.scrollHeight <= element.clientHeight + 360) {
+        void loadMoreResults();
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    activeResultCount,
+    activeHasMore,
+    loadMoreResults,
+    loading,
+    loadingMore,
+    virtualList.containerRef
+  ]);
 
   const chooseScope = async () => {
     const selected = await api.chooseDirectory(
@@ -1087,6 +1298,11 @@ export function SearchView({
           ? scopes[0]
           : `${scopes.length} 个范围`;
   const count = mode === "name" ? displayedResults.length : contentResults.length;
+  const totalCount = mode === "name" ? nameTotal : contentTotal;
+  const resultCountLabel =
+    totalCount != null
+      ? `已加载 ${count.toLocaleString()} / 共 ${totalCount.toLocaleString()} 个`
+      : `${count.toLocaleString()}${activeHasMore ? "+" : ""} 个结果`;
 
   return (
     <div className={standalone ? "page search-page standalone-search-page" : "page search-page"}>
@@ -1766,7 +1982,12 @@ export function SearchView({
       {query ? (
         <section className="results-panel glass-card">
           <div className="results-head">
-            <span>{loading ? "正在查询…" : `${count} 个结果`}</span>
+            <span>{loading ? "正在查询…" : resultCountLabel}</span>
+            {loadingMore && (
+              <span className="inline-note lazy-load-note">
+                <span className="spinner tiny" /> 正在加载下一批
+              </span>
+            )}
             {restoredAt && (
               <ThemedTooltip content={`保存时间：${restoredAt}`}>
                 <span className="inline-note restored-search-state">
@@ -1841,8 +2062,16 @@ export function SearchView({
               {error}
             </EmptyState>
           ) : mode === "name" && displayedResults.length > 0 ? (
-            <div className="result-list">
-              {displayedResults.map((item) => {
+            <div
+              className="result-list virtual-result-list"
+              ref={virtualList.containerRef}
+              onScroll={handleResultScroll}
+              aria-busy={loadingMore}
+            >
+              {virtualList.paddingTop > 0 && (
+                <div className="virtual-list-spacer" style={{ height: virtualList.paddingTop }} />
+              )}
+              {virtualNameResults.map((item) => {
                 const directorySize = item.isDirectory
                   ? directorySizes.get(normalizeScopePath(item.path))
                   : undefined;
@@ -1909,6 +2138,12 @@ export function SearchView({
                   </div>
                 );
               })}
+              {virtualList.paddingBottom > 0 && (
+                <div
+                  className="virtual-list-spacer"
+                  style={{ height: virtualList.paddingBottom }}
+                />
+              )}
             </div>
           ) : mode === "content" && contentResults.length > 0 ? (
             <>
@@ -1917,8 +2152,19 @@ export function SearchView({
                 <span>文件 / 路径 / 命中内容</span>
                 <span>大小 / 修改时间</span>
               </div>
-              <div className="result-list content-results">
-                {contentResults.map((item) => {
+              <div
+                className="result-list content-results virtual-result-list"
+                ref={virtualList.containerRef}
+                onScroll={handleResultScroll}
+                aria-busy={loadingMore}
+              >
+                {virtualList.paddingTop > 0 && (
+                  <div
+                    className="virtual-list-spacer"
+                    style={{ height: virtualList.paddingTop }}
+                  />
+                )}
+                {virtualContentResults.map((item) => {
                 const contextItem: SearchResult = {
                   path: item.path,
                   name: item.name,
@@ -1954,6 +2200,12 @@ export function SearchView({
                   </div>
                 );
                 })}
+                {virtualList.paddingBottom > 0 && (
+                  <div
+                    className="virtual-list-spacer"
+                    style={{ height: virtualList.paddingBottom }}
+                  />
+                )}
               </div>
             </>
           ) : !loading ? (
@@ -2099,4 +2351,34 @@ function searchResultsEqual(current: SearchResult[], next: SearchResult[]): bool
       item.source === candidate.source
     );
   });
+}
+
+function mergeSearchResults(
+  current: SearchResult[],
+  next: SearchResult[]
+): SearchResult[] {
+  const paths = new Set(current.map((item) => normalizeScopePath(item.path)));
+  const merged = [...current];
+  for (const item of next) {
+    const key = normalizeScopePath(item.path);
+    if (paths.has(key)) continue;
+    paths.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
+function mergeContentResults(
+  current: ContentSearchResult[],
+  next: ContentSearchResult[]
+): ContentSearchResult[] {
+  const paths = new Set(current.map((item) => normalizeScopePath(item.path)));
+  const merged = [...current];
+  for (const item of next) {
+    const key = normalizeScopePath(item.path);
+    if (paths.has(key)) continue;
+    paths.add(key);
+    merged.push(item);
+  }
+  return merged;
 }

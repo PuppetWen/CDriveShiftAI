@@ -22,12 +22,21 @@ describe("search index change bridge", () => {
     const internals = service as unknown as { handleLine(line: string): void };
 
     internals.handleLine(
-      JSON.stringify({ event: "indexChanged", changedCount: 7 })
+      JSON.stringify({
+        event: "indexChanged",
+        changedCount: 7,
+        generation: 12,
+        contentScopes: ["E:\\docs"]
+      })
     );
 
     expect(onIndexChanged).toHaveBeenCalledOnce();
     expect(onIndexChanged).toHaveBeenCalledWith(
-      expect.objectContaining({ changedCount: 7 })
+      expect.objectContaining({
+        changedCount: 7,
+        generation: 12,
+        contentScopes: ["E:\\docs"]
+      })
     );
   });
 });

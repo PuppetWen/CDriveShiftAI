@@ -143,9 +143,25 @@ export interface SearchResult {
   source: "native-index" | "live-scan";
 }
 
+export interface SearchPageOptions {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface SearchPage<T> {
+  items: T[];
+  hasMore: boolean;
+  nextCursor?: string;
+  totalMatches?: number;
+  generation: number;
+  cursorReset?: boolean;
+}
+
 export interface SearchIndexChangedEvent {
   changedCount: number;
   observedAt: string;
+  generation?: number;
+  contentScopes?: string[];
 }
 
 export interface SearchContextActionResult {
@@ -193,6 +209,12 @@ export interface ContentSearchResult {
 export interface ContentSearchOptions {
   regex?: boolean;
   caseSensitive?: boolean;
+  sortBy?: SearchSortField;
+  sortDirection?: SearchSortDirection;
+  minSize?: number;
+  maxSize?: number;
+  modifiedAfter?: string;
+  modifiedBefore?: string;
 }
 
 export interface DirectorySummary {
@@ -570,11 +592,21 @@ export interface CDriveShiftApi {
   showSearchContextMenu(path: string, isDirectory: boolean): Promise<SearchContextActionResult>;
   openExternal(url: string): Promise<void>;
   search(query: string, filters: SearchFilters): Promise<SearchResult[]>;
+  searchPage(
+    query: string,
+    filters: SearchFilters,
+    options?: SearchPageOptions
+  ): Promise<SearchPage<SearchResult>>;
   searchContent(
     query: string,
     scope: string,
     options?: ContentSearchOptions
   ): Promise<ContentSearchResult[]>;
+  searchContentPage(
+    query: string,
+    scope: string,
+    options?: ContentSearchOptions & SearchPageOptions
+  ): Promise<SearchPage<ContentSearchResult>>;
   indexContent(scope: string): Promise<void>;
   contentIndexStatus(scope: string): Promise<ContentIndexerStatus>;
   indexerStatus(): Promise<IndexerStatus>;

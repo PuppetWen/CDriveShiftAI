@@ -20,6 +20,8 @@ const dataDirectory = path.join(
   "packaged-search-state"
 );
 const query = "CDriveShiftAI-state-smoke";
+const smokeMainShortcut = "CommandOrControl+Alt+Shift+F9";
+const smokeQuickSearchShortcut = "CommandOrControl+Alt+Shift+F10";
 const propertiesTarget = path.join(workspace, "package.json");
 const renameSource = path.join(dataDirectory, "properties-rename-before.txt");
 const renameTarget = path.join(dataDirectory, "properties-rename-after.txt");
@@ -71,6 +73,10 @@ await symlink(rollbackDestination, rollbackSource, "junction");
 await writeFile(
   path.join(dataDirectory, "cdriveshiftai-state.json"),
   JSON.stringify({
+    settings: {
+      globalShortcut: smokeMainShortcut,
+      quickSearchShortcut: smokeQuickSearchShortcut
+    },
     migrations: [
       {
         id: "migration-delete-smoke",
@@ -239,15 +245,15 @@ async function runApplication(debugPort, verifyRestored) {
     if (!verifyRestored) {
       const shortcutChecks = await evaluate(`Promise.all([
         window.cDriveShiftAI.checkGlobalShortcut(
-          "CommandOrControl+Alt+Space",
+          ${JSON.stringify(smokeMainShortcut)},
           "main"
         ),
         window.cDriveShiftAI.checkGlobalShortcut(
-          "CommandOrControl+Alt+F",
+          ${JSON.stringify(smokeQuickSearchShortcut)},
           "quick-search"
         ),
         window.cDriveShiftAI.checkGlobalShortcut(
-          "CommandOrControl+Alt+Space",
+          ${JSON.stringify(smokeMainShortcut)},
           "quick-search"
         )
       ])`);

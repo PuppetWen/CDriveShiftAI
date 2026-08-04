@@ -1524,7 +1524,7 @@ function registerIpc(): void {
 
   ipcMain.handle(
     "search:query",
-    async (_event, query: unknown, filters: unknown) => {
+    async (_event, query: unknown, filters: unknown, pageOptions?: unknown) => {
       const value = assertString(query, "搜索词", 512);
       const raw = (filters ?? {}) as Partial<SearchFilters>;
       const allowedCategories = new Set<SearchCategory>([
@@ -1583,6 +1583,19 @@ function registerIpc(): void {
             ? raw.sortDirection
             : "desc"
       };
+      if (pageOptions && typeof pageOptions === "object") {
+        const rawPage = pageOptions as { cursor?: unknown; limit?: unknown };
+        return searchService!.searchPage(value, safeFilters, {
+          cursor:
+            typeof rawPage.cursor === "string" && rawPage.cursor.length <= 256
+              ? rawPage.cursor
+              : undefined,
+          limit:
+            typeof rawPage.limit === "number"
+              ? Math.min(10_000, Math.max(1, Math.trunc(rawPage.limit)))
+              : undefined
+        });
+      }
       return searchService!.search(value, safeFilters);
     }
   );
@@ -1647,6 +1660,59 @@ function registerIpc(): void {
           caseSensitive: raw.caseSensitive === true
         }
       )
+      );
+    }
+  );
+
+  ipcMain.handle(
+    "search:content-query-page",
+    (_event, query: unknown, scope: unknown, options: unknown, pageOptions: unknown) => {
+      const raw =
+        options && typeof options === "object"
+          ? (options as {
+              regex?: unknown;
+              caseSensitive?: unknown;
+              sortBy?: unknown;
+              sortDirection?: unknown;
+              minSize?: unknown;
+              maxSize?: unknown;
+              modifiedAfter?: unknown;
+              modifiedBefore?: unknown;
+            })
+          : {};
+      const rawPage =
+        pageOptions && typeof pageOptions === "object"
+          ? (pageOptions as { cursor?: unknown; limit?: unknown })
+          : {};
+      return searchService!.searchContentPage(
+        assertString(query, "内容搜索词", 2_048),
+        assertString(scope, "内容搜索目录"),
+        {
+          regex: raw.regex === true,
+          caseSensitive: raw.caseSensitive === true,
+          sortBy: ["relevance", "name", "path", "size", "modified", "type"].includes(
+            String(raw.sortBy)
+          )
+            ? (raw.sortBy as SearchSortField)
+            : "relevance",
+          sortDirection: ["asc", "desc"].includes(String(raw.sortDirection))
+            ? (raw.sortDirection as SearchSortDirection)
+            : "desc",
+          minSize: typeof raw.minSize === "number" ? Math.max(0, raw.minSize) : undefined,
+          maxSize: typeof raw.maxSize === "number" ? Math.max(0, raw.maxSize) : undefined,
+          modifiedAfter:
+            typeof raw.modifiedAfter === "string" ? raw.modifiedAfter : undefined,
+          modifiedBefore:
+            typeof raw.modifiedBefore === "string" ? raw.modifiedBefore : undefined,
+          cursor:
+            typeof rawPage.cursor === "string" && rawPage.cursor.length <= 256
+              ? rawPage.cursor
+              : undefined,
+          limit:
+            typeof rawPage.limit === "number"
+              ? Math.min(2_000, Math.max(1, Math.trunc(rawPage.limit)))
+              : undefined
+        }
       );
     }
   );

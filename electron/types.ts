@@ -28,6 +28,12 @@ export interface ContentSearchResult {
 export interface ContentSearchOptions {
   regex?: boolean;
   caseSensitive?: boolean;
+  sortBy?: SearchSortField;
+  sortDirection?: SearchSortDirection;
+  minSize?: number;
+  maxSize?: number;
+  modifiedAfter?: string;
+  modifiedBefore?: string;
 }
 
 export interface SearchResult {
@@ -38,6 +44,20 @@ export interface SearchResult {
   modifiedAt?: string;
   score: number;
   source: "native-index" | "live-scan";
+}
+
+export interface SearchPageOptions {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface SearchPage<T> {
+  items: T[];
+  hasMore: boolean;
+  nextCursor?: string;
+  totalMatches?: number;
+  generation: number;
+  cursorReset?: boolean;
 }
 
 export type SearchCategory =
@@ -460,9 +480,17 @@ export interface NativeResponse {
   status?: IndexerStatus | ContentIndexerStatus;
   results?: SearchResult[] | ContentSearchResult[];
   changedCount?: number;
+  hasMore?: boolean;
+  nextCursor?: string;
+  totalMatches?: number;
+  generation?: number;
+  cursorReset?: boolean;
+  contentScopes?: string[];
 }
 
 export interface SearchIndexChangedEvent {
   changedCount: number;
   observedAt: string;
+  generation?: number;
+  contentScopes?: string[];
 }

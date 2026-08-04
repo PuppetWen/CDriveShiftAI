@@ -1836,6 +1836,10 @@ kbd { border: 1px solid var(--border); border-radius: 5px; color: var(--dim); ba
 .results-head { display: flex; height: 40px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); color: var(--muted); padding: 0 16px; font-size: 9px; }
 .inline-note { display: inline-flex; align-items: center; gap: 5px; color: var(--amber); }
 .result-list { max-height: calc(100vh - 330px); overflow: auto; }
+.virtual-result-list { overflow-anchor: none; contain: layout paint; }
+.virtual-result-list .result-grid-row { height: 58px; min-height: 58px; box-sizing: border-box; }
+.virtual-result-list .content-row { height: 82px; min-height: 82px; box-sizing: border-box; }
+.virtual-list-spacer { width: 1px; min-height: 0; pointer-events: none; }
 .result-row { display: flex; min-height: 57px; align-items: center; gap: 11px; border-bottom: 1px solid var(--border); padding: 7px 13px; transition: background 120ms; }
 .result-row:last-child { border-bottom: 0; }
 .result-row:hover { background: color-mix(in srgb, var(--surface-hover) 50%, transparent); }

@@ -508,6 +508,27 @@ const browserFallback: CDriveShiftApi = {
       }
     ] as SearchResult[];
   },
+  async searchPage(query) {
+    const items = query.trim()
+      ? ([
+          {
+            path: `C:\\Users\\You\\AppData\\Local\\${query}`,
+            name: query,
+            isDirectory: true,
+            size: 4.8 * 1024 ** 3,
+            score: 96,
+            modifiedAt: new Date().toISOString(),
+            source: "native-index"
+          }
+        ] as SearchResult[])
+      : [];
+    return {
+      items,
+      hasMore: false,
+      totalMatches: items.length,
+      generation: 1
+    };
+  },
   async searchContent(query, scope, options) {
     if (!query.trim() || !scope) return [];
     const preview = options?.regex
@@ -521,6 +542,15 @@ const browserFallback: CDriveShiftApi = {
         score: 1
       }
     ] as ContentSearchResult[];
+  },
+  async searchContentPage(query, scope, options) {
+    const items = await browserFallback.searchContent(query, scope, options);
+    return {
+      items,
+      hasMore: false,
+      totalMatches: items.length,
+      generation: 1
+    };
   },
   indexContent: () => Promise.resolve(),
   contentIndexStatus: async (scope) => ({
