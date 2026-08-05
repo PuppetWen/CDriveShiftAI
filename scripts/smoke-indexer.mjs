@@ -120,6 +120,20 @@ try {
   if (!nameResult.results?.some((result) => result.name === "Needle-file.txt")) {
     throw new Error("Name index smoke test did not find the fixture file");
   }
+  const directoryResult = await request({
+    op: "query",
+    query: "nested",
+    kind: "folder",
+    scope: fixture,
+    limit: 10
+  });
+  if (
+    directoryResult.results?.length !== 1 ||
+    directoryResult.results[0]?.name !== "nested" ||
+    directoryResult.results[0]?.isDirectory !== true
+  ) {
+    throw new Error("Name index did not return a directly searchable directory result");
+  }
   const firstPage = await request({
     op: "query",
     query: "needle-page",

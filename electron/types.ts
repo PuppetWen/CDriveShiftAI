@@ -134,6 +134,7 @@ export interface SearchBookmarkFolder {
 
 export interface UiLayoutState {
   sidebarCollapsed?: boolean;
+  sidebarWidth?: number;
   searchResultColumnWidths?: SearchResultColumnWidths;
   searchRenamePosition?: {
     x: number;
@@ -154,6 +155,30 @@ export interface WindowLayoutBounds {
 export interface SearchContextActionResult {
   action: "dismissed" | "revealed" | "opened" | "opened-with" | "analyze" | "deleted" | "error";
   message?: string;
+}
+
+export interface ForceDeleteProcess {
+  pid: number;
+  name: string;
+  executablePath?: string;
+  matchReason: "executable" | "command-line";
+  canTerminate: boolean;
+}
+
+export interface ForceDeletePreview {
+  verificationId: string;
+  path: string;
+  name: string;
+  isDirectory: boolean;
+  isSymbolicLink: boolean;
+  highRisk: boolean;
+  elevated: boolean;
+  processes: ForceDeleteProcess[];
+}
+
+export interface ForceDeleteResult {
+  deleted: boolean;
+  terminatedProcesses: ForceDeleteProcess[];
 }
 
 export interface DirectorySizeResult {
@@ -305,6 +330,7 @@ export interface OwnershipMapResult {
 
 export interface AppSettings {
   effectMode: "aurora" | "matrix" | "calm" | "ember" | "ivory";
+  language: AppLanguage;
   launchAtLogin: boolean;
   launchMinimized: boolean;
   minimizeToTray: boolean;
@@ -325,6 +351,24 @@ export interface AppSettings {
     verifiedAt?: string;
   };
 }
+
+export type AppLanguage =
+  | "system"
+  | "zh-CN"
+  | "zh-TW"
+  | "en-US"
+  | "ja-JP"
+  | "ko-KR"
+  | "es-ES"
+  | "fr-FR"
+  | "de-DE"
+  | "pt-BR"
+  | "ru-RU"
+  | "ar-SA"
+  | "hi-IN"
+  | "id-ID"
+  | "it-IT"
+  | "tr-TR";
 
 export type MouseShortcutButton = "disabled" | "back" | "forward" | "middle";
 

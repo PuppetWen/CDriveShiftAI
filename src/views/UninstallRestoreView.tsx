@@ -9,9 +9,11 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { formatBytes } from "../lib/format";
+import { useI18n } from "../lib/i18n";
 import type { MigrationRecord } from "../types";
 
 export function UninstallRestoreView() {
+  const { ui, formatNumber } = useI18n();
   const [records, setRecords] = useState<MigrationRecord[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -66,9 +68,9 @@ export function UninstallRestoreView() {
         </div>
         <div>
           <span>UNINSTALL SAFETY</span>
-          <h1>卸载前，是否恢复已迁移的数据？</h1>
+          <h1>{ui("卸载前，是否恢复已迁移的数据？", "Restore migrated data before uninstalling?")}</h1>
           <p>
-            勾选需要恢复的目录。CDriveShiftAI 会先把数据安全复制回原位置，再继续卸载。
+            {ui("勾选需要恢复的目录。CDriveShiftAI 会先把数据安全复制回原位置，再继续卸载。", "Select the directories to restore. CDriveShiftAI safely copies data back to its original location before continuing the uninstall.")}
           </p>
         </div>
       </header>
@@ -76,8 +78,8 @@ export function UninstallRestoreView() {
       <section className="uninstall-warning">
         <AlertTriangle size={18} />
         <div>
-          <strong>恢复需要源盘有足够可用空间</strong>
-          <span>数据复制回原盘并再次校验成功后，目标磁盘中的迁移副本会被删除。</span>
+          <strong>{ui("恢复需要源盘有足够可用空间", "Restoring requires enough free space on the source drive")}</strong>
+          <span>{ui("数据复制回原盘并再次校验成功后，目标磁盘中的迁移副本会被删除。", "After the data is copied back and verified, the migrated copy on the destination drive is removed.")}</span>
         </div>
       </section>
 
@@ -85,8 +87,8 @@ export function UninstallRestoreView() {
         <div className="uninstall-selection-head">
           <span>
             <ShieldCheck size={15} />
-            可恢复迁移记录
-            <small>{records.length}</small>
+            {ui("可恢复迁移记录", "Restorable migrations")}
+            <small>{formatNumber(records.length)}</small>
           </span>
           {records.length > 0 && (
             <button
@@ -100,7 +102,7 @@ export function UninstallRestoreView() {
                 )
               }
             >
-              {selected.size === records.length ? "取消全选" : "全选"}
+              {selected.size === records.length ? ui("取消全选", "Clear selection") : ui("全选", "Select all")}
             </button>
           )}
         </div>
@@ -108,13 +110,13 @@ export function UninstallRestoreView() {
         {loading ? (
           <div className="uninstall-empty">
             <span className="spinner" />
-            正在读取项目目录中的迁移记录…
+            {ui("正在读取项目目录中的迁移记录…", "Loading migration records from the application data directory…")}
           </div>
         ) : records.length === 0 ? (
           <div className="uninstall-empty">
             <CheckCircle2 size={30} />
-            <strong>没有需要恢复的迁移</strong>
-            <span>可以直接继续卸载，历史记录不会在应用退出时被自动清空。</span>
+            <strong>{ui("没有需要恢复的迁移", "No migrations need to be restored")}</strong>
+            <span>{ui("可以直接继续卸载，历史记录不会在应用退出时被自动清空。", "You can continue uninstalling. History is not cleared automatically when the application exits.")}</span>
           </div>
         ) : (
           <div className="uninstall-record-list">
@@ -151,14 +153,14 @@ export function UninstallRestoreView() {
         <div className="uninstall-progress">
           <span className="spinner" />
           <div>
-            <strong>正在恢复所选目录</strong>
+            <strong>{ui("正在恢复所选目录", "Restoring selected directories")}</strong>
             <span>{currentPath}</span>
           </div>
         </div>
       )}
       {errors.length > 0 && (
         <div className="uninstall-errors">
-          <strong>部分目录未恢复，请检查后重试或选择保留迁移状态：</strong>
+          <strong>{ui("部分目录未恢复，请检查后重试或选择保留迁移状态：", "Some directories were not restored. Review the errors and retry, or keep the current migration state:")}</strong>
           {errors.map((error) => <span key={error}>{error}</span>)}
         </div>
       )}
@@ -170,7 +172,7 @@ export function UninstallRestoreView() {
           disabled={restoring}
           onClick={continueUninstall}
         >
-          保留现状并继续卸载
+          {ui("保留现状并继续卸载", "Keep current state and continue uninstalling")}
         </button>
         <button
           type="button"
@@ -179,7 +181,7 @@ export function UninstallRestoreView() {
           onClick={() => void restoreSelected()}
         >
           <DatabaseBackup size={16} />
-          恢复所选 {selectedRecords.length > 0 ? `(${selectedRecords.length})` : ""} 并继续卸载
+          {ui("恢复所选", "Restore selected")} {selectedRecords.length > 0 ? `(${formatNumber(selectedRecords.length)})` : ""} {ui("并继续卸载", "and continue uninstalling")}
         </button>
       </footer>
     </main>

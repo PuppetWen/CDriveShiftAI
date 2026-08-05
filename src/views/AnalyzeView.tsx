@@ -17,7 +17,8 @@ import {
   Trash2
 } from "lucide-react";
 import { api } from "../lib/api";
-import { confidenceLabel, formatBytes } from "../lib/format";
+import { formatBytes } from "../lib/format";
+import { useI18n } from "../lib/i18n";
 import type { AnalysisResult, DirectoryInsight } from "../types";
 import {
   PathOpenFeedback,
@@ -25,28 +26,42 @@ import {
 } from "../components/PathOpenFeedback";
 import { Badge, EmptyState, PageTitle } from "../components/ui";
 
-const categoryLabels: Record<AnalysisResult["category"], string> = {
-  application: "应用程序",
-  "application-data": "应用数据",
-  cache: "缓存/临时数据",
-  "user-data": "用户数据",
-  development: "开发数据",
-  system: "系统组件",
-  unknown: "暂未识别"
-};
+type UiText = (zh: string, en: string) => string;
 
-const riskLabels: Record<AnalysisResult["risk"], string> = {
-  low: "低风险",
-  medium: "中等风险",
-  high: "高风险",
-  blocked: "禁止迁移"
-};
+function categoryLabel(category: AnalysisResult["category"], ui: UiText): string {
+  return {
+    application: ui("应用程序", "Application"),
+    "application-data": ui("应用数据", "Application data"),
+    cache: ui("缓存/临时数据", "Cache / temporary data"),
+    "user-data": ui("用户数据", "User data"),
+    development: ui("开发数据", "Development data"),
+    system: ui("系统组件", "System component"),
+    unknown: ui("暂未识别", "Unidentified")
+  }[category];
+}
 
-const sourceLabels: Record<AnalysisResult["source"], string> = {
-  local: "本机证据",
-  "local+ai": "本机 + AI",
-  "local+ai+web": "本机 + AI + 网络补证"
-};
+function riskLabel(risk: AnalysisResult["risk"], ui: UiText): string {
+  return {
+    low: ui("低风险", "Low risk"),
+    medium: ui("中等风险", "Medium risk"),
+    high: ui("高风险", "High risk"),
+    blocked: ui("禁止迁移", "Migration blocked")
+  }[risk];
+}
+
+function sourceLabel(source: AnalysisResult["source"], ui: UiText): string {
+  return {
+    local: ui("本机证据", "Local evidence"),
+    "local+ai": ui("本机 + AI", "Local + AI"),
+    "local+ai+web": ui("本机 + AI + 网络补证", "Local + AI + web evidence")
+  }[source];
+}
+
+function confidenceText(value: number, ui: UiText): string {
+  if (value >= 0.82) return ui("高可信", "High confidence");
+  if (value >= 0.58) return ui("较可信", "Moderate confidence");
+  return ui("待确认", "Needs confirmation");
+}
 
 interface AnalyzeViewProps {
   initialPath: string;
@@ -59,28 +74,14 @@ interface AnalyzeViewProps {
   notify: (type: "success" | "error", message: string) => void;
 }
 
-function dateText(value: string): string {
-  try {
-    return new Intl.DateTimeFormat("zh-CN", {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit"
-    }).format(new Date(value));
-  } catch {
-    return value;
-  }
-}
-
 function RiskMark({ insight }: { insight: DirectoryInsight }) {
+  const { ui } = useI18n();
   return (
     <button
       type="button"
       className={`insight-risk-mark ${insight.risk}`}
       title={insight.riskReason}
-      aria-label={`迁移风险：${insight.riskReason}`}
+      aria-label={`${ui("迁移风险", "Migration risk")}: ${insight.riskReason}`}
     >
       <AlertTriangle size={14} />
     </button>
@@ -97,6 +98,7 @@ export function AnalyzeView({
   onMigrate,
   notify
 }: AnalyzeViewProps) {
+  const { t, ui, formatNumber, formatDate } = useI18n();
   const [targetPath, setTargetPath] = useState(initialPath);
   const [useAi, setUseAi] = useState(aiEnabled);
   const [result, setResult] = useState<AnalysisResult>();
@@ -109,7 +111,7 @@ export function AnalyzeView({
   const runAnalysis = useCallback(
     async (pathValue: string, withAi: boolean, automatic = false) => {
       if (!pathValue.trim()) {
-        notify("error", "请先选择一个目录");
+        notify("error", ui("请先选择一个目录", "Choose a directory first"));
         return;
       }
       setLoading(true);
@@ -117,13 +119,16 @@ export function AnalyzeView({
         const analysis = await api.analyzeDirectory(pathValue, withAi);
         setResult(analysis);
         if (analysis.aiError) {
-          notify("error", `本地分析已保存，但 AI 未完成：${analysis.aiError}`);
+          notify("error", `${ui("本地分析已保存，但 AI 未完成", "The local analysis was saved, but AI analysis did not finish")}: ${analysis.aiError}`);
         } else {
           notify(
             "success",
             automatic
-              ? `已直接完成${withAi ? " AI " : "本地"}详细归属分析并保存`
-              : "目录归属分析已完成并保存"
+              ? ui(
+                  `已直接完成${withAi ? " AI " : "本地"}详细归属分析并保存`,
+                  `The detailed ${withAi ? "AI-assisted" : "local"} ownership analysis was completed and saved`
+                )
+              : ui("目录归属分析已完成并保存", "Directory ownership analysis completed and saved")
           );
         }
       } catch (error) {
@@ -132,7 +137,7 @@ export function AnalyzeView({
         setLoading(false);
       }
     },
-    [notify]
+    [notify, ui]
   );
 
   const loadSaved = useCallback(async (pathValue: string) => {
@@ -178,7 +183,7 @@ export function AnalyzeView({
   ]);
 
   const choose = async () => {
-    const selected = await api.chooseDirectory("选择需要识别归属的目录");
+    const selected = await api.chooseDirectory(ui("选择需要识别归属的目录", "Choose a directory to analyze"));
     if (!selected) return;
     setTargetPath(selected);
     onPathChange(selected);
@@ -193,7 +198,7 @@ export function AnalyzeView({
       setResult(undefined);
       setTargetPath("");
       onPathChange("");
-      notify("success", "当前分析结果和目录输入已清空");
+      notify("success", ui("当前分析结果和目录输入已清空", "The current analysis and directory input were cleared"));
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
@@ -221,8 +226,8 @@ export function AnalyzeView({
     <div className="page analyze-page">
       <PageTitle
         eyebrow="OWNERSHIP ANALYSIS"
-        title="这个目录，属于谁？"
-        description="先核对注册表、AppX、App Paths 与全盘便携版程序，再结合目录结构、文件特征和 AI；只有低可信结果才进行网络补证。"
+        title={t("page.analyzeTitle")}
+        description={t("page.analyzeDescription")}
       />
 
       <section className="analyze-input-card glass-card">
@@ -238,11 +243,11 @@ export function AnalyzeView({
               onPathChange(targetPath);
               void loadSaved(targetPath);
             }}
-            placeholder="任意盘符:\需要分析的目录"
+            placeholder={ui("任意盘符:\\需要分析的目录", "Any drive:\\directory to analyze")}
             spellCheck={false}
           />
           <button type="button" onClick={() => void choose()}>
-            浏览
+            {ui("浏览", "Browse")}
           </button>
         </div>
         <div className="analyze-options">
@@ -255,8 +260,8 @@ export function AnalyzeView({
             />
             <span className="toggle" />
             <Bot size={15} />
-            使用 AI 二次判断
-            {!aiEnabled && <small>（未在设置中启用）</small>}
+            {ui("使用 AI 二次判断", "Use AI as a second opinion")}
+            {!aiEnabled && <small>{ui("（未在设置中启用）", "(not enabled in Settings)")}</small>}
           </label>
           <button
             className="secondary-button clear-analysis-button"
@@ -265,7 +270,7 @@ export function AnalyzeView({
             onClick={() => void clearCurrentAnalysis()}
           >
             {clearing ? <span className="spinner tiny" /> : <Trash2 size={15} />}
-            {clearing ? "正在清空…" : "清空当前结果"}
+            {clearing ? ui("正在清空…", "Clearing…") : ui("清空当前结果", "Clear current result")}
           </button>
           <button
             className="primary-button"
@@ -274,18 +279,25 @@ export function AnalyzeView({
             onClick={() => void runAnalysis(targetPath, useAi && aiEnabled)}
           >
             {loading ? <span className="spinner light" /> : <Sparkles size={17} />}
-            {loading ? "正在扫描并核对应用…" : result ? "重新分析并覆盖保存" : "开始分析"}
+            {loading
+              ? ui("正在扫描并核对应用…", "Scanning and matching applications…")
+              : result
+                ? ui("重新分析并覆盖保存", "Analyze again and replace saved result")
+                : ui("开始分析", "Start analysis")}
           </button>
         </div>
       </section>
 
       {loadingSaved && !result ? (
-        <EmptyState icon={<Clock3 size={30} />} title="正在读取上次分析">
-          已保存的分析不会因切换页面而消失。
+        <EmptyState icon={<Clock3 size={30} />} title={ui("正在读取上次分析", "Loading the previous analysis")}>
+          {ui("已保存的分析不会因切换页面而消失。", "Saved analyses remain available when you switch pages.")}
         </EmptyState>
       ) : !result ? (
-        <EmptyState icon={<ScanSearch size={31} />} title="选择一个目录开始">
-          从磁盘归属地图或搜索结果点击“详细归属分析”会立即执行分析；直接回到本页则优先展示上次保存结果。
+        <EmptyState icon={<ScanSearch size={31} />} title={ui("选择一个目录开始", "Choose a directory to begin")}>
+          {ui(
+            "从磁盘归属地图或搜索结果点击“详细归属分析”会立即执行分析；直接回到本页则优先展示上次保存结果。",
+            "Open detailed ownership analysis from the disk map or search results to analyze immediately. Returning here shows the most recently saved result first."
+          )}
         </EmptyState>
       ) : (
         <>
@@ -300,7 +312,7 @@ export function AnalyzeView({
             </div>
             <div className="analysis-verdict">
               <div className="analysis-badges">
-                <Badge tone="accent">{categoryLabels[result.category]}</Badge>
+                <Badge tone="accent">{categoryLabel(result.category, ui)}</Badge>
                 <Badge
                   tone={
                     result.risk === "low"
@@ -310,10 +322,10 @@ export function AnalyzeView({
                         : "danger"
                   }
                 >
-                  {riskLabels[result.risk]}
+                  {riskLabel(result.risk, ui)}
                 </Badge>
-                <Badge>可信度 {Math.round(result.confidence * 100)}%</Badge>
-                <Badge>{sourceLabels[result.source]}</Badge>
+                <Badge>{ui("可信度", "Confidence")} {Math.round(result.confidence * 100)}%</Badge>
+                <Badge>{sourceLabel(result.source, ui)}</Badge>
               </div>
               <h2>
                 {result.producedBy
@@ -323,13 +335,13 @@ export function AnalyzeView({
               <p>{result.explanation}</p>
               <div className="analysis-saved-note">
                 <Clock3 size={13} />
-                已保存于 {dateText(result.snapshot.analyzedAt)}；只有再次点击分析才会覆盖
+                {ui("已保存于", "Saved at")} {formatDate(result.snapshot.analyzedAt)}; {ui("只有再次点击分析才会覆盖", "it is replaced only when you run analysis again")}
               </div>
             </div>
             <div className="analysis-size">
-              <span>占用空间</span>
+              <span>{ui("占用空间", "Space used")}</span>
               <strong>{formatBytes(result.summary.totalBytes)}</strong>
-              <small>{result.summary.fileCount.toLocaleString()} 个文件</small>
+              <small>{formatNumber(result.summary.fileCount)} {ui("个文件", "files")}</small>
             </div>
           </section>
 
@@ -338,31 +350,31 @@ export function AnalyzeView({
               <div className="card-heading">
                 <div>
                   <span>PURPOSE & ORIGIN</span>
-                  <h3>用途、来源与产生方式</h3>
+                  <h3>{ui("用途、来源与产生方式", "Purpose, origin, and creation")}</h3>
                 </div>
                 <RiskMark insight={result.insights[0]} />
               </div>
               <dl className="purpose-details">
                 <div>
-                  <dt>归属应用 / 组件</dt>
-                  <dd>{result.producedBy ?? "尚未确定"}</dd>
+                  <dt>{ui("归属应用 / 组件", "Owning application / component")}</dt>
+                  <dd>{result.producedBy ?? ui("尚未确定", "Not determined")}</dd>
                 </div>
                 <div>
-                  <dt>目录用途</dt>
+                  <dt>{ui("目录用途", "Directory purpose")}</dt>
                   <dd>{result.purpose}</dd>
                 </div>
                 <div>
-                  <dt>如何产生</dt>
+                  <dt>{ui("如何产生", "How it was created")}</dt>
                   <dd>{result.howGenerated}</dd>
                 </div>
                 <div>
-                  <dt>迁移风险</dt>
+                  <dt>{ui("迁移风险", "Migration risk")}</dt>
                   <dd>{result.riskReason}</dd>
                 </div>
               </dl>
               {result.insights[0].webSources.length > 0 && (
                 <div className="analysis-web-sources">
-                  <span>网络补证</span>
+                  <span>{ui("网络补证", "Web evidence")}</span>
                   {result.insights[0].webSources.map((source) => (
                     <button
                       type="button"
@@ -381,31 +393,31 @@ export function AnalyzeView({
               <div className="card-heading">
                 <div>
                   <span>PROFILE</span>
-                  <h3>目录画像</h3>
+                  <h3>{ui("目录画像", "Directory profile")}</h3>
                 </div>
                 <HardDrive size={19} />
               </div>
               <div className="stat-pairs">
                 <div>
-                  <span>文件</span>
-                  <strong>{result.summary.fileCount.toLocaleString()}</strong>
+                  <span>{ui("文件", "Files")}</span>
+                  <strong>{formatNumber(result.summary.fileCount)}</strong>
                 </div>
                 <div>
-                  <span>子目录</span>
-                  <strong>{result.summary.directoryCount.toLocaleString()}</strong>
+                  <span>{ui("子目录", "Subdirectories")}</span>
+                  <strong>{formatNumber(result.summary.directoryCount)}</strong>
                 </div>
                 <div>
-                  <span>主要类型</span>
+                  <span>{ui("主要类型", "Primary type")}</span>
                   <strong>{result.summary.extensionBreakdown[0]?.extension ?? "—"}</strong>
                 </div>
                 <div>
-                  <span>建议</span>
+                  <span>{ui("建议", "Recommendation")}</span>
                   <strong>
                     {result.recommendation === "migrate"
-                      ? "适合迁移"
+                      ? ui("适合迁移", "Suitable for migration")
                       : result.recommendation === "keep"
-                        ? "保留原位"
-                        : "人工复核"}
+                        ? ui("保留原位", "Keep in place")
+                        : ui("人工复核", "Manual review")}
                   </strong>
                 </div>
               </div>
@@ -423,17 +435,17 @@ export function AnalyzeView({
             <div className="card-heading">
               <div>
                 <span>DIRECTORY BREAKDOWN</span>
-                <h3>一级目录用途与归属</h3>
+                <h3>{ui("一级目录用途与归属", "Top-level directory purpose and ownership")}</h3>
               </div>
               <FileBox size={19} />
             </div>
             {childInsights.length > 0 ? (
               <div className="directory-insight-list">
                 <div className="directory-insight-header" role="row">
-                  <span>目录 / 归属</span>
-                  <span>用途 / 产生方式</span>
-                  <span>大小 / 可信度</span>
-                  <span>风险</span>
+                  <span>{ui("目录 / 归属", "Directory / owner")}</span>
+                  <span>{ui("用途 / 产生方式", "Purpose / creation")}</span>
+                  <span>{ui("大小 / 可信度", "Size / confidence")}</span>
+                  <span>{ui("风险", "Risk")}</span>
                 </div>
                 {childInsights.map((insight) => {
                   const bytes = bytesByPath.get(insight.path.toLocaleLowerCase()) ?? 0;
@@ -442,13 +454,13 @@ export function AnalyzeView({
                       className={`directory-insight-row path-openable ${classNameFor(insight.path)}`}
                       key={insight.path}
                       onDoubleClick={(event) => openFromDoubleClick(event, insight.path)}
-                      title="双击使用 Windows 默认方式打开"
+                      title={ui("双击使用 Windows 默认方式打开", "Double-click to open with the Windows default app")}
                     >
                       <div className="insight-name">
                         <FolderOpen size={17} />
                         <div>
                           <strong>{insight.name}</strong>
-                          <span>{insight.producedBy ?? categoryLabels[insight.category]}</span>
+                          <span>{insight.producedBy ?? categoryLabel(insight.category, ui)}</span>
                         </div>
                       </div>
                       <div className="insight-purpose">
@@ -458,7 +470,7 @@ export function AnalyzeView({
                       <div className="insight-confidence">
                         <span>{formatBytes(bytes)}</span>
                         <strong>{Math.round(insight.confidence * 100)}%</strong>
-                        <small>{confidenceLabel(insight.confidence)}</small>
+                        <small>{confidenceText(insight.confidence, ui)}</small>
                       </div>
                       <RiskMark insight={insight} />
                       <PathOpenFeedback path={insight.path} feedback={feedback} />
@@ -470,8 +482,8 @@ export function AnalyzeView({
               <div className="quiet-empty compact">
                 <Info size={19} />
                 <div>
-                  <strong>没有可展示的一级子目录</strong>
-                  <span>当前结果仅包含目标目录本身。</span>
+                  <strong>{ui("没有可展示的一级子目录", "No top-level subdirectories to show")}</strong>
+                  <span>{ui("当前结果仅包含目标目录本身。", "This result contains only the target directory itself.")}</span>
                 </div>
               </div>
             )}
@@ -482,7 +494,7 @@ export function AnalyzeView({
               <div className="card-heading">
                 <div>
                   <span>APPLICATION EVIDENCE</span>
-                  <h3>本机应用归属候选</h3>
+                  <h3>{ui("本机应用归属候选", "Local application ownership candidates")}</h3>
                 </div>
                 <Boxes size={19} />
               </div>
@@ -498,7 +510,7 @@ export function AnalyzeView({
                       </div>
                       <div className="confidence">
                         <strong>{Math.round(candidate.confidence * 100)}%</strong>
-                        <span>{confidenceLabel(candidate.confidence)}</span>
+                        <span>{confidenceText(candidate.confidence, ui)}</span>
                       </div>
                     </div>
                   ))}
@@ -507,8 +519,8 @@ export function AnalyzeView({
                 <div className="quiet-empty compact">
                   <Info size={19} />
                   <div>
-                    <strong>本机应用资产未匹配</strong>
-                    <span>AI 会在该情况下分析目录结构，并对低可信目录尝试网络补证。</span>
+                    <strong>{ui("本机应用资产未匹配", "No local application asset matched")}</strong>
+                    <span>{ui("AI 会在该情况下分析目录结构，并对低可信目录尝试网络补证。", "AI analyzes the directory structure in this case and may use web evidence for low-confidence directories.")}</span>
                   </div>
                 </div>
               )}
@@ -518,7 +530,7 @@ export function AnalyzeView({
               <div className="card-heading">
                 <div>
                   <span>BEFORE MOVING</span>
-                  <h3>迁移前注意</h3>
+                  <h3>{ui("迁移前注意", "Before migration")}</h3>
                 </div>
                 <AlertTriangle size={19} />
               </div>
@@ -536,7 +548,7 @@ export function AnalyzeView({
                     className={`path-openable mini-path-row ${classNameFor(item.path)}`}
                     key={item.path}
                     onDoubleClick={(event) => openFromDoubleClick(event, item.path)}
-                    title="双击使用 Windows 默认方式打开"
+                    title={ui("双击使用 Windows 默认方式打开", "Double-click to open with the Windows default app")}
                   >
                     <span>{item.path.split(/[\\/]/).at(-1)}</span>
                     <i>
@@ -557,7 +569,7 @@ export function AnalyzeView({
                 disabled={result.risk === "blocked"}
                 onClick={() => onMigrate(result.summary.path)}
               >
-                前往安全迁移 <ArrowRight size={16} />
+                {ui("前往安全迁移", "Continue to safe migration")} <ArrowRight size={16} />
               </button>
             </article>
           </section>

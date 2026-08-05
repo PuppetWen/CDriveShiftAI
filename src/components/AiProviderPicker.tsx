@@ -6,6 +6,7 @@ import {
   getAiProvider
 } from "../lib/aiProviders";
 import type { AiProviderId } from "../types";
+import { useI18n } from "../lib/i18n";
 
 interface AiProviderPickerProps {
   value: AiProviderId;
@@ -18,6 +19,7 @@ export function AiProviderPicker({
   disabled = false,
   onChange
 }: AiProviderPickerProps) {
+  const { ui } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
@@ -68,20 +70,26 @@ export function AiProviderPicker({
       >
         <span>
           <strong>{selected.name}</strong>
-          <small>{selected.group}</small>
+          <small>{ui(selected.group, {
+            "国际厂商": "International",
+            "国内厂商": "China",
+            "聚合平台": "Aggregators",
+            "本地模型": "Local models",
+            "自定义": "Custom"
+          }[selected.group])}</small>
         </span>
         <ChevronDown size={15} />
       </button>
 
       {open && (
-        <div className="provider-picker-popover" role="listbox" aria-label="选择大模型厂商">
+        <div className="provider-picker-popover" role="listbox" aria-label={ui("选择大模型厂商", "Choose a model provider")}>
           <label className="provider-picker-search">
             <Search size={14} />
             <input
               ref={searchRef}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索厂商、平台或本地服务"
+              placeholder={ui("搜索厂商、平台或本地服务", "Search providers, platforms, or local services")}
               spellCheck={false}
             />
             <kbd>{filtered.length}</kbd>
@@ -93,7 +101,13 @@ export function AiProviderPicker({
               return (
                 <section className="provider-picker-group" key={group}>
                   <header>
-                    <span>{group}</span>
+                    <span>{ui(group, {
+                      "国际厂商": "International",
+                      "国内厂商": "China",
+                      "聚合平台": "Aggregators",
+                      "本地模型": "Local models",
+                      "自定义": "Custom"
+                    }[group])}</span>
                     <small>{providers.length}</small>
                   </header>
                   {providers.map((provider) => (
@@ -119,7 +133,7 @@ export function AiProviderPicker({
                       </i>
                       <span>
                         <strong>{provider.name}</strong>
-                        <small>{provider.description}</small>
+                        <small>{ui(provider.description, `${provider.name} API service`)}</small>
                       </span>
                       {provider.id === value && <Check size={15} />}
                     </button>
@@ -128,7 +142,7 @@ export function AiProviderPicker({
               );
             })}
             {filtered.length === 0 && (
-              <div className="provider-picker-empty">没有匹配的厂商，可选择“自定义兼容服务”。</div>
+              <div className="provider-picker-empty">{ui("没有匹配的厂商，可选择“自定义兼容服务”。", "No provider matched. Choose Custom compatible service.")}</div>
             )}
           </div>
         </div>

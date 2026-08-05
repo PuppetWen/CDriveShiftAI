@@ -61,6 +61,7 @@ const mockOverview: SystemOverview = {
 
 const mockSettings: AppSettings = {
   effectMode: "aurora",
+  language: "zh-CN",
   launchAtLogin: false,
   launchMinimized: false,
   minimizeToTray: true,
@@ -204,11 +205,11 @@ const browserFallback: CDriveShiftApi = {
         status: "available",
         phase: "downloading",
         distribution: "portable",
-        currentVersion: "0.0.4",
-        latestVersion: "0.0.5",
+        currentVersion: "0.0.5",
+        latestVersion: bundledReleaseNotes.version,
         updateAvailable: true,
         canAutoUpdate: true,
-        releaseName: "CDriveShiftAI 0.0.5",
+        releaseName: `CDriveShiftAI ${bundledReleaseNotes.version}`,
         releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
         publishedAt: new Date().toISOString(),
         releaseSummary: bundledReleaseNotes.summary,
@@ -235,16 +236,16 @@ const browserFallback: CDriveShiftApi = {
       status: "current",
       phase: "current",
       distribution: "development",
-      currentVersion: "0.0.5",
-      latestVersion: "0.0.5",
+      currentVersion: bundledReleaseNotes.version,
+      latestVersion: bundledReleaseNotes.version,
       updateAvailable: false,
       canAutoUpdate: false,
-      releaseName: "CDriveShiftAI 0.0.5",
+      releaseName: `CDriveShiftAI ${bundledReleaseNotes.version}`,
       releaseUrl: "https://github.com/PuppetWen/CDriveShiftAI/releases/latest",
       releaseSummary: bundledReleaseNotes.summary,
       releaseSections: bundledReleaseNotes.sections,
       assets: [],
-      message: "当前已是最新版本 0.0.5",
+      message: `当前已是最新版本 ${bundledReleaseNotes.version}`,
       checkedAt: new Date().toISOString()
     } as const;
   },
@@ -389,7 +390,7 @@ const browserFallback: CDriveShiftApi = {
     return mockSettings;
   },
   async chooseDirectory() {
-    return null;
+    return "E:\\MockContent";
   },
   revealPath: () => Promise.resolve(),
   openPath: () => Promise.resolve(),
@@ -426,6 +427,22 @@ const browserFallback: CDriveShiftApi = {
     };
   },
   trashPath: () => Promise.resolve(false),
+  async previewForceDelete(targetPath) {
+    const name = targetPath.split(/[\\/]/).pop() || targetPath;
+    return {
+      verificationId: `browser-${Date.now()}`,
+      path: targetPath,
+      name,
+      isDirectory: !/\.[a-z0-9]{1,12}$/i.test(name),
+      isSymbolicLink: false,
+      highRisk: false,
+      elevated: true,
+      processes: []
+    };
+  },
+  async executeForceDelete() {
+    return { deleted: true, terminatedProcesses: [] };
+  },
   async directorySizes(paths) {
     return paths.map((path, index) => ({
       path,

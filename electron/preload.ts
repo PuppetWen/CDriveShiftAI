@@ -40,6 +40,10 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
   getPathProperties: (targetPath: string) =>
     ipcRenderer.invoke("shell:path-properties", targetPath),
   trashPath: (targetPath: string) => ipcRenderer.invoke("shell:trash", targetPath),
+  previewForceDelete: (targetPath: string) =>
+    ipcRenderer.invoke("shell:force-delete-preview", targetPath),
+  executeForceDelete: (verificationId: string) =>
+    ipcRenderer.invoke("shell:force-delete-execute", verificationId),
   directorySizes: (paths: string[]) => ipcRenderer.invoke("search:directory-sizes", paths),
   getSearchWorkspace: () => ipcRenderer.invoke("search:workspace-get"),
   saveSearchWorkspace: (state: unknown) => ipcRenderer.invoke("search:workspace-save", state),

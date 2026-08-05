@@ -48,6 +48,7 @@ import {
   Zap
 } from "lucide-react";
 import { SearchContextMenu } from "../components/SearchContextMenu";
+import { ForceDeleteDialog } from "../components/ForceDeleteDialog";
 import { PathPropertiesDialog } from "../components/PathPropertiesDialog";
 import { ThemedTooltip } from "../components/ThemedTooltip";
 import {
@@ -57,6 +58,7 @@ import {
 import { Badge, EmptyState } from "../components/ui";
 import { api } from "../lib/api";
 import { formatBytes, formatDate } from "../lib/format";
+import { useI18n, type TranslationKey } from "../lib/i18n";
 import { useVirtualList } from "../lib/virtual-list";
 import {
   bookmarkConditionCount,
@@ -127,47 +129,47 @@ const MIN_SEARCH_COLUMN_WIDTHS: SearchResultColumnWidths = {
 
 const categoryDefinitions: Array<{
   value: SearchCategory;
-  label: string;
+  label: TranslationKey;
   icon: typeof Folder;
 }> = [
-  { value: "folder", label: "文件夹", icon: Folder },
-  { value: "document", label: "文档", icon: FileText },
-  { value: "image", label: "图片", icon: Image },
-  { value: "video", label: "视频", icon: Film },
-  { value: "audio", label: "音频", icon: AudioLines },
-  { value: "archive", label: "压缩包", icon: Archive },
-  { value: "executable", label: "程序", icon: FileCog },
-  { value: "code", label: "代码", icon: Braces },
-  { value: "other", label: "其他", icon: File }
+  { value: "folder", label: "search.category.folder", icon: Folder },
+  { value: "document", label: "search.category.document", icon: FileText },
+  { value: "image", label: "search.category.image", icon: Image },
+  { value: "video", label: "search.category.video", icon: Film },
+  { value: "audio", label: "search.category.audio", icon: AudioLines },
+  { value: "archive", label: "search.category.archive", icon: Archive },
+  { value: "executable", label: "search.category.executable", icon: FileCog },
+  { value: "code", label: "search.category.code", icon: Braces },
+  { value: "other", label: "search.category.other", icon: File }
 ];
 
 const categoryLabels = Object.fromEntries(
   categoryDefinitions.map((item) => [item.value, item.label])
-) as Record<SearchCategory, string>;
+) as Record<SearchCategory, TranslationKey>;
 
-const sortLabels: Record<SearchSortField, string> = {
-  relevance: "相关度",
-  name: "名称",
-  path: "路径",
-  size: "大小",
-  modified: "修改时间",
-  type: "类型"
+const sortLabels: Record<SearchSortField, TranslationKey> = {
+  relevance: "search.sort.relevance",
+  name: "search.sort.name",
+  path: "search.sort.path",
+  size: "search.sort.size",
+  modified: "search.sort.modified",
+  type: "search.sort.type"
 };
 
 type NameMatchMode = "contains" | "whole" | "fuzzy" | "regex";
 
-const nameMatchModeLabels: Record<NameMatchMode, string> = {
-  contains: "包含匹配",
-  whole: "完整词匹配",
-  fuzzy: "模糊匹配",
-  regex: "正则匹配"
+const nameMatchModeLabels: Record<NameMatchMode, TranslationKey> = {
+  contains: "search.match.contains",
+  whole: "search.match.whole",
+  fuzzy: "search.match.fuzzy",
+  regex: "search.match.regex"
 };
 
-const nameMatchModeDetails: Record<NameMatchMode, string> = {
-  contains: "关键词连续出现在名称中",
-  whole: "只匹配独立完整词",
-  fuzzy: "按字符顺序智能匹配",
-  regex: "使用正则表达式规则"
+const nameMatchModeDetails: Record<NameMatchMode, TranslationKey> = {
+  contains: "search.match.containsDetail",
+  whole: "search.match.wholeDetail",
+  fuzzy: "search.match.fuzzyDetail",
+  regex: "search.match.regexDetail"
 };
 
 export function SearchView({
@@ -178,6 +180,7 @@ export function SearchView({
   notify,
   standalone = false
 }: SearchViewProps) {
+  const { t, ui, runtimeText, formatNumber } = useI18n();
   const [mode, setMode] = useState<SearchMode>("name");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>(defaultFilters);
@@ -234,6 +237,7 @@ export function SearchView({
     initialRename?: boolean;
   }>();
   const [propertyPath, setPropertyPath] = useState("");
+  const [forceDeletePath, setForceDeletePath] = useState("");
   const [liveIndexRevision, setLiveIndexRevision] = useState(0);
   const requestSequence = useRef(0);
   const pageRequestSequence = useRef(0);
@@ -539,12 +543,16 @@ export function SearchView({
         void openPath(item.path);
       } else if (event.key === "Delete") {
         event.preventDefault();
+        if (event.shiftKey) {
+          setForceDeletePath(item.path);
+          return;
+        }
         void api
           .trashPath(item.path)
           .then((deleted) => {
             if (!deleted) return;
             setResults((items) => items.filter((candidate) => candidate.path !== item.path));
-            notify("success", "已移入回收站");
+            notify("success", ui("已移入回收站", "Moved to the Recycle Bin"));
           })
           .catch((reason) =>
             notify("error", reason instanceof Error ? reason.message : String(reason))
@@ -563,7 +571,9 @@ export function SearchView({
         event.key.toLocaleLowerCase() === "c"
       ) {
         event.preventDefault();
-        void api.copyText(item.path).then(() => notify("success", "完整路径已复制"));
+        void api.copyText(item.path).then(() =>
+          notify("success", ui("完整路径已复制", "Full path copied"))
+        );
       }
     };
     window.addEventListener("keydown", handler);
@@ -621,7 +631,12 @@ export function SearchView({
     }
     if (mode === "content" && contentScope === "*") {
       setContentResults([]);
-      setError("内容搜索需要先选择一个明确目录，避免无意中扫描整台电脑。");
+      setError(
+        ui(
+          "内容搜索需要先选择一个明确目录，避免无意中扫描整台电脑。",
+          "Choose a specific directory before content search to avoid scanning the entire computer."
+        )
+      );
       return;
     }
     if (filters.regex && !regexValidation.valid) {
@@ -771,7 +786,8 @@ export function SearchView({
           if (sequence === sizeSequence.current) {
             notify(
               "error",
-              `部分文件夹大小计算失败：${reason instanceof Error ? reason.message : String(reason)}`
+              ui("部分文件夹大小计算失败：", "Some folder sizes could not be calculated: ") +
+                (reason instanceof Error ? reason.message : String(reason))
             );
           }
         })
@@ -929,7 +945,9 @@ export function SearchView({
 
   const chooseScope = async () => {
     const selected = await api.chooseDirectory(
-      mode === "content" ? "选择要建立内容索引的目录" : "选择搜索范围"
+      mode === "content"
+        ? ui("选择要建立内容索引的目录", "Choose a directory to index")
+        : ui("选择搜索范围", "Choose a search scope")
     );
     if (!selected) return;
     if (mode === "content") {
@@ -960,7 +978,7 @@ export function SearchView({
       root: contentScope,
       filesVisited: 0,
       filesIndexed: 0,
-      message: "正在准备内容索引"
+      message: ui("正在准备内容索引", "Preparing the content index")
     });
     try {
       await api.indexContent(contentScope);
@@ -975,6 +993,24 @@ export function SearchView({
         message
       });
     }
+  };
+
+  const clearContentScope = () => {
+    ++requestSequence.current;
+    ++pageRequestSequence.current;
+    setContentScope("*");
+    setContentResults([]);
+    setContentCursor(undefined);
+    setContentHasMore(false);
+    setContentTotal(undefined);
+    setElapsed(undefined);
+    setError("");
+    setContentStatus({
+      state: "idle",
+      root: "*",
+      filesVisited: 0,
+      filesIndexed: 0
+    });
   };
 
   const toggleCategory = (value: SearchCategory) => {
@@ -1236,15 +1272,15 @@ export function SearchView({
           );
   const selectedBookmarkFolderLabel =
     selectedBookmarkFolder === "all"
-      ? "全部收藏"
+      ? ui("全部收藏", "All saved searches")
       : selectedBookmarkFolder === "unfiled"
-        ? "未分组"
+        ? ui("未分组", "Unfiled")
         : bookmarkFolders.find((folder) => folder.id === selectedBookmarkFolder)?.name ??
-          "全部收藏";
+          ui("全部收藏", "All saved searches");
 
   const saveBookmark = async () => {
     if (!query.trim()) {
-      notify("error", "请先输入要保存的搜索内容");
+      notify("error", ui("请先输入要保存的搜索内容", "Enter a query before saving this search"));
       return;
     }
     if (
@@ -1252,7 +1288,7 @@ export function SearchView({
         (bookmark) => bookmarkSignature(bookmark) === currentBookmarkSignature
       )
     ) {
-      notify("success", "当前搜索和筛选条件已经在书签中");
+      notify("success", ui("当前搜索和筛选条件已经在书签中", "This query and its filters are already saved"));
       return;
     }
     const baseName = query.trim().slice(0, 48);
@@ -1293,7 +1329,7 @@ export function SearchView({
         ...items.filter((item) => item.id !== saved.id)
       ]);
       setBookmarkPanelOpen(true);
-      notify("success", "搜索内容和全部筛选条件已添加为书签");
+      notify("success", ui("搜索内容和全部筛选条件已添加为书签", "The query and all filters were saved"));
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
@@ -1302,7 +1338,7 @@ export function SearchView({
   };
 
   const createBookmarkFolder = async () => {
-    const baseName = "新建文件夹";
+    const baseName = ui("新建文件夹", "New folder");
     const existingNames = new Set(
       bookmarkFolders.map((folder) => folder.name.toLocaleLowerCase())
     );
@@ -1362,7 +1398,7 @@ export function SearchView({
         setSelectedBookmarkFolder("unfiled");
       }
       setBookmarkMenu(undefined);
-      notify("success", "文件夹已删除，其中的书签已移到“未分组”");
+      notify("success", ui("文件夹已删除，其中的书签已移到“未分组”", "Folder deleted; its saved searches were moved to Unfiled"));
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     }
@@ -1388,8 +1424,8 @@ export function SearchView({
       notify(
         "success",
         folderId
-          ? `书签已移入“${bookmarkFolders.find((item) => item.id === folderId)?.name ?? "文件夹"}”`
-          : "书签已移到“未分组”"
+          ? ui("书签已移入", "Saved search moved to") + ` “${bookmarkFolders.find((item) => item.id === folderId)?.name ?? ui("文件夹", "folder")}”`
+          : ui("书签已移到“未分组”", "Saved search moved to Unfiled")
       );
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
@@ -1456,7 +1492,7 @@ export function SearchView({
     try {
       await api.deleteSearchBookmark(id);
       setBookmarks((items) => items.filter((item) => item.id !== id));
-      notify("success", "搜索书签已删除");
+      notify("success", ui("搜索书签已删除", "Saved search deleted"));
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     }
@@ -1509,24 +1545,30 @@ export function SearchView({
   const scopeLabel =
     mode === "content"
       ? contentScope === "*"
-        ? "选择内容索引目录"
+        ? t("search.chooseContentDirectory")
         : contentScope
       : scopes.length === 0
-        ? "整个电脑"
+        ? t("search.entireComputer")
         : scopes.length === 1
           ? scopes[0]
-          : `${scopes.length} 个范围`;
+          : ui(`${scopes.length} 个范围`, `${formatNumber(scopes.length)} scopes`);
   const count = mode === "name" ? displayedResults.length : contentResults.length;
   const totalCount = mode === "name" ? nameTotal : contentTotal;
   const resultCountLabel =
     totalCount != null
-      ? `已加载 ${count.toLocaleString()} / 共 ${totalCount.toLocaleString()} 个`
-      : `${count.toLocaleString()}${activeHasMore ? "+" : ""} 个结果`;
+      ? ui(
+          `已加载 ${count.toLocaleString()} / 共 ${totalCount.toLocaleString()} 个`,
+          `Loaded ${formatNumber(count)} of ${formatNumber(totalCount)}`
+        )
+      : ui(
+          `${count.toLocaleString()}${activeHasMore ? "+" : ""} 个结果`,
+          `${formatNumber(count)}${activeHasMore ? "+" : ""} results`
+        );
   const columnResizeHandle = (boundary: number, label: string) => (
     <span
       className="result-column-resizer"
       role="separator"
-      aria-label={`调整${label}列宽`}
+      aria-label={ui(`调整${label}列宽`, `Resize ${label} column`)}
       aria-orientation="vertical"
       tabIndex={0}
       onClick={(event) => event.stopPropagation()}
@@ -1546,8 +1588,8 @@ export function SearchView({
           <button type="button" className={mode === "name" ? "active" : ""} onClick={() => setMode("name")}>
             <Search size={17} />
             <span>
-              <strong>名称搜索</strong>
-              <small>全盘组合筛选</small>
+              <strong>{t("search.nameMode")}</strong>
+              <small>{t("search.nameModeDescription")}</small>
             </span>
           </button>
           <button
@@ -1557,8 +1599,8 @@ export function SearchView({
           >
             <FileSearch size={17} />
             <span>
-              <strong>内容搜索</strong>
-              <small>指定目录全文</small>
+              <strong>{t("search.contentMode")}</strong>
+              <small>{t("search.contentModeDescription")}</small>
             </span>
           </button>
         </div>
@@ -1566,8 +1608,11 @@ export function SearchView({
           <Badge tone={indexer.state === "ready" ? "good" : "warn"}>
             <Database size={13} />
             {indexer.state === "ready"
-              ? `${indexer.entries.toLocaleString()} 条名称索引`
-              : "全盘索引构建中"}
+              ? ui(
+                  `${indexer.entries.toLocaleString()} 条名称索引`,
+                  `${formatNumber(indexer.entries)} names indexed`
+                )
+              : ui("全盘索引构建中", "Building the full-drive index")}
           </Badge>
         )}
       </div>
@@ -1577,7 +1622,7 @@ export function SearchView({
         className={`search-bookmark-strip glass-card ${
           bookmarkPanelOpen ? "expanded" : ""
         }`}
-        aria-label="已存搜索"
+        aria-label={ui("已存搜索", "Saved searches")}
         onContextMenu={(event) => showBookmarkMenu(event)}
       >
         <button
@@ -1588,16 +1633,22 @@ export function SearchView({
         >
           <span className="search-bookmark-label">
             <Bookmark size={14} />
-            <strong>已存搜索</strong>
+            <strong>{ui("已存搜索", "Saved searches")}</strong>
             <small>{bookmarks.length}</small>
           </span>
           <span className="search-bookmark-summary">
             {bookmarks.length === 0
-              ? "保存关键字与全部筛选条件，可一键再次搜索"
-              : `${selectedBookmarkFolderLabel} · ${visibleBookmarks.length} 项`}
+              ? ui(
+                  "保存关键字与全部筛选条件，可一键再次搜索",
+                  "Save the query and every filter for one-click reuse"
+                )
+              : ui(
+                  `${selectedBookmarkFolderLabel} · ${visibleBookmarks.length} 项`,
+                  `${selectedBookmarkFolderLabel} · ${formatNumber(visibleBookmarks.length)} items`
+                )}
           </span>
           <span className="search-bookmark-toggle-action">
-            {bookmarkPanelOpen ? "收起" : "展开"}
+            {bookmarkPanelOpen ? ui("收起", "Collapse") : ui("展开", "Expand")}
             <ChevronDown size={14} className={bookmarkPanelOpen ? "flip" : ""} />
           </span>
         </button>
@@ -1610,7 +1661,7 @@ export function SearchView({
             onClick={() => setSelectedBookmarkFolder("all")}
           >
             <Bookmark size={12} />
-            全部
+            {ui("全部", "All")}
             <small>{bookmarks.length}</small>
           </button>
           <button
@@ -1628,7 +1679,7 @@ export function SearchView({
             onDrop={(event) => dropBookmark(event)}
           >
             <FolderOpen size={12} />
-            未分组
+            {ui("未分组", "Unfiled")}
             <small>{unfiledBookmarkCount}</small>
           </button>
           {bookmarkFolders.map((folder) => {
@@ -1679,7 +1730,7 @@ export function SearchView({
             );
           })}
           <span className="bookmark-folder-hint">
-            <FolderPlus size={11} /> 右键新建 · 拖动归类
+            <FolderPlus size={11} /> {ui("右键新建 · 拖动归类", "Right-click to create · drag to organize")}
           </span>
             </div>
             <div className="search-bookmark-list">
@@ -1707,14 +1758,17 @@ export function SearchView({
                   >
                     <span>{bookmark.name}</span>
                     <small>
-                      {bookmark.mode === "name" ? "名称" : "正文"} ·{" "}
-                      {bookmarkConditionCount(bookmark)} 项条件
+                      {bookmark.mode === "name" ? ui("名称", "Name") : ui("正文", "Content")} ·{" "}
+                      {ui(
+                        `${bookmarkConditionCount(bookmark)} 项条件`,
+                        `${formatNumber(bookmarkConditionCount(bookmark))} filters`
+                      )}
                     </small>
                   </button>
                   <button
                     type="button"
                     className="bookmark-delete"
-                    aria-label={`删除搜索书签 ${bookmark.name}`}
+                    aria-label={ui(`删除搜索书签 ${bookmark.name}`, `Delete saved search ${bookmark.name}`)}
                     onClick={() => void deleteBookmark(bookmark.id)}
                   >
                     <Trash2 size={12} />
@@ -1725,8 +1779,14 @@ export function SearchView({
           ) : (
             <span className="search-bookmark-empty">
               {bookmarks.length === 0
-                ? "点击搜索框右侧“添加书签”即可立即保存"
-                : "这个文件夹还没有书签，可从“全部”中拖入"}
+                ? ui(
+                    "点击搜索框右侧“添加书签”即可立即保存",
+                    "Use Save search beside the query box to save it immediately"
+                  )
+                : ui(
+                    "这个文件夹还没有书签，可从“全部”中拖入",
+                    "This folder is empty; drag saved searches here from All"
+                  )}
             </span>
           )}
             </div>
@@ -1745,13 +1805,13 @@ export function SearchView({
             placeholder={
               mode === "name"
                 ? filters.regex
-                  ? "输入正则表达式，例如 ^报告.*\\.pdf$"
+                  ? ui("输入正则表达式，例如 ^报告.*\\.pdf$", "Enter a regular expression, for example ^report.*\\.pdf$")
                   : filters.fuzzy
-                    ? "输入模糊关键词，例如 rdscp 可匹配 redscope"
-                  : "搜索任意磁盘中的文件、目录或文件夹名字…"
+                    ? ui("输入模糊关键词，例如 rdscp 可匹配 redscope", "Enter a fuzzy query, for example rdscp matches redscope")
+                  : ui("搜索任意磁盘中的文件、目录或文件夹名字…", "Search file and folder names on any drive…")
                 : filters.regex
-                  ? "输入正文正则，例如 error\\s+[45]\\d{2}"
-                  : "搜索文件正文、代码、配置或日志内容…"
+                  ? ui("输入正文正则，例如 error\\s+[45]\\d{2}", "Enter a content regex, for example error\\s+[45]\\d{2}")
+                  : ui("搜索文件正文、代码、配置或日志内容…", "Search text, source code, configuration, or log contents…")
             }
             spellCheck={false}
           />
@@ -1764,11 +1824,11 @@ export function SearchView({
               onClick={() => void saveBookmark()}
             >
               <BookmarkPlus size={15} />
-              <span>{savingBookmark ? "添加中…" : "添加书签"}</span>
+              <span>{savingBookmark ? ui("添加中…", "Saving…") : ui("添加书签", "Save search")}</span>
             </button>
           )}
           {query && !loading && (
-            <button type="button" onClick={() => setQuery("")} aria-label="清空搜索">
+            <button type="button" onClick={() => setQuery("")} aria-label={ui("清空搜索", "Clear search")}>
               <X size={18} />
             </button>
           )}
@@ -1781,7 +1841,7 @@ export function SearchView({
               <section className="search-filter-group search-filter-types">
                 <div className="search-filter-group-title">
                   <File size={13} />
-                  <span>文件类型</span>
+                  <span>{t("search.fileTypes")}</span>
                 </div>
                 <div className="quick-category-row">
                   <button
@@ -1789,7 +1849,7 @@ export function SearchView({
                     className={categories.length === 0 ? "active" : ""}
                     onClick={() => setFilters((current) => ({ ...current, categories: [] }))}
                   >
-                    全部
+                    {t("search.category.all")}
                   </button>
                   {categoryDefinitions.map(({ value, label, icon: Icon }) => (
                     <button
@@ -1799,7 +1859,7 @@ export function SearchView({
                       key={value}
                     >
                       <Icon size={13} />
-                      {label}
+                      {t(label)}
                     </button>
                   ))}
                 </div>
@@ -1809,16 +1869,16 @@ export function SearchView({
                 <section className="search-filter-group search-filter-location">
                   <div className="search-filter-group-title">
                     <Globe2 size={13} />
-                    <span>搜索位置</span>
+                    <span>{t("search.location")}</span>
                   </div>
                   <div className="search-filter-location-controls">
-                    <div className="drive-scope-pills" aria-label="磁盘范围，可多选">
+                    <div className="drive-scope-pills" aria-label={ui("磁盘范围，可多选", "Drive scope; multiple selections allowed")}>
                       <button
                         type="button"
                         className={scopes.length === 0 ? "active" : ""}
                         onClick={() => setFilters((current) => ({ ...current, scope: "*", scopes: [] }))}
                       >
-                        <Globe2 size={12} /> 全电脑
+                        <Globe2 size={12} /> {t("search.allComputer")}
                       </button>
                       {drives.map((drive) => (
                         <button
@@ -1845,11 +1905,11 @@ export function SearchView({
                 <section className="search-filter-group search-filter-match">
                   <div className="search-filter-group-title">
                     <FileSearch size={13} />
-                    <span>匹配方式</span>
+                    <span>{t("search.matchMode")}</span>
                   </div>
-                  <div className="match-mode-segments" role="radiogroup" aria-label="名称匹配方式">
+                  <div className="match-mode-segments" role="radiogroup" aria-label={ui("名称匹配方式", "Name match mode")}>
                     {(Object.keys(nameMatchModeLabels) as NameMatchMode[]).map((value) => (
-                      <ThemedTooltip content={nameMatchModeDetails[value]} key={value}>
+                      <ThemedTooltip content={t(nameMatchModeDetails[value])} key={value}>
                         <button
                           type="button"
                           className={nameMatchMode === value ? "active" : ""}
@@ -1858,7 +1918,7 @@ export function SearchView({
                           onClick={() => selectNameMatchMode(value)}
                         >
                           <span />
-                          {nameMatchModeLabels[value]}
+                          {t(nameMatchModeLabels[value])}
                         </button>
                       </ThemedTooltip>
                     ))}
@@ -1868,7 +1928,7 @@ export function SearchView({
                 <section className="search-filter-group search-filter-order">
                   <div className="search-filter-group-title">
                     <ListFilter size={13} />
-                    <span>排序与属性</span>
+                    <span>{t("search.sortAndProperties")}</span>
                     {elapsed != null && (
                       <small className="latency">
                         <Zap size={11} /> {elapsed < 1 ? "<1" : elapsed.toFixed(0)} ms
@@ -1889,13 +1949,15 @@ export function SearchView({
                       >
                         {(Object.keys(sortLabels) as SearchSortField[]).map((field) => (
                           <option value={field} key={field}>
-                            按{sortLabels[field]}排序
+                            {t("search.sortBy", { field: t(sortLabels[field]) })}
                           </option>
                         ))}
                       </select>
                       <button
                         type="button"
-                        aria-label={filters.sortDirection === "asc" ? "当前升序，点击切换降序" : "当前降序，点击切换升序"}
+                        aria-label={filters.sortDirection === "asc"
+                          ? ui("当前升序，点击切换降序", "Ascending; switch to descending")
+                          : ui("当前降序，点击切换升序", "Descending; switch to ascending")}
                         onClick={() =>
                           setFilters((current) => ({
                             ...current,
@@ -1912,7 +1974,7 @@ export function SearchView({
                       onClick={() => setFilterPanelOpen((value) => !value)}
                     >
                       <SlidersHorizontal size={14} />
-                      更多条件
+                      {t("search.moreConditions")}
                       {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
                       <ChevronDown size={13} className={filterPanelOpen ? "flip" : ""} />
                     </button>
@@ -1925,7 +1987,7 @@ export function SearchView({
               <div className="advanced-filter-panel">
                 <div className="advanced-filter-grid">
                   <section>
-                    <label>指定扩展名（支持多个）</label>
+                    <label>{ui("指定扩展名（支持多个）", "File extensions (multiple allowed)")}</label>
                     <div className="filter-input-line">
                       <input
                         value={extensionInput}
@@ -1937,12 +1999,12 @@ export function SearchView({
                         placeholder="pdf, docx, zip, exe"
                       />
                       <button type="button" onClick={updateExtensions}>
-                        应用
+                        {ui("应用", "Apply")}
                       </button>
                     </div>
                   </section>
                   <section>
-                    <label>大小范围（MB，文件夹完成计算后生效）</label>
+                    <label>{ui("大小范围（MB，文件夹完成计算后生效）", "Size range (MB; folders apply after calculation)")}</label>
                     <div className="size-range-inputs">
                       <input
                         type="number"
@@ -1954,7 +2016,7 @@ export function SearchView({
                             minSize: event.target.value ? Number(event.target.value) * 1024 ** 2 : undefined
                           }))
                         }
-                        placeholder="最小"
+                        placeholder={ui("最小", "Minimum")}
                       />
                       <span>—</span>
                       <input
@@ -1967,12 +2029,12 @@ export function SearchView({
                             maxSize: event.target.value ? Number(event.target.value) * 1024 ** 2 : undefined
                           }))
                         }
-                        placeholder="最大"
+                        placeholder={ui("最大", "Maximum")}
                       />
                     </div>
                     <div className="preset-pills">
                       {[
-                        ["任意", undefined, undefined],
+                        [ui("任意", "Any"), undefined, undefined],
                         ["≤1 MB", undefined, 1024 ** 2],
                         ["1–100 MB", 1024 ** 2, 100 * 1024 ** 2],
                         ["≥100 MB", 100 * 1024 ** 2, undefined],
@@ -1995,16 +2057,16 @@ export function SearchView({
                     </div>
                   </section>
                   <section>
-                    <label>修改时间</label>
+                    <label>{ui("修改时间", "Modified date")}</label>
                     <div className="preset-pills date-presets">
                       {(
                         [
-                          ["any", "任意"],
-                          ["today", "今天"],
-                          ["week", "近 7 天"],
-                          ["month", "近 30 天"],
-                          ["year", "近一年"],
-                          ["custom", "自定义"]
+                          ["any", ui("任意", "Any time")],
+                          ["today", ui("今天", "Today")],
+                          ["week", ui("近 7 天", "Last 7 days")],
+                          ["month", ui("近 30 天", "Last 30 days")],
+                          ["year", ui("近一年", "Last year")],
+                          ["custom", ui("自定义", "Custom")]
                         ] as Array<[DatePreset, string]>
                       ).map(([value, label]) => (
                         <button
@@ -2030,7 +2092,7 @@ export function SearchView({
                             }))
                           }
                         />
-                        <span>至</span>
+                        <span>{ui("至", "to")}</span>
                         <input
                           type="date"
                           onChange={(event) =>
@@ -2046,11 +2108,11 @@ export function SearchView({
                     )}
                   </section>
                   <section>
-                    <label>名称匹配规则</label>
+                    <label>{ui("名称匹配规则", "Name matching rules")}</label>
                     <div className="search-option-toggles">
                       {[
-                        ["matchPath", "匹配完整路径"],
-                        ["caseSensitive", "区分大小写"]
+                        ["matchPath", ui("匹配完整路径", "Match full path")],
+                        ["caseSensitive", ui("区分大小写", "Case sensitive")]
                       ].map(([field, label]) => (
                         <button
                           type="button"
@@ -2072,10 +2134,13 @@ export function SearchView({
                 </div>
                 <div className="advanced-filter-footer">
                   <span>
-                    同一组内按“或”组合，不同组之间按“且”组合；模糊、正则和完整路径模式可能稍慢。
+                    {ui(
+                      "同一组内按“或”组合，不同组之间按“且”组合；模糊、正则和完整路径模式可能稍慢。",
+                      "Values within a group use OR; separate groups use AND. Fuzzy, regex, and full-path modes can be slower."
+                    )}
                   </span>
                   <button type="button" onClick={resetFilters}>
-                    <RotateCcw size={13} /> 重置全部筛选
+                    <RotateCcw size={13} /> {ui("重置全部筛选", "Reset all filters")}
                   </button>
                 </div>
               </div>
@@ -2083,15 +2148,15 @@ export function SearchView({
 
             {activeFilterCount > 0 && (
               <div className="active-filter-chips">
-                <span>当前组合</span>
+                <span>{ui("当前组合", "Active filters")}</span>
                 {scopes.map((scope) => (
                   <button type="button" onClick={() => toggleDrive(scope)} key={scope}>
-                    范围：{scope} <X size={11} />
+                    {ui("范围：", "Scope: ")}{scope} <X size={11} />
                   </button>
                 ))}
                 {categories.map((category) => (
                   <button type="button" onClick={() => toggleCategory(category)} key={category}>
-                    {categoryLabels[category]} <X size={11} />
+                    {t(categoryLabels[category])} <X size={11} />
                   </button>
                 ))}
                 {extensions.length > 0 && (
@@ -2102,7 +2167,7 @@ export function SearchView({
                       setExtensionInput("");
                     }}
                   >
-                    扩展名：{extensions.join(" / ")} <X size={11} />
+                    {ui("扩展名：", "Extensions: ")}{extensions.join(" / ")} <X size={11} />
                   </button>
                 )}
                 {(filters.minSize != null || filters.maxSize != null) && (
@@ -2116,17 +2181,17 @@ export function SearchView({
                       }))
                     }
                   >
-                    大小范围 <X size={11} />
+                    {ui("大小范围", "Size range")} <X size={11} />
                   </button>
                 )}
                 {(filters.modifiedAfter || filters.modifiedBefore) && (
                   <button type="button" onClick={() => selectDatePreset("any")}>
-                    修改时间 <X size={11} />
+                    {ui("修改时间", "Modified date")} <X size={11} />
                   </button>
                 )}
                 {nameMatchMode !== "contains" && (
                   <button type="button" onClick={() => selectNameMatchMode("contains")}>
-                    {nameMatchModeLabels[nameMatchMode]} <X size={11} />
+                    {t(nameMatchModeLabels[nameMatchMode])} <X size={11} />
                   </button>
                 )}
                 {filters.caseSensitive && (
@@ -2136,7 +2201,7 @@ export function SearchView({
                       setFilters((current) => ({ ...current, caseSensitive: false }))
                     }
                   >
-                    区分大小写 <X size={11} />
+                    {ui("区分大小写", "Case sensitive")} <X size={11} />
                   </button>
                 )}
                 {filters.matchPath && (
@@ -2144,7 +2209,7 @@ export function SearchView({
                     type="button"
                     onClick={() => setFilters((current) => ({ ...current, matchPath: false }))}
                   >
-                    匹配完整路径 <X size={11} />
+                    {ui("匹配完整路径", "Match full path")} <X size={11} />
                   </button>
                 )}
               </div>
@@ -2156,16 +2221,33 @@ export function SearchView({
               <div className={`content-state ${contentStatus.state}`}>
                 <span className={contentStatus.state === "indexing" ? "spinner tiny" : "status-dot online"} />
                 {contentStatus.state === "indexing"
-                  ? `已写入 ${contentStatus.filesIndexed.toLocaleString()} 个文档`
+                  ? ui(
+                      `已写入 ${contentStatus.filesIndexed.toLocaleString()} 个文档`,
+                      `Indexed ${formatNumber(contentStatus.filesIndexed)} documents`
+                    )
                   : contentStatus.state === "ready" && contentStatusMatchesScope
-                    ? `${contentStatus.filesIndexed.toLocaleString()} 个文档已就绪`
-                    : "需要为所选目录建立内容索引"}
+                    ? ui(
+                        `${contentStatus.filesIndexed.toLocaleString()} 个文档已就绪`,
+                        `${formatNumber(contentStatus.filesIndexed)} documents ready`
+                      )
+                    : ui("需要为所选目录建立内容索引", "Build a content index for the selected directory")}
               </div>
               <div className="scope-actions">
                 <button type="button" className="scope-button" onClick={() => void chooseScope()}>
                   {contentScope === "*" ? <Globe2 size={14} /> : <FolderOpen size={14} />}
                   <span>{scopeLabel}</span>
                 </button>
+                {contentScope !== "*" && (
+                  <button
+                    type="button"
+                    className="scope-clear-button"
+                    title={t("search.clearContentDirectory")}
+                    aria-label={t("search.clearContentDirectory")}
+                    onClick={clearContentScope}
+                  >
+                    <FolderX size={14} />
+                  </button>
+                )}
                 <button
                   type="button"
                   className="index-content-button"
@@ -2173,7 +2255,9 @@ export function SearchView({
                   onClick={() => void beginContentIndex()}
                 >
                   <RefreshCw size={14} className={contentStatus.state === "indexing" ? "spin" : ""} />
-                  {contentStatus.state === "indexing" ? "索引中" : "建立/刷新索引"}
+                  {contentStatus.state === "indexing"
+                    ? ui("索引中", "Indexing")
+                    : ui("建立/刷新索引", "Build / refresh index")}
                 </button>
               </div>
               <div className="content-match-options search-option-toggles">
@@ -2190,7 +2274,7 @@ export function SearchView({
                   }
                 >
                   <span />
-                  正则匹配
+                  {ui("正则匹配", "Regular expression")}
                 </button>
                 <button
                   type="button"
@@ -2203,7 +2287,7 @@ export function SearchView({
                   }
                 >
                   <span />
-                  区分大小写
+                  {ui("区分大小写", "Case sensitive")}
                 </button>
               </div>
               {elapsed != null && (
@@ -2216,41 +2300,47 @@ export function SearchView({
         )}
 
         {filters.regex && (
-          <div className="regex-assistant" aria-label="正则表达式补全助手">
+          <div className="regex-assistant" aria-label={ui("正则表达式补全助手", "Regular expression assistant")}>
             <div className={`regex-validation ${regexValidation.valid ? "valid" : "invalid"}`}>
               <Braces size={16} />
               <div>
                 <strong>
-                  {regexValidation.valid ? "表达式有效" : "正则补全助手"}
+                  {regexValidation.valid
+                    ? ui("表达式有效", "Expression is valid")
+                    : ui("正则补全助手", "Regex assistant")}
                 </strong>
-                <span>{regexValidation.message}</span>
+                <span>{runtimeText(regexValidation.message)}</span>
               </div>
               <small>
-                {filters.caseSensitive ? "区分大小写" : "忽略大小写"} ·{" "}
-                {mode === "content" ? "正文索引" : "文件与目录名称"}
+                {filters.caseSensitive
+                  ? ui("区分大小写", "Case sensitive")
+                  : ui("忽略大小写", "Ignore case")} ·{" "}
+                {mode === "content"
+                  ? ui("正文索引", "Content index")
+                  : ui("文件与目录名称", "File and folder names")}
               </small>
             </div>
             <div className="regex-template-row">
-              <span>常用模板</span>
+              <span>{ui("常用模板", "Templates")}</span>
               {regexTemplates.map((template) => (
                 <ThemedTooltip
-                  content={`${template.description}：${template.pattern}`}
+                  content={`${ui(template.description, template.englishDescription)}: ${template.pattern}`}
                   key={template.name}
                 >
                   <button
                     type="button"
                     onClick={() => useRegexTemplate(template.pattern)}
                   >
-                    {template.name}
+                    {ui(template.name, template.englishName)}
                   </button>
                 </ThemedTooltip>
               ))}
             </div>
             <div className="regex-token-row">
-              <span>在光标处补全</span>
+              <span>{ui("在光标处补全", "Insert at cursor")}</span>
               {regexTokens.map((token) => (
                 <ThemedTooltip
-                  content={`${token.hint}：${token.value}`}
+                  content={`${ui(token.hint, token.englishHint)}: ${token.value}`}
                   key={token.label}
                 >
                   <button
@@ -2258,15 +2348,20 @@ export function SearchView({
                     onClick={() => insertRegexToken(token.value)}
                   >
                     <code>{token.value}</code>
-                    <small>{token.label}</small>
+                    <small>{ui(token.label, token.englishLabel)}</small>
                   </button>
                 </ThemedTooltip>
               ))}
             </div>
             <p>
-              规则速记：<code>.</code> 任意字符，<code>*</code> 零次或多次，
-              <code>+</code> 一次或多次，<code>[]</code> 字符范围，
-              <code>|</code> 表示“或”。为保证线性时间和大索引稳定，不支持前后查找与反向引用。
+              {ui("规则速记：", "Quick reference: ")}<code>.</code> {ui("任意字符，", "any character, ")}
+              <code>*</code> {ui("零次或多次，", "zero or more, ")}
+              <code>+</code> {ui("一次或多次，", "one or more, ")}
+              <code>[]</code> {ui("字符范围，", "character range, ")}
+              <code>|</code> {ui(
+                "表示“或”。为保证线性时间和大索引稳定，不支持前后查找与反向引用。",
+                "means OR. Lookaround and backreferences are disabled to keep large-index searches predictable."
+              )}
             </p>
           </div>
         )}
@@ -2275,84 +2370,89 @@ export function SearchView({
       {query ? (
         <section className="results-panel glass-card">
           <div className="results-head">
-            <span>{loading ? "正在查询…" : resultCountLabel}</span>
+            <span>{loading ? ui("正在查询…", "Searching…") : resultCountLabel}</span>
             {loadingMore && (
               <span className="inline-note lazy-load-note">
-                <span className="spinner tiny" /> 正在加载下一批
+                <span className="spinner tiny" /> {ui("正在加载下一批", "Loading next page")}
               </span>
             )}
             {restoredAt && (
-              <ThemedTooltip content={`保存时间：${restoredAt}`}>
+              <ThemedTooltip content={ui(`保存时间：${restoredAt}`, `Saved at: ${restoredAt}`)}>
                 <span className="inline-note restored-search-state">
-                  <RotateCcw size={12} /> 已恢复上次搜索 · 自动保存
+                  <RotateCcw size={12} /> {ui("已恢复上次搜索 · 自动保存", "Previous search restored · autosaved")}
                 </span>
               </ThemedTooltip>
             )}
             {mode === "name" && directorySizesLoading && (
               <span className="inline-note size-note">
-                <span className="spinner tiny" /> 正在后台计算文件夹占用空间
+                <span className="spinner tiny" /> {ui("正在后台计算文件夹占用空间", "Calculating folder sizes in the background")}
               </span>
             )}
             {mode === "name" && indexer.state !== "ready" && (
               <span className="inline-note">
-                <Info size={13} /> 全盘索引未完成，结果会持续补全
+                <Info size={13} /> {ui("全盘索引未完成，结果会持续补全", "The index is still building; results will keep appearing")}
               </span>
             )}
             {mode === "name" && indexer.state === "ready" && (
               <span className="inline-note live-search-note">
-                <Zap size={12} /> 索引变更实时同步
+                <Zap size={12} /> {ui("索引变更实时同步", "Index changes synchronized live")}
               </span>
             )}
             {mode === "content" && contentStatusMatchesScope && contentStatus.message && (
               <span className="inline-note">
-                <Info size={13} /> {contentStatus.message}
+                <Info size={13} /> {runtimeText(contentStatus.message)}
               </span>
             )}
-            <span className="result-help">单击选中 · 双击打开 · 右键操作 · 拖动表头分隔线调列宽</span>
+            <span className="result-help">{ui(
+              "单击选中 · 双击打开 · 右键操作 · 拖动表头分隔线调列宽",
+              "Click to select · double-click to open · right-click for actions · drag headers to resize"
+            )}</span>
           </div>
           {mode === "name" && !error && displayedResults.length > 0 && (
             <div className="result-columns" style={resultGridStyle}>
               <button type="button" onClick={() => setSort("name")}>
-                名称
+                {ui("名称", "Name")}
                 {filters.sortBy === "name" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-                {columnResizeHandle(0, "名称")}
+                {columnResizeHandle(0, ui("名称", "Name"))}
               </button>
               <button type="button" onClick={() => setSort("path")}>
-                路径
+                {ui("路径", "Path")}
                 {filters.sortBy === "path" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-                {columnResizeHandle(1, "路径")}
+                {columnResizeHandle(1, ui("路径", "Path"))}
               </button>
               <button type="button" onClick={() => setSort("type")}>
-                类型
+                {ui("类型", "Type")}
                 {filters.sortBy === "type" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-                {columnResizeHandle(2, "类型")}
+                {columnResizeHandle(2, ui("类型", "Type"))}
               </button>
               <button type="button" onClick={() => setSort("size")}>
-                大小
+                {ui("大小", "Size")}
                 {filters.sortBy === "size" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-                {columnResizeHandle(3, "大小")}
+                {columnResizeHandle(3, ui("大小", "Size"))}
               </button>
               <button type="button" onClick={() => setSort("modified")}>
-                修改时间
+                {ui("修改时间", "Modified")}
                 {filters.sortBy === "modified" &&
                   (filters.sortDirection === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-                {columnResizeHandle(4, "修改时间")}
+                {columnResizeHandle(4, ui("修改时间", "Modified"))}
               </button>
-              <span>操作</span>
+              <span>{ui("操作", "Actions")}</span>
             </div>
           )}
           {error ? (
             <EmptyState
               icon={<Info size={26} />}
-              title={mode === "content" ? "内容索引尚未就绪" : "搜索暂时不可用"}
+              title={mode === "content"
+                ? ui("内容索引尚未就绪", "Content index is not ready")
+                : ui("搜索暂时不可用", "Search is temporarily unavailable")}
               action={
                 mode === "content" ? (
                   <button className="primary-button small" type="button" onClick={() => void beginContentIndex()}>
-                    <Database size={15} /> 建立内容索引
+                    <Database size={15} /> {ui("建立内容索引", "Build content index")}
                   </button>
                 ) : undefined
               }
@@ -2392,14 +2492,14 @@ export function SearchView({
                       </div>
                       <strong>{item.name}</strong>
                     </div>
-                    <ThemedTooltip content={item.path}>
+                    <ThemedTooltip content={item.path} wrap>
                       <span className="result-path-cell">{item.path}</span>
                     </ThemedTooltip>
-                    <span className="result-type-cell">{categoryLabels[category]}</span>
+                    <span className="result-type-cell">{t(categoryLabels[category])}</span>
                     <strong className="result-size-cell">
                       {item.isDirectory && !directorySize
                         ? directorySizesLoading
-                          ? "计算中…"
+                          ? ui("计算中…", "Calculating…")
                           : "—"
                         : `${directorySize && !directorySize.complete ? "≥ " : ""}${formatBytes(item.size)}`}
                     </strong>
@@ -2407,11 +2507,11 @@ export function SearchView({
                     <div className="result-row-action">
                       {item.isDirectory ? (
                         <>
-                          <ThemedTooltip content="分析这个文件夹归属于哪个应用、用途与迁移风险">
+                          <ThemedTooltip content={ui("分析这个文件夹归属于哪个应用、用途与迁移风险", "Analyze this folder's owning app, purpose, and migration risk")}>
                             <button
                               className="result-quick-action"
                               type="button"
-                              aria-label="分析目录归属"
+                              aria-label={ui("分析目录归属", "Analyze folder ownership")}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 onAnalyze(item.path);
@@ -2420,11 +2520,11 @@ export function SearchView({
                               <Sparkles size={15} />
                             </button>
                           </ThemedTooltip>
-                          <ThemedTooltip content="将这个目录带入可恢复的安全迁移流程">
+                          <ThemedTooltip content={ui("将这个目录带入可恢复的安全迁移流程", "Send this folder to the recoverable migration workflow")}>
                             <button
                               className="result-quick-action migrate"
                               type="button"
-                              aria-label="进入安全迁移"
+                              aria-label={ui("进入安全迁移", "Open safe migration")}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 onMigrate(item.path);
@@ -2435,7 +2535,7 @@ export function SearchView({
                           </ThemedTooltip>
                         </>
                       ) : (
-                        <ThemedTooltip content="使用 Windows 当前默认应用打开文件">
+                        <ThemedTooltip content={ui("使用 Windows 当前默认应用打开文件", "Open with the current Windows default app")}>
                           <button
                             className="open-result-button"
                             type="button"
@@ -2444,7 +2544,7 @@ export function SearchView({
                               void openPath(item.path);
                             }}
                           >
-                            <Play size={14} /> 打开
+                            <Play size={14} /> {ui("打开", "Open")}
                           </button>
                         </ThemedTooltip>
                       )}
@@ -2464,8 +2564,8 @@ export function SearchView({
             <>
               <div className="content-result-columns" role="row">
                 <span aria-hidden="true" />
-                <span>文件 / 路径 / 命中内容</span>
-                <span>大小 / 修改时间</span>
+                <span>{ui("文件 / 路径 / 命中内容", "File / path / matching content")}</span>
+                <span>{ui("大小 / 修改时间", "Size / modified")}</span>
               </div>
               <div
                 className="result-list content-results virtual-result-list"
@@ -2524,10 +2624,10 @@ export function SearchView({
               </div>
             </>
           ) : !loading ? (
-            <EmptyState icon={<Search size={28} />} title="没有找到匹配项">
+            <EmptyState icon={<Search size={28} />} title={ui("没有找到匹配项", "No matching items")}>
               {mode === "name"
-                ? "尝试移除部分组合筛选、缩短关键词或切换到整个电脑。"
-                : "确认内容索引已刷新，或尝试更短的原文片段。"}
+                ? ui("尝试移除部分组合筛选、缩短关键词或切换到整个电脑。", "Remove some filters, shorten the query, or search the entire computer.")
+                : ui("确认内容索引已刷新，或尝试更短的原文片段。", "Refresh the content index or try a shorter source-text fragment.")}
             </EmptyState>
           ) : null}
         </section>
@@ -2538,16 +2638,16 @@ export function SearchView({
             <div className="search-orbit o2" />
             {mode === "name" ? <Search size={34} /> : <FileSearch size={34} />}
           </div>
-          <h2>{mode === "name" ? "整个电脑的名字，输入即出现" : "在指定目录里，搜索文件正文"}</h2>
+          <h2>{mode === "name" ? t("search.emptyNameTitle") : t("search.emptyContentTitle")}</h2>
           <p>
             {mode === "name"
-              ? "文件类型之间可多选，盘符也可多选；类型、范围、大小、日期与名称规则按“且”组合。"
-              : "适合代码仓库、日志目录和文档资料库；先建立一次索引，后续查询即时完成。"}
+              ? ui("文件类型之间可多选，盘符也可多选；类型、范围、大小、日期与名称规则按“且”组合。", "Select multiple file types and drives; type, scope, size, date, and name rules are combined with AND.")
+              : ui("适合代码仓库、日志目录和文档资料库；先建立一次索引，后续查询即时完成。", "Designed for repositories, logs, and document libraries. Build once, then query instantly.")}
           </p>
           <div className="example-chips">
             {(mode === "name"
               ? ["AppData cache", "node_modules", "Tencent", ".log"]
-              : ["error 502", "TODO", "数据库连接", "api_key"]
+              : ["error 502", "TODO", ui("数据库连接", "database connection"), "api_key"]
             ).map((item) => (
               <button type="button" onClick={() => setQuery(item)} key={item}>
                 {item}
@@ -2572,12 +2672,12 @@ export function SearchView({
                   ? bookmarkFolders.find(
                       (folder) => folder.id === bookmarkMenu.folderId
                     )?.name
-                  : "已存搜索管理"}
+                  : ui("已存搜索管理", "Saved search management")}
               </span>
             </div>
             <button type="button" onClick={() => void createBookmarkFolder()}>
               <FolderPlus size={14} />
-              新建书签文件夹
+              {ui("新建书签文件夹", "New saved-search folder")}
             </button>
             {bookmarkMenu.folderId && (
               <>
@@ -2595,7 +2695,7 @@ export function SearchView({
                   }}
                 >
                   <Pencil size={14} />
-                  重命名文件夹
+                  {ui("重命名文件夹", "Rename folder")}
                 </button>
                 <div className="bookmark-context-separator" />
                 <button
@@ -2606,7 +2706,7 @@ export function SearchView({
                   }
                 >
                   <FolderX size={14} />
-                  删除文件夹并移出书签
+                  {ui("删除文件夹并移出书签", "Delete folder and move out saved searches")}
                 </button>
               </>
             )}
@@ -2632,6 +2732,7 @@ export function SearchView({
             setFilters((current) => ({ ...current, extensions: [extension] }));
           }}
           onProperties={setPropertyPath}
+          onForceDelete={setForceDeletePath}
           onDeleted={removeResult}
           onRenamed={renameResult}
           notify={notify}
@@ -2645,6 +2746,14 @@ export function SearchView({
             renameResult(oldPath, newPath);
             setPropertyPath(newPath);
           }}
+          notify={notify}
+        />
+      )}
+      {forceDeletePath && (
+        <ForceDeleteDialog
+          path={forceDeletePath}
+          onClose={() => setForceDeletePath("")}
+          onDeleted={removeResult}
           notify={notify}
         />
       )}

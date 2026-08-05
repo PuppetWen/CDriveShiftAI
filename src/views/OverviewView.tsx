@@ -13,7 +13,8 @@ import {
   Zap
 } from "lucide-react";
 import type { AppSettings, MigrationRecord, SystemOverview, ViewId } from "../types";
-import { formatBytes, formatDate } from "../lib/format";
+import { formatBytes } from "../lib/format";
+import { useI18n } from "../lib/i18n";
 import {
   PathOpenFeedback,
   usePathOpenFeedback
@@ -35,6 +36,7 @@ export function OverviewView({
   onNavigate,
   notify
 }: OverviewProps) {
+  const { t, ui, formatNumber, formatDate } = useI18n();
   const { feedback, openFromDoubleClick, classNameFor } = usePathOpenFeedback(notify);
   const systemDrive =
     overview?.drives.find((drive) => drive.root.toUpperCase() === "C:\\") ?? overview?.drives[0];
@@ -48,12 +50,12 @@ export function OverviewView({
     <div className="page overview-page">
       <PageTitle
         eyebrow="CONTROL CENTER"
-        title="全盘空间，一目了然"
-        description="先找数据，再识别归属。CDriveShiftAI 用可恢复事务把目录迁往任意其他磁盘。"
+        title={t("page.overviewTitle")}
+        description={t("page.overviewDescription")}
         action={
           <button className="primary-button" type="button" onClick={() => onNavigate("search")}>
             <Search size={17} />
-            搜索整个电脑
+            {t("nav.search")}
           </button>
         }
       />
@@ -68,27 +70,27 @@ export function OverviewView({
               <div>
                 <HardDrive size={22} />
                 <strong>C:</strong>
-                <small>{systemDrive?.fileSystem ?? "检测中"}</small>
+                <small>{systemDrive?.fileSystem ?? ui("检测中", "Detecting")}</small>
               </div>
             </div>
           </div>
           <div className="drive-details">
             <div className="card-kicker">
               <span className="live-pulse" />
-              系统盘实时状态
+              {ui("系统盘实时状态", "Live system-drive status")}
             </div>
             {systemDrive ? (
               <>
-                <h2>{formatBytes(systemDrive.freeBytes)} 可用</h2>
+                <h2>{ui(`${formatBytes(systemDrive.freeBytes)} 可用`, `${formatBytes(systemDrive.freeBytes)} available`)}</h2>
                 <p>
-                  已使用 {formatBytes(systemDrive.usedBytes)}，共 {formatBytes(systemDrive.totalBytes)}
+                  {ui(`已使用 ${formatBytes(systemDrive.usedBytes)}，共 ${formatBytes(systemDrive.totalBytes)}`, `${formatBytes(systemDrive.usedBytes)} used of ${formatBytes(systemDrive.totalBytes)}`)}
                 </p>
                 <div className="capacity-bar">
                   <span style={{ width: `${Math.min(100, usedRatio * 100)}%` }} />
                 </div>
                 <div className="capacity-labels">
-                  <span>已使用 {Math.round(usedRatio * 100)}%</span>
-                  <span>建议保留 15% 以上</span>
+                  <span>{ui(`已使用 ${Math.round(usedRatio * 100)}%`, `${Math.round(usedRatio * 100)}% used`)}</span>
+                  <span>{ui("建议保留 15% 以上", "Keep at least 15% free")}</span>
                 </div>
               </>
             ) : (
@@ -108,9 +110,9 @@ export function OverviewView({
               <Sparkles size={19} />
             </div>
             <div>
-              <span>累计释放</span>
+              <span>{ui("累计释放", "Space reclaimed")}</span>
               <strong>{formatBytes(reclaimed)}</strong>
-              <small>{history.filter((record) => record.stage === "linked").length} 个有效迁移</small>
+              <small>{ui(`${history.filter((record) => record.stage === "linked").length} 个有效迁移`, `${formatNumber(history.filter((record) => record.stage === "linked").length)} active migrations`)}</small>
             </div>
           </article>
           <article className="metric-card glass-card">
@@ -118,9 +120,9 @@ export function OverviewView({
               <Database size={19} />
             </div>
             <div>
-              <span>索引条目</span>
-              <strong>{(overview?.indexer.entries ?? 0).toLocaleString()}</strong>
-              <small>查询在本机内存中完成</small>
+              <span>{ui("索引条目", "Indexed entries")}</span>
+              <strong>{formatNumber(overview?.indexer.entries ?? 0)}</strong>
+              <small>{ui("查询在本机内存中完成", "Queries run in local memory")}</small>
             </div>
           </article>
           <article className="metric-card glass-card">
@@ -128,9 +130,9 @@ export function OverviewView({
               <Bot size={19} />
             </div>
             <div>
-              <span>分析引擎</span>
-              <strong>{settings?.ai.enabled ? "本地 + AI" : "本地规则"}</strong>
-              <small>{settings?.ai.enabled ? settings.ai.model : "文件名不会离开设备"}</small>
+              <span>{ui("分析引擎", "Analysis engine")}</span>
+              <strong>{settings?.ai.enabled ? ui("本地 + AI", "Local + AI") : ui("本地规则", "Local rules")}</strong>
+              <small>{settings?.ai.enabled ? settings.ai.model : ui("文件名不会离开设备", "File names stay on this device")}</small>
             </div>
           </article>
         </div>
@@ -140,9 +142,9 @@ export function OverviewView({
         <div className="section-title compact">
           <div>
             <span>LOCAL DRIVES</span>
-            <h2>本机磁盘</h2>
+            <h2>{ui("本机磁盘", "Local drives")}</h2>
           </div>
-          <small>选择任意磁盘搜索、分析；迁移时源盘与目标盘需不同</small>
+          <small>{ui("选择任意磁盘搜索、分析；迁移时源盘与目标盘需不同", "Search or analyze any drive; migrations require different source and destination drives")}</small>
         </div>
         <div className="drive-strip">
           {overview?.drives.map((drive) => {
@@ -156,7 +158,7 @@ export function OverviewView({
                   <div>
                     <strong>{drive.root}</strong>
                     <span>{drive.fileSystem}</span>
-                    <b>{formatBytes(drive.freeBytes)} 可用</b>
+                    <b>{ui(`${formatBytes(drive.freeBytes)} 可用`, `${formatBytes(drive.freeBytes)} available`)}</b>
                   </div>
                   <i>
                     <span style={{ width: `${Math.min(100, ratio * 100)}%` }} />
@@ -175,10 +177,10 @@ export function OverviewView({
         <div className="section-title">
           <div>
             <span>QUICK START</span>
-            <h2>从哪里开始？</h2>
+            <h2>{ui("从哪里开始？", "Where do you want to start?")}</h2>
           </div>
           <Badge tone="good">
-            <ShieldCheck size={13} /> 安全模式已启用
+            <ShieldCheck size={13} /> {ui("安全模式已启用", "Safe mode enabled")}
           </Badge>
         </div>
         <div className="action-grid">
@@ -187,8 +189,8 @@ export function OverviewView({
               <FolderSearch size={22} />
             </div>
             <div>
-              <h3>极速定位大目录</h3>
-              <p>走 MFT/持久化索引，输入即得结果。</p>
+              <h3>{ui("极速定位大目录", "Find large folders quickly")}</h3>
+              <p>{ui("走 MFT/持久化索引，输入即得结果。", "Use the MFT and persistent index for instant results.")}</p>
             </div>
             <ArrowRight size={18} />
           </button>
@@ -197,8 +199,8 @@ export function OverviewView({
               <ScanSearch size={22} />
             </div>
             <div>
-              <h3>识别目录归属</h3>
-              <p>交叉分析应用、路径与文件特征。</p>
+              <h3>{ui("识别目录归属", "Identify folder ownership")}</h3>
+              <p>{ui("交叉分析应用、路径与文件特征。", "Correlate apps, paths, and file characteristics.")}</p>
             </div>
             <ArrowRight size={18} />
           </button>
@@ -207,8 +209,8 @@ export function OverviewView({
               <ArrowRightLeft size={22} />
             </div>
             <div>
-              <h3>创建安全迁移</h3>
-              <p>复制、校验、切换，全程留下事务记录。</p>
+              <h3>{ui("创建安全迁移", "Create a safe migration")}</h3>
+              <p>{ui("复制、校验、切换，全程留下事务记录。", "Copy, verify, and switch with a complete transaction record.")}</p>
             </div>
             <ArrowRight size={18} />
           </button>
@@ -220,18 +222,18 @@ export function OverviewView({
           <div className="section-title compact">
             <div>
               <span>ACTIVITY</span>
-              <h2>最近迁移</h2>
+              <h2>{ui("最近迁移", "Recent migrations")}</h2>
             </div>
             <button className="text-button" type="button" onClick={() => onNavigate("history")}>
-              查看全部 <ArrowRight size={14} />
+              {ui("查看全部", "View all")} <ArrowRight size={14} />
             </button>
           </div>
           {latest.length === 0 ? (
             <div className="quiet-empty">
               <Clock3 size={22} />
               <div>
-                <strong>还没有迁移记录</strong>
-                <span>完成第一次安全迁移后会显示在这里。</span>
+                <strong>{ui("还没有迁移记录", "No migrations yet")}</strong>
+                <span>{ui("完成第一次安全迁移后会显示在这里。", "Your first completed migration will appear here.")}</span>
               </div>
             </div>
           ) : (
@@ -241,7 +243,7 @@ export function OverviewView({
                   className={`activity-row path-openable ${classNameFor(record.source)}`}
                   key={record.id}
                   onDoubleClick={(event) => openFromDoubleClick(event, record.source)}
-                  title="双击打开源目录"
+                  title={ui("双击打开源目录", "Double-click to open the source folder")}
                 >
                   <div className={`activity-icon ${record.stage}`}>
                     <ArrowRightLeft size={16} />
@@ -269,14 +271,14 @@ export function OverviewView({
           </div>
           <div>
             <span className="eyebrow">SAFETY FIRST</span>
-            <h2>任何时候，都能解释发生了什么。</h2>
-            <p>系统路径硬拦截、目标空间余量、逐项校验、崩溃恢复与显式回滚，组成完整保护链。</p>
+            <h2>{ui("任何时候，都能解释发生了什么。", "Every operation remains explainable.")}</h2>
+            <p>{ui("系统路径硬拦截、目标空间余量、逐项校验、崩溃恢复与显式回滚，组成完整保护链。", "Protected paths, free-space checks, item verification, crash recovery, and explicit rollback form one safety chain.")}</p>
             <div className="principle-tags">
               <span>
-                <Zap size={13} /> 原子切换
+                <Zap size={13} /> {ui("原子切换", "Atomic switch")}
               </span>
               <span>
-                <ShieldCheck size={13} /> 可恢复
+                <ShieldCheck size={13} /> {ui("可恢复", "Recoverable")}
               </span>
             </div>
           </div>

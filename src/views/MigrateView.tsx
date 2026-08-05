@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { formatBytes } from "../lib/format";
+import { useI18n } from "../lib/i18n";
 import type { MigrationRecord, PreflightResult } from "../types";
 import { Badge, EmptyState, PageTitle } from "../components/ui";
 
@@ -34,6 +35,7 @@ export function MigrateView({
   onCompleted,
   onAnalyze
 }: MigrateViewProps) {
+  const { t, ui, runtimeText, formatNumber, formatDate } = useI18n();
   const [source, setSource] = useState(initialPath);
   const [destination, setDestination] = useState("");
   const [preflight, setPreflight] = useState<PreflightResult>();
@@ -52,13 +54,17 @@ export function MigrateView({
     () =>
       api.onMigrationProgress((event) => {
         setRecord(event.record);
-        setProgressMessage(event.message);
+        setProgressMessage(runtimeText(event.message));
       }),
-    []
+    [runtimeText]
   );
 
   const browse = async (kind: "source" | "destination") => {
-    const selected = await api.chooseDirectory(kind === "source" ? "选择任意磁盘的源目录" : "选择目标磁盘目录");
+    const selected = await api.chooseDirectory(
+      kind === "source"
+        ? ui("选择任意磁盘的源目录", "Choose a source directory on any drive")
+        : ui("选择目标磁盘目录", "Choose a destination directory")
+    );
     if (!selected) return;
     if (kind === "source") setSource(selected);
     else setDestination(selected);
@@ -69,7 +75,7 @@ export function MigrateView({
 
   const check = async () => {
     if (!source || !destination) {
-      notify("error", "请先选择源目录和目标目录");
+      notify("error", ui("请先选择源目录和目标目录", "Choose both a source and a destination directory"));
       return;
     }
     setChecking(true);
@@ -78,8 +84,8 @@ export function MigrateView({
       setPreflight(value);
       setConsent(false);
       setAcceptStaleAnalysis(false);
-      if (value.allowed) notify("success", "预检通过，可以进入安全迁移");
-      else notify("error", value.blockers[0] ?? "预检未通过");
+      if (value.allowed) notify("success", ui("预检通过，可以进入安全迁移", "Preflight passed; safe migration is ready"));
+      else notify("error", runtimeText(value.blockers[0]) || ui("预检未通过", "Preflight did not pass"));
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
@@ -93,7 +99,7 @@ export function MigrateView({
     try {
       const completed = await api.executeMigration(source, destination);
       setRecord(completed);
-      notify("success", `已释放 ${formatBytes(completed.totalBytes)} 原磁盘空间`);
+      notify("success", ui(`已释放 ${formatBytes(completed.totalBytes)} 原磁盘空间`, `Released ${formatBytes(completed.totalBytes)} on the source drive`));
       await onCompleted();
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
@@ -116,11 +122,11 @@ export function MigrateView({
     <div className="page migrate-page">
       <PageTitle
         eyebrow="TRANSACTIONAL MOVE"
-        title="释放当前磁盘空间，不影响程序使用"
-        description="完整复制与校验通过后才切换路径；失败会恢复原目录，不做半成品迁移。"
+        title={t("page.migrateTitle")}
+        description={t("page.migrateDescription")}
         action={
           <Badge tone="good">
-            <ShieldCheck size={13} /> 安全事务
+            <ShieldCheck size={13} /> {ui("安全事务", "Safe transaction")}
           </Badge>
         }
       />
@@ -130,8 +136,8 @@ export function MigrateView({
           <div className="path-label">
             <span className="number">01</span>
             <div>
-              <strong>源目录</strong>
-              <small>选择希望释放空间的文件夹</small>
+              <strong>{ui("源目录", "Source directory")}</strong>
+              <small>{ui("选择希望释放空间的文件夹", "Choose the folder whose drive space you want to free")}</small>
             </div>
           </div>
           <div className="path-input">
@@ -144,10 +150,10 @@ export function MigrateView({
                 setConsent(false);
                 setAcceptStaleAnalysis(false);
               }}
-              placeholder="任意盘符:\路径\需要迁移的目录"
+              placeholder={ui("任意盘符:\\路径\\需要迁移的目录", "Any drive:\\path\\directory to migrate")}
             />
             <button type="button" onClick={() => void browse("source")}>
-              浏览
+              {ui("浏览", "Browse")}
             </button>
           </div>
         </div>
@@ -159,8 +165,8 @@ export function MigrateView({
           <div className="path-label">
             <span className="number">02</span>
             <div>
-              <strong>目标基础目录</strong>
-              <small>必须与源目录位于不同磁盘</small>
+              <strong>{ui("目标基础目录", "Destination base directory")}</strong>
+              <small>{ui("必须与源目录位于不同磁盘", "Must be on a different drive from the source")}</small>
             </div>
           </div>
           <div className="path-input">
@@ -176,7 +182,7 @@ export function MigrateView({
               placeholder="D:\Data"
             />
             <button type="button" onClick={() => void browse("destination")}>
-              浏览
+              {ui("浏览", "Browse")}
             </button>
           </div>
         </div>
@@ -187,17 +193,17 @@ export function MigrateView({
           onClick={() => void check()}
         >
           {checking ? <span className="spinner light" /> : <SearchCheck size={17} />}
-          {checking ? "正在完整预检…" : "执行迁移预检"}
+          {checking ? ui("正在完整预检…", "Running full preflight…") : ui("执行迁移预检", "Run migration preflight")}
         </button>
       </section>
 
       {!preflight && !record ? (
         <section className="safety-flow">
           {[
-            { icon: Copy, title: "复制", text: "多线程复制到临时目标" },
-            { icon: SearchCheck, title: "校验", text: "核对文件数、目录数和字节数" },
-            { icon: ArrowRightLeft, title: "切换", text: "同目录原子重命名，避免空窗" },
-            { icon: Link2, title: "链接", text: "原路径透明指向新位置" }
+            { icon: Copy, title: ui("复制", "Copy"), text: ui("多线程复制到临时目标", "Copy to a temporary destination in parallel") },
+            { icon: SearchCheck, title: ui("校验", "Verify"), text: ui("核对文件数、目录数和字节数", "Verify file count, directory count, and bytes") },
+            { icon: ArrowRightLeft, title: ui("切换", "Switch"), text: ui("同目录原子重命名，避免空窗", "Atomically rename in place to avoid downtime") },
+            { icon: Link2, title: ui("链接", "Link"), text: ui("原路径透明指向新位置", "Keep the original path pointing to the new location") }
           ].map(({ icon: Icon, title, text }, index) => (
             <div className="flow-step glass-card" key={title}>
               <span>{String(index + 1).padStart(2, "0")}</span>
@@ -213,22 +219,22 @@ export function MigrateView({
             <LockKeyhole size={28} />
           </div>
           <div>
-            <h2>当前配置未通过安全预检</h2>
+            <h2>{ui("当前配置未通过安全预检", "The current configuration did not pass safety preflight")}</h2>
             <ul>
               {preflight.blockers.map((blocker) => (
-                <li key={blocker}>{blocker}</li>
+                <li key={blocker}>{runtimeText(blocker)}</li>
               ))}
             </ul>
             {preflight.reanalysisRecommended && (
               <div className="analysis-change-actions">
-                <p>{preflight.analysisMessage}</p>
+                <p>{runtimeText(preflight.analysisMessage)}</p>
                 {preflight.analysisStatus !== "source-missing" && (
                   <button
                     type="button"
                     className="secondary-button"
                     onClick={() => onAnalyze(source)}
                   >
-                    <Sparkles size={15} /> 重新分析目录
+                    <Sparkles size={15} /> {ui("重新分析目录", "Analyze directory again")}
                   </button>
                 )}
               </div>
@@ -241,36 +247,36 @@ export function MigrateView({
             <div className="card-heading">
               <div>
                 <span>PREFLIGHT PASSED</span>
-                <h3>迁移计划</h3>
+                <h3>{ui("迁移计划", "Migration plan")}</h3>
               </div>
               <CheckCircle2 size={22} className="success-icon" />
             </div>
             <div className="plan-route">
               <div>
-                <span>源</span>
+                <span>{ui("源", "Source")}</span>
                 <strong>{preflight.source}</strong>
               </div>
               <ArrowRight size={17} />
               <div>
-                <span>目标</span>
+                <span>{ui("目标", "Destination")}</span>
                 <strong>{preflight.finalDestination}</strong>
               </div>
             </div>
             <div className="plan-metrics">
               <div>
-                <span>将释放</span>
+                <span>{ui("将释放", "Space to release")}</span>
                 <strong>{formatBytes(preflight.requiredBytes)}</strong>
               </div>
               <div>
-                <span>文件</span>
-                <strong>{preflight.fileCount.toLocaleString()}</strong>
+                <span>{ui("文件", "Files")}</span>
+                <strong>{formatNumber(preflight.fileCount)}</strong>
               </div>
               <div>
-                <span>目录</span>
-                <strong>{preflight.directoryCount.toLocaleString()}</strong>
+                <span>{ui("目录", "Directories")}</span>
+                <strong>{formatNumber(preflight.directoryCount)}</strong>
               </div>
               <div>
-                <span>目标可用</span>
+                <span>{ui("目标可用", "Destination available")}</span>
                 <strong>{formatBytes(preflight.availableBytes)}</strong>
               </div>
             </div>
@@ -281,13 +287,13 @@ export function MigrateView({
                 style={{ "--migration-progress": `${progressPercent}%` } as CSSProperties}
               >
                 <div className="migration-live-head">
-                  <span>{progressMessage || "正在处理"}</span>
+                  <span>{progressMessage || ui("正在处理", "Processing")}</span>
                   <strong>
                     {record.stage === "linked"
-                      ? "完成"
+                      ? ui("完成", "Complete")
                       : record.stage === "failed"
-                        ? "已停止"
-                        : "进行中"}
+                        ? ui("已停止", "Stopped")
+                        : ui("进行中", "In progress")}
                   </strong>
                 </div>
                 <div className="migration-progress-scene" aria-hidden="true">
@@ -306,12 +312,12 @@ export function MigrateView({
                       <span>{index < activeStage || record.stage === "linked" ? <Check size={12} /> : index + 1}</span>
                       <small>
                         {stage === "copying"
-                          ? "复制"
+                          ? ui("复制", "Copy")
                           : stage === "verifying"
-                            ? "校验"
+                            ? ui("校验", "Verify")
                             : stage === "switching"
-                              ? "切换"
-                              : "链接"}
+                              ? ui("切换", "Switch")
+                              : ui("链接", "Link")}
                       </small>
                     </div>
                   ))}
@@ -324,7 +330,7 @@ export function MigrateView({
             <div className="card-heading">
               <div>
                 <span>CONFIRMATION</span>
-                <h3>最终安全确认</h3>
+                <h3>{ui("最终安全确认", "Final safety confirmation")}</h3>
               </div>
               <LockKeyhole size={19} />
             </div>
@@ -334,13 +340,13 @@ export function MigrateView({
                 <div>
                   <strong>
                     {preflight.analysisStatus === "changed"
-                      ? "目录在上次分析后发生了较大变化"
-                      : "缺少可用的已保存分析"}
+                      ? ui("目录在上次分析后发生了较大变化", "The directory changed substantially since the previous analysis")
+                      : ui("缺少可用的已保存分析", "No usable saved analysis is available")}
                   </strong>
-                  <p>{preflight.analysisMessage}</p>
+                  <p>{runtimeText(preflight.analysisMessage)}</p>
                   {preflight.lastAnalyzedAt && (
                     <small>
-                      上次分析：{new Date(preflight.lastAnalyzedAt).toLocaleString("zh-CN")}
+                      {ui("上次分析", "Previous analysis")}: {formatDate(preflight.lastAnalyzedAt)}
                     </small>
                   )}
                   <div>
@@ -349,14 +355,14 @@ export function MigrateView({
                       className="secondary-button"
                       onClick={() => onAnalyze(source)}
                     >
-                      <Sparkles size={14} /> 重新分析
+                      <Sparkles size={14} /> {ui("重新分析", "Analyze again")}
                     </button>
                     <button
                       type="button"
                       className={acceptStaleAnalysis ? "secondary-button active" : "secondary-button"}
                       onClick={() => setAcceptStaleAnalysis(true)}
                     >
-                      <Check size={14} /> 仍使用本次预检
+                      <Check size={14} /> {ui("仍使用本次预检", "Use this preflight anyway")}
                     </button>
                   </div>
                 </div>
@@ -364,11 +370,11 @@ export function MigrateView({
             )}
             <div className="warning-box">
               <AlertTriangle size={17} />
-              <span>开始前请完全退出关联应用。切换成功后，源盘旧副本会删除以实际释放空间。</span>
+              <span>{ui("开始前请完全退出关联应用。切换成功后，源盘旧副本会删除以实际释放空间。", "Close all related applications before starting. After a successful switch, the old source copy is removed to free actual disk space.")}</span>
             </div>
             <ul className="warning-list">
               {preflight.warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
+                <li key={warning}>{runtimeText(warning)}</li>
               ))}
             </ul>
             <label className="consent-row">
@@ -378,7 +384,7 @@ export function MigrateView({
                 onChange={(event) => setConsent(event.target.checked)}
               />
               <span>
-                我已退出关联应用，并理解目标磁盘离线时该目录将不可用。
+                {ui("我已退出关联应用，并理解目标磁盘离线时该目录将不可用。", "I have closed related applications and understand that the directory is unavailable while the destination drive is offline.")}
               </span>
             </label>
             <button
@@ -393,13 +399,17 @@ export function MigrateView({
               onClick={() => void execute()}
             >
               {running ? <span className="spinner light" /> : <ArrowRightLeft size={17} />}
-              {record?.stage === "linked" ? "迁移已完成" : running ? "迁移进行中，请勿关闭…" : "确认并开始安全迁移"}
+              {record?.stage === "linked"
+                ? ui("迁移已完成", "Migration complete")
+                : running
+                  ? ui("迁移进行中，请勿关闭…", "Migration in progress; do not close the application…")
+                  : ui("确认并开始安全迁移", "Confirm and start safe migration")}
             </button>
           </article>
         </section>
       ) : (
-        <EmptyState icon={<ArrowRightLeft size={28} />} title="等待迁移计划">
-          选择路径并执行预检。
+        <EmptyState icon={<ArrowRightLeft size={28} />} title={ui("等待迁移计划", "Waiting for a migration plan")}>
+          {ui("选择路径并执行预检。", "Choose the paths and run preflight.")}
         </EmptyState>
       )}
     </div>

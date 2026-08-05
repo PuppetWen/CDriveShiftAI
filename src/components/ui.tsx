@@ -1,5 +1,6 @@
 import { AlertCircle, CheckCircle2, X } from "lucide-react";
 import type { PropsWithChildren, ReactNode } from "react";
+import { useI18n } from "../lib/i18n";
 
 export function PageTitle({
   eyebrow,
@@ -60,13 +61,14 @@ export function Toasts({
   items: ToastItem[];
   dismiss: (id: number) => void;
 }) {
+  const { ui } = useI18n();
   return (
     <div className="toast-region" aria-live="polite">
       {items.map((item) => (
         <div className={`toast ${item.type}`} key={item.id}>
           {item.type === "success" ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
           <span>{item.message}</span>
-          <button type="button" onClick={() => dismiss(item.id)} aria-label="关闭提示">
+          <button type="button" onClick={() => dismiss(item.id)} aria-label={ui("关闭提示", "Dismiss notification")}>
             <X size={15} />
           </button>
         </div>

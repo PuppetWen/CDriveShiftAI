@@ -1,6 +1,6 @@
 {
   "name": "cdriveshiftai",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": true,
   "description": "CDriveShiftAI - AI-assisted Windows disk organizer and safe cross-drive directory migration tool",
   "main": "dist-electron/main.js",
@@ -20,6 +20,7 @@
     "dist:all": "npm run prepare:electron && npm run build:app && electron-builder --win nsis portable && node scripts/create-update-manifest.mjs",
     "test": "vitest run",
     "test:indexer": "node scripts/smoke-indexer.mjs",
+    "test:force-delete": "npm run build:main && node scripts/smoke-force-delete.mjs",
     "test:index-cache": "node scripts/smoke-index-cache-restart.mjs",
     "test:packaged-index-cache": "node scripts/smoke-packaged-index-cache.mjs",
     "test:background-cpu": "node scripts/smoke-background-cpu.mjs",

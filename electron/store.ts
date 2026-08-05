@@ -20,6 +20,7 @@ import type {
 const defaults: StoreShape = {
   settings: {
     effectMode: "aurora",
+    language: "zh-CN",
     launchAtLogin: false,
     launchMinimized: false,
     minimizeToTray: true,
@@ -293,6 +294,9 @@ function sanitizeUiLayout(value: unknown): UiLayoutState {
   if (typeof input.sidebarCollapsed === "boolean") {
     result.sidebarCollapsed = input.sidebarCollapsed;
   }
+  if (typeof input.sidebarWidth === "number" && Number.isFinite(input.sidebarWidth)) {
+    result.sidebarWidth = Math.max(190, Math.min(360, Math.round(input.sidebarWidth)));
+  }
   if (
     input.searchResultColumnWidths &&
     typeof input.searchResultColumnWidths === "object"
@@ -497,6 +501,26 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
     )
       ? input!.effectMode!
       : defaults.settings.effectMode,
+    language: [
+      "system",
+      "zh-CN",
+      "zh-TW",
+      "en-US",
+      "ja-JP",
+      "ko-KR",
+      "es-ES",
+      "fr-FR",
+      "de-DE",
+      "pt-BR",
+      "ru-RU",
+      "ar-SA",
+      "hi-IN",
+      "id-ID",
+      "it-IT",
+      "tr-TR"
+    ].includes(input?.language ?? "")
+      ? input!.language!
+      : defaults.settings.language,
     globalShortcut:
       typeof input?.globalShortcut === "string"
         ? input.globalShortcut.trim().slice(0, 128)

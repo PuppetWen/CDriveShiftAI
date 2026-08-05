@@ -13,6 +13,7 @@ import {
   FolderOpen,
   KeyRound,
   Keyboard,
+  Languages,
   Laptop,
   LockKeyhole,
   MessageSquareText,
@@ -30,10 +31,22 @@ import {
 import { api } from "../lib/api";
 import { effectDefinitions } from "../lib/effects";
 import { getAiProvider } from "../lib/aiProviders";
-import { bundledReleaseNotes } from "../lib/releaseNotes";
+import {
+  bundledReleaseNotes,
+  bundledReleaseNotesEnglish
+} from "../lib/releaseNotes";
+import {
+  languageName,
+  resolvedLanguage,
+  setAppLanguage,
+  translate,
+  useI18n,
+  type TranslationKey
+} from "../lib/i18n";
 import type {
   AiModelInfo,
   AiTestResult,
+  AppLanguage,
   AppSettings,
   AppUpdateInfo,
   EffectMode,
@@ -46,6 +59,7 @@ import type {
 } from "../types";
 import { AiProviderPicker } from "../components/AiProviderPicker";
 import { AiModelPicker } from "../components/AiModelPicker";
+import { LanguagePicker } from "../components/LanguagePicker";
 import { Badge, PageTitle } from "../components/ui";
 
 interface SettingsViewProps {
@@ -135,12 +149,13 @@ function ShortcutRecorder({
   onCommit,
   onTest
 }: ShortcutRecorderProps) {
+  const { ui, runtimeText } = useI18n();
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<ShortcutCheckResult>({
     available: false,
     active: false,
     shortcut: value,
-    message: "点击输入框并按下组合键"
+    message: ui("点击输入框并按下组合键", "Click the field and press a key combination")
   });
   const [recording, setRecording] = useState(false);
   const duplicate =
@@ -154,7 +169,7 @@ function ShortcutRecorder({
         available: false,
         active: false,
         shortcut: "",
-        message: "未启用；录入组合键后会自动检查冲突"
+        message: ui("未启用；录入组合键后会自动检查冲突", "Disabled; conflicts are checked automatically after recording a shortcut")
       });
       return;
     }
@@ -164,7 +179,7 @@ function ShortcutRecorder({
         available: false,
         active: false,
         shortcut: value,
-        message: "与另一个 CDriveShiftAI 快捷键重复"
+        message: ui("与另一个 CDriveShiftAI 快捷键重复", "Duplicates another CDriveShiftAI shortcut")
       });
       return;
     }
@@ -194,7 +209,7 @@ function ShortcutRecorder({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [duplicate, otherValue, target, value]);
+  }, [duplicate, otherValue, target, ui, value]);
 
   const keys = value
     .split("+")
@@ -221,22 +236,22 @@ function ShortcutRecorder({
         </span>
         <em>
           {checking
-            ? "检查中"
+            ? ui("检查中", "Checking")
             : result.active
-              ? "已启用"
+              ? ui("已启用", "Enabled")
               : result.available
-                ? "可使用"
+                ? ui("可使用", "Available")
                 : value
-                  ? "有冲突"
-                  : "未设置"}
+                  ? ui("有冲突", "Conflict")
+                  : ui("未设置", "Not set")}
         </em>
       </header>
       <div className={recording ? "shortcut-capture recording" : "shortcut-capture"}>
         <input
           value={keys.join(" + ")}
           readOnly
-          aria-label={`${label}快捷键`}
-          placeholder={recording ? "请按下组合键…" : "点击这里录入快捷键"}
+          aria-label={`${label} ${ui("快捷键", "shortcut")}`}
+          placeholder={recording ? ui("请按下组合键…", "Press a key combination…") : ui("点击这里录入快捷键", "Click to record a shortcut")}
           onFocus={() => setRecording(true)}
           onBlur={() => {
             setRecording(false);
@@ -252,7 +267,7 @@ function ShortcutRecorder({
         {value && (
           <button
             type="button"
-            title="清除并禁用此快捷键"
+            title={ui("清除并禁用此快捷键", "Clear and disable this shortcut")}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => {
               onChange("");
@@ -266,7 +281,7 @@ function ShortcutRecorder({
       <footer>
         <span>
           {checking ? <RefreshCw className="spin" size={12} /> : result.available ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
-          {result.message}
+          {runtimeText(result.message)}
         </span>
         <button
           type="button"
@@ -275,7 +290,7 @@ function ShortcutRecorder({
           onClick={onTest}
         >
           {testing ? <span className="spinner" /> : <PlugZap size={13} />}
-          测试唤起
+          {ui("测试唤起", "Test shortcut")}
         </button>
       </footer>
     </article>
@@ -292,6 +307,7 @@ export function SettingsView({
   onSettings,
   notify
 }: SettingsViewProps) {
+  const { locale, t, ui, runtimeText, formatNumber, formatDate } = useI18n();
   const [draft, setDraft] = useState(settings);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
@@ -332,14 +348,20 @@ export function SettingsView({
     updateInfo.latestVersion === bundledReleaseNotes.version ||
     (!updateInfo.updateAvailable &&
       updateInfo.currentVersion === bundledReleaseNotes.version);
-  const releaseSections = updateInfo?.releaseSections?.length
-    ? updateInfo.releaseSections
-    : bundledNotesMatch
-      ? bundledReleaseNotes.sections
+  const localizedBundledReleaseNotes =
+    locale === "zh-CN" ? bundledReleaseNotes : bundledReleaseNotesEnglish;
+  const releaseSections = bundledNotesMatch
+    ? localizedBundledReleaseNotes.sections
+    : updateInfo?.releaseSections?.length
+      ? updateInfo.releaseSections.map((section) => ({
+          title: runtimeText(section.title),
+          items: section.items.map((item) => runtimeText(item))
+        }))
       : [];
   const releaseSummary =
-    updateInfo?.releaseSummary ??
-    (bundledNotesMatch ? bundledReleaseNotes.summary : updateInfo?.releaseName);
+    bundledNotesMatch
+      ? localizedBundledReleaseNotes.summary
+      : runtimeText(updateInfo?.releaseSummary ?? updateInfo?.releaseName);
   const activeReleaseSection =
     releaseSections.find((section) => section.title === activeReleaseModule) ??
     releaseSections[0];
@@ -351,7 +373,11 @@ export function SettingsView({
   useEffect(() => {
     const previous = persistedSettingsRef.current;
     setDraft((current) => {
-      const next = { ...current, effectMode: settings.effectMode };
+      const next = {
+        ...current,
+        effectMode: settings.effectMode,
+        language: settings.language
+      };
       if (previous.launchAtLogin !== settings.launchAtLogin) {
         next.launchAtLogin = settings.launchAtLogin;
       }
@@ -421,6 +447,31 @@ export function SettingsView({
     }
   };
 
+  const chooseLanguage = async (language: AppLanguage) => {
+    if (language === draft.language) return;
+    const previous = draft.language;
+    setDraft((current) => ({ ...current, language }));
+    setAppLanguage(language);
+    try {
+      const updated = await api.updateSettings({ language });
+      onSettings(updated);
+      setDraft((current) => ({ ...current, language: updated.language }));
+      setAppLanguage(updated.language);
+      notify(
+        "success",
+        translate(
+          "settings.languageApplied",
+          { language: languageName(updated.language, updated.language) },
+          updated.language
+        )
+      );
+    } catch (error) {
+      setDraft((current) => ({ ...current, language: previous }));
+      setAppLanguage(previous);
+      notify("error", error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const updateBehaviorSetting = async (
     field: "launchAtLogin" | "launchMinimized" | "minimizeToTray",
     value: boolean
@@ -464,8 +515,8 @@ export function SettingsView({
       notify(
         "success",
         target === "main"
-          ? "主界面快捷键已自动保存并注册"
-          : "独立极速搜索快捷键已自动保存并注册"
+          ? ui("主界面快捷键已自动保存并注册", "The main-window shortcut was saved and registered")
+          : ui("独立极速搜索快捷键已自动保存并注册", "The standalone search shortcut was saved and registered")
       );
     } catch (error) {
       if (request !== shortcutRequests.current[target]) return;
@@ -490,8 +541,8 @@ export function SettingsView({
       notify(
         "success",
         target === "main"
-          ? "主界面快捷键已成功调用"
-          : "独立极速搜索测试窗口已打开"
+          ? ui("主界面快捷键已成功调用", "The main-window shortcut opened successfully")
+          : ui("独立极速搜索测试窗口已打开", "The standalone search test window opened")
       );
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
@@ -518,7 +569,7 @@ export function SettingsView({
         mouseQuickSearchHoldMs: updated.mouseQuickSearchHoldMs
       }));
       setMouseShortcutStatus(await api.getMouseShortcutStatus());
-      notify("success", "鼠标快捷操作已自动保存并立即生效");
+      notify("success", ui("鼠标快捷操作已自动保存并立即生效", "The mouse shortcut was saved and applied immediately"));
     } catch (error) {
       if (request !== mouseShortcutRequest.current) return;
       setDraft((current) => ({
@@ -534,7 +585,7 @@ export function SettingsView({
     setTestingMouseShortcut(true);
     try {
       await api.testMouseShortcut();
-      notify("success", "鼠标快捷操作测试成功，独立极速搜索已打开");
+      notify("success", ui("鼠标快捷操作测试成功，独立极速搜索已打开", "The mouse shortcut test succeeded and standalone search opened"));
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
@@ -656,7 +707,10 @@ export function SettingsView({
       await persistAiDraft(nextAi);
       notify(
         "success",
-        `已从 ${provider.name} 获取 ${result.models.length} 个对话模型（${Math.round(result.latencyMs)} ms）`
+        ui(
+          `已从 ${provider.name} 获取 ${result.models.length} 个对话模型（${Math.round(result.latencyMs)} ms）`,
+          `Fetched ${result.models.length} chat models from ${provider.name} (${Math.round(result.latencyMs)} ms)`
+        )
       );
     } catch (error) {
       setModels([]);
@@ -685,7 +739,10 @@ export function SettingsView({
       setAiSaveState("saved");
       notify(
         "success",
-        `测试对话成功并已启用，耗时 ${Math.round(result.latencyMs)} ms`
+        ui(
+          `测试对话成功并已启用，耗时 ${Math.round(result.latencyMs)} ms`,
+          `The test conversation succeeded and AI was enabled (${Math.round(result.latencyMs)} ms)`
+        )
       );
     } catch (error) {
       setDraft((current) => ({
@@ -719,7 +776,9 @@ export function SettingsView({
       setAiSaveState("saved");
       notify(
         "success",
-        updated.ai.enabled ? "AI 远程分析已启用" : "AI 远程分析已立即关闭"
+        updated.ai.enabled
+          ? ui("AI 远程分析已启用", "Remote AI analysis is enabled")
+          : ui("AI 远程分析已立即关闭", "Remote AI analysis is disabled")
       );
     } catch (error) {
       setAiSaveState("error");
@@ -743,7 +802,7 @@ export function SettingsView({
     setRebuilding(true);
     try {
       await api.rebuildIndex();
-      notify("success", "全盘名称索引已开始刷新");
+      notify("success", ui("全盘名称索引已开始刷新", "The full-drive name index refresh has started"));
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
@@ -755,41 +814,41 @@ export function SettingsView({
     <div className="page settings-page">
       <PageTitle
         eyebrow="PREFERENCES"
-        title="按你的习惯设置 CDriveShiftAI。"
-        description="设置已按功能分组；选择项即时生效，输入项在离开焦点后自动校验并保存。"
+        title={t("page.settingsTitle")}
+        description={t("page.settingsDescription")}
       />
 
-      <nav className="settings-module-nav" aria-label="设置模块">
+      <nav className="settings-module-nav" aria-label={t("settings.navigation")}>
         {[
           {
             id: "update" as const,
-            label: "更新与诊断",
+            label: t("settings.module.update"),
             description: updateInfo?.updateAvailable
-              ? `发现 v${updateInfo.latestVersion}`
-              : "版本、更新包与日志",
+              ? ui(`发现 v${updateInfo.latestVersion}`, `Version v${updateInfo.latestVersion} available`)
+              : t("settings.module.updateDescription"),
             icon: Download,
             tone: updateInfo?.updateAvailable ? "alert" : "mint"
           },
           {
             id: "appearance" as const,
-            label: "界面外观",
-            description: "主题、材质与交互效果",
+            label: t("settings.module.appearance"),
+            description: t("settings.module.appearanceDescription"),
             icon: Palette,
             tone: "purple"
           },
           {
             id: "system" as const,
-            label: "索引与快捷操作",
-            description: "索引、后台与全局唤起",
+            label: t("settings.module.system"),
+            description: t("settings.module.systemDescription"),
             icon: Database,
             tone: "blue"
           },
           {
             id: "ai" as const,
-            label: "AI 服务",
+            label: t("settings.module.ai"),
             description: draft.ai.enabled
-              ? `${provider.name} · ${draft.ai.model || "待选择模型"}`
-              : "厂商、模型与隐私",
+              ? `${provider.name} · ${draft.ai.model || ui("待选择模型", "Choose a model")}`
+              : t("settings.module.aiDescription"),
             icon: Bot,
             tone: "cyan"
           }
@@ -828,8 +887,8 @@ export function SettingsView({
             <Download size={20} />
           </div>
           <div>
-            <h2>应用更新</h2>
-            <p>自动续传、SHA-512 双重校验；失败时保留并恢复旧版本。</p>
+            <h2>{t("settings.updateTitle")}</h2>
+            <p>{t("settings.updateDescription")}</p>
           </div>
           <span
             className={
@@ -843,34 +902,39 @@ export function SettingsView({
         </div>
         <div className="update-status-panel">
           <div>
-            <small>当前版本</small>
-            <strong>v{updateInfo?.currentVersion ?? "0.0.5"}</strong>
+            <small>{t("settings.currentVersion")}</small>
+            <strong>v{updateInfo?.currentVersion ?? bundledReleaseNotes.version}</strong>
           </div>
           <div>
-            <small>最新版本</small>
+            <small>{t("settings.latestVersion")}</small>
             <strong>
-              {updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : "正在获取…"}
+              {updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : t("settings.fetching")}
             </strong>
           </div>
           <div className="update-status-message">
-            <small>状态</small>
+            <small>{t("settings.status")}</small>
             <strong>
-              {updateInfo?.message ?? "打开界面后自动检查，不在后台循环请求"}
+              {runtimeText(updateInfo?.message) || t("settings.updateIdle")}
             </strong>
             {updateInfo?.publishedAt && (
               <span>
                 {updateInfo.distribution === "portable"
-                  ? "便携版原路径替换"
+                  ? t("settings.portableUpdate")
                   : updateInfo.distribution === "installed"
-                    ? "安装版静默更新"
-                    : "开发模式"}{" "}
-                · 发布于 {new Date(updateInfo.publishedAt).toLocaleString()}
+                    ? t("settings.installedUpdate")
+                    : t("settings.developmentMode")}{" "}
+                · {t("settings.publishedAt", {
+                  date: formatDate(updateInfo.publishedAt, {
+                    dateStyle: "medium",
+                    timeStyle: "short"
+                  })
+                })}
               </span>
             )}
             {updateInfo?.network && (
               <span className="update-network-route">
                 <Wifi size={12} />
-                {updateInfo.network.label}
+                {runtimeText(updateInfo.network.label)}
               </span>
             )}
           </div>
@@ -892,7 +956,7 @@ export function SettingsView({
               }}
             >
               <RefreshCw size={15} className={checkingUpdate ? "spin" : ""} />
-              {checkingUpdate ? "检查中…" : "重新检查"}
+              {checkingUpdate ? t("settings.checking") : t("settings.recheck")}
             </button>
             {updateInfo?.canAutoUpdate &&
               updateInfo.updateAvailable &&
@@ -914,8 +978,8 @@ export function SettingsView({
                   <Download size={15} />
                   {updateInfo.phase === "error" ||
                   updateInfo.phase === "cancelled"
-                    ? "续传并重试"
-                    : "下载并自动更新"}
+                    ? t("settings.retryUpdate")
+                    : t("settings.autoUpdate")}
                 </button>
               )}
             {updateInfo?.phase === "downloading" && (
@@ -925,7 +989,7 @@ export function SettingsView({
                 onClick={() => void api.cancelUpdate()}
               >
                 <X size={15} />
-                暂停下载
+                {t("settings.pauseDownload")}
               </button>
             )}
             {updateInfo?.releaseUrl && !updateInfo.canAutoUpdate && (
@@ -935,19 +999,21 @@ export function SettingsView({
                 onClick={() => void api.openExternal(updateInfo.releaseUrl!)}
               >
                 <ExternalLink size={15} />
-                {updateInfo.updateAvailable ? "手动下载" : "查看 Release"}
+                {updateInfo.updateAvailable ? t("settings.manualDownload") : t("settings.viewRelease")}
               </button>
             )}
           </div>
         </div>
         {activeReleaseSection && (
-          <div className="update-release-notes" aria-label="版本更新内容">
+          <div className="update-release-notes" aria-label={t("settings.releaseContent")}>
             <div className="update-release-heading">
               <span className="update-release-title">
                 <Sparkles size={15} />
                 <span>
                   <strong>
-                    {updateInfo?.updateAvailable ? "本次更新" : "当前版本说明"}
+                    {updateInfo?.updateAvailable
+                      ? t("settings.thisUpdate")
+                      : t("settings.currentReleaseNotes")}
                   </strong>
                   <small title={releaseSummary}>
                     {releaseSummary}
@@ -960,13 +1026,13 @@ export function SettingsView({
                   className="update-release-link"
                   onClick={() => void api.openExternal(updateInfo.releaseUrl!)}
                 >
-                  完整说明
+                  {t("settings.fullReleaseNotes")}
                   <ExternalLink size={12} />
                 </button>
               )}
             </div>
             <div className="update-release-body">
-              <div className="update-release-tabs" role="tablist" aria-label="更新模块">
+              <div className="update-release-tabs" role="tablist" aria-label={t("settings.releaseModules")}>
                 {releaseSections.map((section) => (
                   <button
                     type="button"
@@ -1005,24 +1071,24 @@ export function SettingsView({
               <span>
                 <strong>
                   {updateInfo.phase === "downloading"
-                    ? "下载更新包"
+                    ? t("settings.updatePhase.download")
                     : updateInfo.phase === "verifying"
-                      ? "验证更新包"
+                      ? t("settings.updatePhase.verify")
                       : updateInfo.phase === "ready"
-                        ? "准备替换"
+                        ? t("settings.updatePhase.prepare")
                         : updateInfo.phase === "installing"
-                          ? "安全更新"
+                          ? t("settings.updatePhase.install")
                           : updateInfo.phase === "cancelled"
-                            ? "下载已暂停"
-                            : "更新未完成"}
+                            ? t("settings.updatePhase.paused")
+                            : t("settings.updatePhase.failed")}
                 </strong>
-                <small>{updateInfo.selectedAsset?.name ?? "CDriveShiftAI 更新包"}</small>
+                <small>{updateInfo.selectedAsset?.name ?? t("settings.updatePackage")}</small>
               </span>
               <strong>
                 {updateInfo.progress
                   ? `${updateInfo.progress.percent.toFixed(1)}%`
                   : updateInfo.phase === "installing"
-                    ? "即将重启"
+                    ? t("settings.updateRestart")
                     : "—"}
               </strong>
             </div>
@@ -1041,7 +1107,13 @@ export function SettingsView({
               />
             </div>
             <div className="update-progress-stages">
-              {["下载", "校验", "备份", "替换", "清理"].map((stage, index) => {
+              {[
+                t("settings.updateStage.download"),
+                t("settings.updateStage.verify"),
+                t("settings.updateStage.backup"),
+                t("settings.updateStage.replace"),
+                t("settings.updateStage.cleanup")
+              ].map((stage, index) => {
                 const phaseIndex = updateStageIndex(updateInfo.phase);
                 return (
                   <span className={index <= phaseIndex ? "active" : ""} key={stage}>
@@ -1065,15 +1137,17 @@ export function SettingsView({
                     {formatUpdateBytes(updateInfo.progress.bytesPerSecond)}/s
                   </span>
                   <span>
-                    尝试 {updateInfo.progress.retryAttempt}/
-                    {updateInfo.progress.maxRetries}
+                    {t("settings.updateAttempt", {
+                      current: updateInfo.progress.retryAttempt,
+                      total: updateInfo.progress.maxRetries
+                    })}
                   </span>
                 </>
               )}
               {updateInfo.phase === "verifying" && (
                 <span className="update-verifying">
                   <ShieldCheck size={13} />
-                  正在执行 SHA-512 校验
+                  {t("settings.shaVerifying")}
                 </span>
               )}
             </div>
@@ -1087,11 +1161,11 @@ export function SettingsView({
           }
         >
           <span>
-            <strong>运行诊断</strong>
+            <strong>{t("settings.diagnosticsTitle")}</strong>
             <small>
               {updateInfo?.phase === "error"
-                ? "更新失败已写入日志；导出报告发给开发者即可定位环境与权限问题。"
-                : "本地记录崩溃、更新和索引生命周期；不会写入 API Key、搜索词或文件正文。"}
+                ? t("settings.diagnosticsError")
+                : t("settings.diagnosticsDescription")}
             </small>
           </span>
           <button
@@ -1104,7 +1178,7 @@ export function SettingsView({
             }}
           >
             <FolderOpen size={14} />
-            打开日志目录
+            {t("settings.openLogs")}
           </button>
           <button
             type="button"
@@ -1116,7 +1190,7 @@ export function SettingsView({
                 .exportDiagnosticReport()
                 .then((result) => {
                   if (!result.cancelled) {
-                    notify("success", `诊断报告已导出：${result.path ?? "已保存"}`);
+                    notify("success", `${ui("诊断报告已导出", "Diagnostic report exported")}: ${result.path ?? ui("已保存", "Saved")}`);
                   }
                 })
                 .catch((error) =>
@@ -1126,21 +1200,47 @@ export function SettingsView({
             }}
           >
             {exportingDiagnostics ? <span className="spinner" /> : <FileJson size={14} />}
-            {exportingDiagnostics ? "正在整理…" : "导出诊断报告"}
+            {exportingDiagnostics
+              ? t("settings.exportingDiagnostics")
+              : t("settings.exportDiagnostics")}
           </button>
         </div>
       </section>
       )}
 
       {activeModule === "appearance" && (
-      <section className="settings-section glass-card settings-module-panel">
+      <div className="settings-appearance-stack settings-module-panel">
+      <section className="settings-section glass-card language-settings-card">
+        <div className="settings-section-head">
+          <div className="settings-icon cyan">
+            <Languages size={20} />
+          </div>
+          <div>
+            <h2>{t("settings.languageTitle")}</h2>
+            <p>{t("settings.languageDescription")}</p>
+          </div>
+          <span className="language-count-badge">{t("settings.languageCount")}</span>
+        </div>
+        <div className="language-settings-body">
+          <LanguagePicker value={draft.language} onChange={(language) => void chooseLanguage(language)} />
+          <div className="language-settings-notes">
+            <span>
+              {t("settings.languageSystem", {
+                language: languageName(resolvedLanguage("system"), draft.language)
+              })}
+            </span>
+            <span>{t("settings.languageFallback")}</span>
+          </div>
+        </div>
+      </section>
+      <section className="settings-section glass-card">
         <div className="settings-section-head">
           <div className="settings-icon purple">
             <Palette size={20} />
           </div>
           <div>
-            <h2>视觉特效</h2>
-            <p>三套完整背景与材质效果，可即时切换。</p>
+            <h2>{t("settings.appearanceTitle")}</h2>
+            <p>{t("settings.appearanceDescription")}</p>
           </div>
         </div>
         <div className="effect-cards">
@@ -1158,14 +1258,15 @@ export function SettingsView({
                 <span />
               </div>
               <div>
-                <strong>{effect.title}</strong>
-                <small>{effect.subtitle}</small>
+                <strong>{t(`effect.${effect.id}.title` as TranslationKey)}</strong>
+                <small>{t(`effect.${effect.id}.subtitle` as TranslationKey)}</small>
               </div>
               <span className="radio-mark" />
             </button>
           ))}
         </div>
       </section>
+      </div>
       )}
 
       {activeModule === "system" && (
@@ -1176,8 +1277,8 @@ export function SettingsView({
               <Database size={20} />
             </div>
             <div>
-              <h2>全盘名称索引</h2>
-              <p>自研 MFT 快速通道与并行扫描降级。</p>
+              <h2>{ui("全盘名称索引", "Full-drive name index")}</h2>
+              <p>{ui("自研 MFT 快速通道与并行扫描降级。", "First-party MFT fast path with parallel-scan fallback.")}</p>
             </div>
           </div>
           <div className="index-settings-controls">
@@ -1185,8 +1286,8 @@ export function SettingsView({
               <div>
                 <span className={indexer.state === "ready" ? "status-dot online" : "status-dot"} />
                 <div>
-                  <strong>{indexer.state === "ready" ? "索引可用" : "索引处理中"}</strong>
-                  <small>{indexer.message || `${indexer.entries.toLocaleString()} 个条目`}</small>
+                  <strong>{indexer.state === "ready" ? ui("索引可用", "Index ready") : ui("索引处理中", "Indexing")}</strong>
+                  <small>{runtimeText(indexer.message) || `${formatNumber(indexer.entries)} ${ui("个条目", "entries")}`}</small>
                 </div>
               </div>
               <Badge tone={["mft", "cached"].includes(indexer.mode) ? "good" : "warn"}>
@@ -1195,11 +1296,11 @@ export function SettingsView({
             </div>
             <button className="secondary-button" type="button" disabled={rebuilding} onClick={() => void rebuild()}>
               <RefreshCw size={15} className={rebuilding ? "spin" : ""} />
-              {rebuilding ? "正在启动刷新…" : "重新扫描所有磁盘"}
+              {rebuilding ? ui("正在启动刷新…", "Starting refresh…") : ui("重新扫描所有磁盘", "Rescan all drives")}
             </button>
             <div className="setting-note">
               <ShieldCheck size={15} />
-              <span>名称索引仅保存路径与基础元数据；指定目录全文索引独立存储。</span>
+              <span>{ui("名称索引仅保存路径与基础元数据；指定目录全文索引独立存储。", "The name index stores only paths and basic metadata; selected-directory content indexes are stored separately.")}</span>
             </div>
           </div>
         </article>
@@ -1210,15 +1311,15 @@ export function SettingsView({
               <Laptop size={20} />
             </div>
             <div>
-              <h2>应用行为</h2>
-              <p>控制登录启动与后台行为。</p>
+              <h2>{ui("应用行为", "Application behavior")}</h2>
+              <p>{ui("控制登录启动与后台行为。", "Control login startup and background behavior.")}</p>
             </div>
           </div>
           <div className="behavior-setting-grid">
           <label className="setting-row">
             <div>
-              <strong>登录时启动</strong>
-              <small>登录 Windows 后准备名称索引</small>
+              <strong>{ui("登录时启动", "Launch at login")}</strong>
+              <small>{ui("登录 Windows 后准备名称索引", "Prepare the name index after signing in to Windows")}</small>
             </div>
             <input
               type="checkbox"
@@ -1234,8 +1335,8 @@ export function SettingsView({
           </label>
           <label className={`setting-row ${!draft.launchAtLogin ? "is-disabled" : ""}`}>
             <div>
-              <strong>开机启动后最小化</strong>
-              <small>仅在 Windows 登录自动启动时直接进入托盘，不打开主窗口</small>
+              <strong>{ui("开机启动后最小化", "Start minimized at login")}</strong>
+              <small>{ui("仅在 Windows 登录自动启动时直接进入托盘，不打开主窗口", "When launched automatically at login, go directly to the tray without opening the main window")}</small>
             </div>
             <input
               type="checkbox"
@@ -1252,8 +1353,8 @@ export function SettingsView({
           </label>
           <label className="setting-row">
             <div>
-              <strong>关闭时最小化</strong>
-              <small>保持索引服务在后台可用</small>
+              <strong>{ui("关闭时最小化", "Minimize on close")}</strong>
+              <small>{ui("保持索引服务在后台可用", "Keep the index service available in the background")}</small>
             </div>
             <input
               type="checkbox"
@@ -1272,14 +1373,14 @@ export function SettingsView({
             <div className="shortcut-settings-head">
               <Keyboard size={15} />
               <span>
-                <strong>全局快捷键</strong>
-                <small>录入后自动检查 Windows 和其他程序是否已占用</small>
+                <strong>{ui("全局快捷键", "Global shortcuts")}</strong>
+                <small>{ui("录入后自动检查 Windows 和其他程序是否已占用", "Automatically check whether Windows or another application already uses the shortcut")}</small>
               </span>
             </div>
             <div className="shortcut-recorder-grid">
             <ShortcutRecorder
-              label="打开主界面"
-              description="从任意程序唤起 CDriveShiftAI"
+              label={ui("打开主界面", "Open main window")}
+              description={ui("从任意程序唤起 CDriveShiftAI", "Open CDriveShiftAI from any application")}
               target="main"
               value={draft.globalShortcut}
               otherValue={draft.quickSearchShortcut}
@@ -1291,8 +1392,8 @@ export function SettingsView({
               onTest={() => void testShortcut("main")}
             />
             <ShortcutRecorder
-              label="独立极速搜索"
-              description="全局组合键唤起完整功能的独立搜索窗口"
+              label={ui("独立极速搜索", "Standalone fast search")}
+              description={ui("全局组合键唤起完整功能的独立搜索窗口", "Open the full standalone search window with a global shortcut")}
               target="quick-search"
               value={draft.quickSearchShortcut}
               otherValue={draft.globalShortcut}
@@ -1309,8 +1410,8 @@ export function SettingsView({
                 <span>
                   <MousePointer2 size={15} />
                   <span>
-                    <strong>鼠标快捷操作</strong>
-                    <small>选择鼠标按键和长按时长，达到阈值后唤起极速搜索</small>
+                    <strong>{ui("鼠标快捷操作", "Mouse shortcut")}</strong>
+                    <small>{ui("选择鼠标按键和长按时长，达到阈值后唤起极速搜索", "Choose a mouse button and hold duration to open fast search")}</small>
                   </span>
                 </span>
                 <em
@@ -1323,15 +1424,15 @@ export function SettingsView({
                   }
                 >
                   {draft.mouseQuickSearchButton === "disabled"
-                    ? "已关闭"
+                    ? ui("已关闭", "Disabled")
                     : mouseShortcutStatus?.available
-                      ? "监听可用"
-                      : "监听不可用"}
+                      ? ui("监听可用", "Listener available")
+                      : ui("监听不可用", "Listener unavailable")}
                 </em>
               </header>
               <div className="mouse-shortcut-controls">
                 <label>
-                  <span>触发按键</span>
+                  <span>{ui("触发按键", "Trigger button")}</span>
                   <select
                     value={draft.mouseQuickSearchButton}
                     onChange={(event) =>
@@ -1341,14 +1442,14 @@ export function SettingsView({
                       })
                     }
                   >
-                    <option value="disabled">关闭鼠标触发</option>
-                    <option value="back">后退侧键</option>
-                    <option value="forward">前进侧键</option>
-                    <option value="middle">中键</option>
+                    <option value="disabled">{ui("关闭鼠标触发", "Disable mouse trigger")}</option>
+                    <option value="back">{ui("后退侧键", "Back side button")}</option>
+                    <option value="forward">{ui("前进侧键", "Forward side button")}</option>
+                    <option value="middle">{ui("中键", "Middle button")}</option>
                   </select>
                 </label>
                 <label>
-                  <span>长按时长</span>
+                  <span>{ui("长按时长", "Hold duration")}</span>
                   <div className="mouse-hold-input">
                     <input
                       type="number"
@@ -1373,7 +1474,7 @@ export function SettingsView({
                         })
                       }
                     />
-                    <span>秒</span>
+                    <span>{ui("秒", "seconds")}</span>
                   </div>
                 </label>
                 <button
@@ -1391,7 +1492,7 @@ export function SettingsView({
                   ) : (
                     <PlugZap size={13} />
                   )}
-                  测试唤起
+                  {ui("测试唤起", "Test trigger")}
                 </button>
               </div>
               <footer>
@@ -1401,13 +1502,13 @@ export function SettingsView({
                   ) : (
                     <AlertCircle size={12} />
                   )}
-                  {mouseShortcutStatus?.message ??
-                    "正在检查 Windows Raw Input 全局监听"}
+                  {runtimeText(mouseShortcutStatus?.message) ||
+                    ui("正在检查 Windows Raw Input 全局监听", "Checking the Windows Raw Input global listener")}
                 </span>
-                <small>被动监听不会拦截短按，原有前进、后退或中键功能保持不变。</small>
+                <small>{ui("被动监听不会拦截短按，原有前进、后退或中键功能保持不变。", "Passive listening does not block short clicks; the original forward, back, or middle-button behavior remains unchanged.")}</small>
               </footer>
             </article>
-            <p>点击录入框后直接按下组合键；离开输入框时自动检查、保存并注册。Backspace 或右侧清除按钮可禁用。</p>
+            <p>{ui("点击录入框后直接按下组合键；离开输入框时自动检查、保存并注册。Backspace 或右侧清除按钮可禁用。", "Click a recorder and press the key combination. Leaving the field checks, saves, and registers it automatically. Press Backspace or use the clear button to disable it.")}</p>
           </div>
         </article>
       </section>
@@ -1420,8 +1521,8 @@ export function SettingsView({
             <Bot size={20} />
           </div>
           <div>
-            <h2>AI 服务与模型</h2>
-            <p>厂商和隐私选项即时保存，URL、Key 与模型在离开输入框后保存；测试成功后自动启用。</p>
+            <h2>{ui("AI 服务与模型", "AI services and models")}</h2>
+            <p>{ui("厂商和隐私选项即时保存，URL、Key 与模型在离开输入框后保存；测试成功后自动启用。", "Provider and privacy choices save immediately. URL, key, and model save when focus leaves the field; a successful test enables the service.")}</p>
           </div>
           <label className="ai-master">
             <input
@@ -1431,16 +1532,16 @@ export function SettingsView({
               onChange={(event) => void setAiEnabled(event.target.checked)}
             />
             <span className="toggle" />
-            {draft.ai.enabled ? "已启用" : "未启用"}
+            {draft.ai.enabled ? ui("已启用", "Enabled") : ui("未启用", "Disabled")}
           </label>
         </div>
 
-        <div className="ai-setup-steps" aria-label="AI 配置流程">
+        <div className="ai-setup-steps" aria-label={ui("AI 配置流程", "AI setup flow")}>
           {[
-            ["1", "选择厂商", Boolean(draft.ai.provider)],
-            ["2", "获取模型", models.length > 0 || savedConnectionUnchanged],
-            ["3", "测试对话", Boolean(aiTest) || savedConnectionUnchanged],
-            ["4", "自动保存并启用", Boolean(settings.ai.enabled && settings.ai.verifiedAt)]
+            ["1", ui("选择厂商", "Choose provider"), Boolean(draft.ai.provider)],
+            ["2", ui("获取模型", "Fetch models"), models.length > 0 || savedConnectionUnchanged],
+            ["3", ui("测试对话", "Test conversation"), Boolean(aiTest) || savedConnectionUnchanged],
+            ["4", ui("自动保存并启用", "Save and enable"), Boolean(settings.ai.enabled && settings.ai.verifiedAt)]
           ].map(([number, label, complete]) => (
             <div className={complete ? "complete" : ""} key={String(number)}>
               <span>{complete ? <CheckCircle2 size={13} /> : number}</span>
@@ -1463,21 +1564,21 @@ export function SettingsView({
             </div>
             <label className="provider-select">
               <span>
-                <Server size={14} /> 大模型厂商
+                <Server size={14} /> {ui("大模型厂商", "Model provider")}
               </span>
               <AiProviderPicker
                 value={draft.ai.provider}
                 onChange={chooseProvider}
               />
-              <small>{provider.description}</small>
+              <small>{ui(provider.description, `${provider.name} API service`)}</small>
             </label>
             <div className="protocol-badge">
               <Wifi size={13} />
               {draft.ai.protocol === "openai-compatible"
-                ? "OpenAI 兼容"
+                ? ui("OpenAI 兼容", "OpenAI compatible")
                 : draft.ai.protocol === "anthropic"
-                  ? "Anthropic 原生"
-                  : "Gemini 原生"}
+                  ? ui("Anthropic 原生", "Native Anthropic")
+                  : ui("Gemini 原生", "Native Gemini")}
             </div>
           </div>
 
@@ -1508,13 +1609,13 @@ export function SettingsView({
                 placeholder="https://provider.example/v1"
                 spellCheck={false}
               />
-              <small>预设地址可以修改，适用于专属域名、代理网关或局域网服务。</small>
+              <small>{ui("预设地址可以修改，适用于专属域名、代理网关或局域网服务。", "You can change the preset URL for custom domains, proxy gateways, or LAN services.")}</small>
             </label>
 
             <label className="ai-key-field">
               <span>
                 <KeyRound size={14} /> API Key
-                {useSavedKey && <em>正在复用已加密 Key</em>}
+                {useSavedKey && <em>{ui("正在复用已加密 Key", "Using the encrypted saved key")}</em>}
               </span>
               <div className="secret-input">
                 <input
@@ -1539,10 +1640,10 @@ export function SettingsView({
                   }}
                   placeholder={
                     useSavedKey
-                      ? "已由 Windows 安全存储加密；留空继续使用"
+                      ? ui("已由 Windows 安全存储加密；留空继续使用", "Encrypted by Windows secure storage; leave blank to keep using it")
                       : provider.requiresKey
-                        ? "输入该厂商的 API Key"
-                        : "本地服务通常可以留空"
+                        ? ui("输入该厂商的 API Key", "Enter this provider's API key")
+                        : ui("本地服务通常可以留空", "Local services can usually leave this blank")
                   }
                   autoComplete="new-password"
                   spellCheck={false}
@@ -1550,24 +1651,24 @@ export function SettingsView({
                 <button
                   type="button"
                   onClick={() => setShowApiKey((value) => !value)}
-                  aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
+                  aria-label={showApiKey ? ui("隐藏 API Key", "Hide API key") : ui("显示 API Key", "Show API key")}
                 >
                   {showApiKey ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
               </div>
-              <small>Key 只在主进程请求时使用，保存后由 Windows 安全存储加密。</small>
+              <small>{ui("Key 只在主进程请求时使用，保存后由 Windows 安全存储加密。", "The key is used only for requests in the main process and is encrypted by Windows secure storage after saving.")}</small>
             </label>
           </div>
 
           <div className="ai-model-discovery">
             <div>
               <span>
-                <Sparkles size={14} /> 远程模型
+                <Sparkles size={14} /> {ui("远程模型", "Remote model")}
               </span>
               <strong>
                 {models.length > 0
-                  ? `已获取 ${models.length} 个可用模型`
-                  : "先连接厂商接口获取可用模型"}
+                  ? ui(`已获取 ${models.length} 个可用模型`, `${models.length} models available`)
+                  : ui("先连接厂商接口获取可用模型", "Connect to the provider to fetch available models")}
               </strong>
             </div>
             <AiModelPicker
@@ -1575,8 +1676,8 @@ export function SettingsView({
               value={draft.ai.model}
               placeholder={
                 models.length > 0
-                  ? "选择远程模型，或输入模型 ID"
-                  : "获取列表失败时可手动输入模型 ID"
+                  ? ui("选择远程模型，或输入模型 ID", "Choose a remote model or enter a model ID")
+                  : ui("获取列表失败时可手动输入模型 ID", "Enter a model ID manually if fetching the list fails")
               }
               onChange={(model) => {
                 setDraft((current) => ({
@@ -1610,7 +1711,7 @@ export function SettingsView({
               ) : (
                 <RefreshCw size={14} />
               )}
-              {fetchingModels ? "正在获取…" : "获取/刷新模型"}
+              {fetchingModels ? ui("正在获取…", "Fetching…") : ui("获取/刷新模型", "Fetch / refresh models")}
             </button>
           </div>
 
@@ -1624,17 +1725,17 @@ export function SettingsView({
               <span>
                 <strong>
                   {aiTest
-                    ? "测试对话成功"
+                    ? ui("测试对话成功", "Test conversation succeeded")
                     : savedConnectionUnchanged
-                      ? "当前连接此前已验证"
-                      : "尚未进行测试对话"}
+                      ? ui("当前连接此前已验证", "This connection was previously verified")
+                      : ui("尚未进行测试对话", "No test conversation has been run")}
                 </strong>
                 <small>
                   {aiTest
                     ? `${aiTest.model} · ${Math.round(aiTest.latencyMs)} ms · ${aiTest.reply}`
                     : savedConnectionUnchanged
                       ? `${settings.ai.model} · ${settings.ai.verifiedAt ? new Date(settings.ai.verifiedAt).toLocaleString() : ""}`
-                      : "测试会向所选模型发送一句最小文本，不包含任何磁盘信息。"}
+                      : ui("测试会向所选模型发送一句最小文本，不包含任何磁盘信息。", "The test sends one minimal text prompt to the selected model and includes no disk information.")}
                 </small>
               </span>
             </div>
@@ -1649,21 +1750,21 @@ export function SettingsView({
               onClick={() => void testAi()}
             >
               {testingAi ? <span className="spinner light" /> : <PlugZap size={15} />}
-              {testingAi ? "测试并保存中…" : "测试并启用"}
+              {testingAi ? ui("测试并保存中…", "Testing and saving…") : ui("测试并启用", "Test and enable")}
             </button>
           </div>
 
           {!draft.ai.enabled && (
             <div className="ai-disabled-note">
               <AlertCircle size={14} />
-              远程 AI 当前关闭；本地归属规则仍然正常工作。
+              {ui("远程 AI 当前关闭；本地归属规则仍然正常工作。", "Remote AI is currently disabled; local ownership rules continue to work.")}
             </div>
           )}
 
           <div className="ai-settings-footer">
             <div className="privacy-choice">
             <span>
-              <EyeOff size={14} /> 发送范围
+              <EyeOff size={14} /> {ui("发送范围", "Data sent")}
             </span>
             <button
               type="button"
@@ -1671,7 +1772,7 @@ export function SettingsView({
               onClick={() => choosePrivacyMode("metadata-only")}
             >
               <LockKeyhole size={14} />
-              仅脱敏元数据
+              {ui("仅脱敏元数据", "Redacted metadata only")}
             </button>
             <button
               type="button"
@@ -1679,7 +1780,7 @@ export function SettingsView({
               onClick={() => choosePrivacyMode("allow-samples")}
             >
               <Cloud size={14} />
-              允许名称样本
+              {ui("允许名称样本", "Allow name samples")}
             </button>
             </div>
             <div className={`ai-autosave-status ${aiSaveState}`}>
@@ -1692,10 +1793,10 @@ export function SettingsView({
               )}
               <span>
                 {aiSaveState === "saving"
-                  ? "正在自动保存"
+                  ? ui("正在自动保存", "Saving automatically")
                   : aiSaveState === "error"
-                    ? "自动保存失败"
-                    : "配置自动保存"}
+                    ? ui("自动保存失败", "Autosave failed")
+                    : ui("配置自动保存", "Configuration autosaved")}
               </span>
             </div>
           </div>

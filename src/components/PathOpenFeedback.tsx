@@ -6,6 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent
 } from "react";
 import { api } from "../lib/api";
+import { useI18n } from "../lib/i18n";
 
 type OpenPhase = "opening" | "opened" | "error";
 
@@ -87,13 +88,14 @@ export function PathOpenFeedback({
   path: string;
   feedback?: OpenFeedback;
 }) {
+  const { ui } = useI18n();
   if (!feedback || feedback.path !== path) return null;
   const label =
     feedback.phase === "opening"
-      ? "正在交给 Windows 打开"
+      ? ui("正在交给 Windows 打开", "Opening with Windows")
       : feedback.phase === "opened"
-        ? "已打开"
-        : "打开失败";
+        ? ui("已打开", "Opened")
+        : ui("打开失败", "Open failed");
   return (
     <span
       className={`path-open-feedback ${feedback.phase}`}

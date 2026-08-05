@@ -22,7 +22,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../lib/api";
-import { formatBytes, formatDate } from "../lib/format";
+import { useI18n } from "../lib/i18n";
+import { formatBytes } from "../lib/format";
 import type { PathProperties } from "../types";
 
 interface PathPropertiesDialogProps {
@@ -49,16 +50,21 @@ function clampPosition(position: { x: number; y: number }) {
   };
 }
 
-function propertyType(value: PathProperties) {
+function propertyType(value: PathProperties, ui: (zh: string, en: string) => string) {
   if (value.isSymbolicLink) {
-    return value.isDirectory ? "目录符号链接" : "文件符号链接";
+    return value.isDirectory
+      ? ui("目录符号链接", "Directory symbolic link")
+      : ui("文件符号链接", "File symbolic link");
   }
-  if (value.isDirectory) return "文件夹";
-  return value.extension ? `${value.extension.toUpperCase()} 文件` : "文件";
+  if (value.isDirectory) return ui("文件夹", "Folder");
+  return value.extension
+    ? ui(`${value.extension.toUpperCase()} 文件`, `${value.extension.toUpperCase()} file`)
+    : ui("文件", "File");
 }
 
 function DateValue({ value }: { value?: string }) {
-  return <span>{value ? formatDate(value) : "无可用记录"}</span>;
+  const { ui, formatDate } = useI18n();
+  return <span>{value ? formatDate(value) : ui("无可用记录", "No record available")}</span>;
 }
 
 export function PathPropertiesDialog({
@@ -67,6 +73,7 @@ export function PathPropertiesDialog({
   onRenamed,
   notify
 }: PathPropertiesDialogProps) {
+  const { ui, formatNumber } = useI18n();
   const [activePath, setActivePath] = useState(path);
   const [properties, setProperties] = useState<PathProperties>();
   const [error, setError] = useState("");
@@ -119,9 +126,12 @@ export function PathPropertiesDialog({
   }, [onClose]);
 
   useEffect(() => {
-    const move = (event: MouseEvent) => {
+    const move = (event: MouseEvent | PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
+      if (event instanceof PointerEvent && drag.pointerId >= 0 && event.pointerId !== drag.pointerId) {
+        return;
+      }
       setPosition(
         clampPosition({
           x: drag.originX + event.clientX - drag.startX,
@@ -129,14 +139,30 @@ export function PathPropertiesDialog({
         })
       );
     };
-    const finish = () => {
+    const finish = (pointerId?: number) => {
+      if (
+        pointerId != null &&
+        dragRef.current &&
+        dragRef.current.pointerId >= 0 &&
+        dragRef.current.pointerId !== pointerId
+      ) {
+        return;
+      }
       dragRef.current = undefined;
     };
+    const finishPointer = (event: PointerEvent) => finish(event.pointerId);
+    const finishMouse = () => finish();
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", finishPointer, true);
+    window.addEventListener("pointercancel", finishPointer, true);
     window.addEventListener("mousemove", move, true);
-    window.addEventListener("mouseup", finish, true);
+    window.addEventListener("mouseup", finishMouse, true);
     return () => {
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", finishPointer, true);
+      window.removeEventListener("pointercancel", finishPointer, true);
       window.removeEventListener("mousemove", move, true);
-      window.removeEventListener("mouseup", finish, true);
+      window.removeEventListener("mouseup", finishMouse, true);
     };
   }, []);
 
@@ -191,7 +217,7 @@ export function PathPropertiesDialog({
   const copyPath = async () => {
     try {
       await api.copyText(activePath);
-      notify("success", "完整路径已复制");
+      notify("success", ui("完整路径已复制", "Full path copied"));
     } catch (reason) {
       notify("error", reason instanceof Error ? reason.message : String(reason));
     }
@@ -201,7 +227,7 @@ export function PathPropertiesDialog({
     if (!properties || renameBusy) return;
     const requestedName = newName.trim();
     if (!requestedName) {
-      notify("error", "名称不能为空");
+      notify("error", ui("名称不能为空", "The name cannot be empty"));
       return;
     }
     if (requestedName === properties.name) {
@@ -215,7 +241,7 @@ export function PathPropertiesDialog({
       setActivePath(renamedPath);
       setRenaming(false);
       onRenamed?.(oldPath, renamedPath);
-      notify("success", "重命名完成");
+      notify("success", ui("重命名完成", "Rename completed"));
     } catch (reason) {
       notify("error", reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -233,7 +259,7 @@ export function PathPropertiesDialog({
         className="path-properties-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label={`${properties?.name ?? activePath} 的属性`}
+        aria-label={ui(`${properties?.name ?? activePath} 的属性`, `Properties for ${properties?.name ?? activePath}`)}
         style={{ left: position.x, top: position.y }}
         onClick={(event) => event.stopPropagation()}
       >
@@ -255,14 +281,14 @@ export function PathPropertiesDialog({
             )}
           </div>
           <div>
-            <span>项目属性</span>
-            <strong>{properties?.name ?? "正在读取…"}</strong>
+            <span>{ui("项目属性", "Item properties")}</span>
+            <strong>{properties?.name ?? ui("正在读取…", "Loading…")}</strong>
           </div>
           <div className="path-properties-drag-hint">
             <MousePointer2 size={12} />
-            拖动窗口
+            {ui("拖动窗口", "Drag window")}
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭属性窗口">
+          <button type="button" onClick={onClose} aria-label={ui("关闭属性窗口", "Close properties")}>
             <X size={18} />
           </button>
         </header>
@@ -271,14 +297,14 @@ export function PathPropertiesDialog({
           {error ? (
             <div className="path-properties-error">
               <LockKeyhole size={28} />
-              <strong>无法读取该项目</strong>
+              <strong>{ui("无法读取该项目", "Unable to read this item")}</strong>
               <span>{error}</span>
             </div>
           ) : !properties ? (
             <div className="path-properties-loading">
               <i />
-              <strong>正在读取文件系统信息</strong>
-              <span>大型目录的容量与项目数量统计可能需要一点时间。</span>
+              <strong>{ui("正在读取文件系统信息", "Reading file system information")}</strong>
+              <span>{ui("大型目录的容量与项目数量统计可能需要一点时间。", "Size and item counts for large folders may take a moment.")}</span>
             </div>
           ) : (
             <>
@@ -287,13 +313,13 @@ export function PathPropertiesDialog({
                 <span>{properties.path}</span>
                 <button type="button" onClick={() => void copyPath()}>
                   <Clipboard size={14} />
-                  复制
+                  {ui("复制", "Copy")}
                 </button>
               </div>
               {renaming && (
                 <div className="path-properties-rename">
                   <Pencil size={15} />
-                  <label htmlFor="path-properties-rename-input">重命名</label>
+                  <label htmlFor="path-properties-rename-input">{ui("重命名", "Rename")}</label>
                   <input
                     id="path-properties-rename-input"
                     autoFocus
@@ -306,7 +332,7 @@ export function PathPropertiesDialog({
                     }}
                   />
                   <button type="button" onClick={() => setRenaming(false)}>
-                    取消
+                    {ui("取消", "Cancel")}
                   </button>
                   <button
                     type="button"
@@ -314,7 +340,7 @@ export function PathPropertiesDialog({
                     disabled={renameBusy}
                     onClick={() => void renameItem()}
                   >
-                    {renameBusy ? "处理中…" : "确认"}
+                    {renameBusy ? ui("处理中…", "Working…") : ui("确认", "Confirm")}
                   </button>
                 </div>
               )}
@@ -322,57 +348,59 @@ export function PathPropertiesDialog({
               <div className="path-properties-metrics">
                 <article>
                   <Ruler size={18} />
-                  <span>大小</span>
+                  <span>{ui("大小", "Size")}</span>
                   <strong>{formatBytes(properties.size)}</strong>
                   <small>
-                    {properties.scanComplete ? "统计完成" : "受时间或权限限制，为当前可读大小"}
+                    {properties.scanComplete
+                      ? ui("统计完成", "Scan complete")
+                      : ui("受时间或权限限制，为当前可读大小", "Readable size only due to time or permission limits")}
                   </small>
                 </article>
                 <article>
                   <HardDrive size={18} />
-                  <span>{properties.isDirectory ? "所含项目" : "占用空间"}</span>
+                  <span>{properties.isDirectory ? ui("所含项目", "Items") : ui("占用空间", "Allocated size")}</span>
                   <strong>
                     {properties.isDirectory
-                      ? `${(properties.files ?? 0).toLocaleString()} 文件`
+                      ? ui(`${(properties.files ?? 0).toLocaleString()} 文件`, `${formatNumber(properties.files ?? 0)} files`)
                       : formatBytes(properties.allocatedBytes ?? properties.size)}
                   </strong>
                   <small>
                     {properties.isDirectory
-                      ? `${(properties.directories ?? 0).toLocaleString()} 个子目录`
-                      : "按文件系统分配块估算"}
+                      ? ui(`${(properties.directories ?? 0).toLocaleString()} 个子目录`, `${formatNumber(properties.directories ?? 0)} subfolders`)
+                      : ui("按文件系统分配块估算", "Estimated from file-system allocation")}
                   </small>
                 </article>
                 <article>
                   {properties.isDirectory ? <Folder size={18} /> : <File size={18} />}
-                  <span>项目类型</span>
-                  <strong>{propertyType(properties)}</strong>
-                  <small>{properties.writable ? "可读写" : properties.readable ? "只读访问" : "访问受限"}</small>
+                  <span>{ui("项目类型", "Item type")}</span>
+                  <strong>{propertyType(properties, ui)}</strong>
+                  <small>{properties.writable ? ui("可读写", "Read and write") : properties.readable ? ui("只读访问", "Read-only access") : ui("访问受限", "Access restricted")}</small>
                 </article>
               </div>
 
               <div className="path-properties-grid">
                 <article>
-                  <h3>常规信息</h3>
+                  <h3>{ui("常规信息", "General")}</h3>
                   <dl>
                     <div>
-                      <dt>名称</dt>
+                      <dt>{ui("名称", "Name")}</dt>
                       <dd>{properties.name}</dd>
                     </div>
                     <div>
-                      <dt>类型</dt>
-                      <dd>{propertyType(properties)}</dd>
+                      <dt>{ui("类型", "Type")}</dt>
+                      <dd>{propertyType(properties, ui)}</dd>
                     </div>
                     <div>
-                      <dt>位置</dt>
+                      <dt>{ui("位置", "Location")}</dt>
                       <dd>{properties.parentPath}</dd>
                     </div>
                     <div>
-                      <dt>扩展名</dt>
-                      <dd>{properties.extension ? `.${properties.extension}` : "无"}</dd>
+                      <dt>{ui("扩展名", "Extension")}</dt>
+                      <dd>{properties.extension ? `.${properties.extension}` : ui("无", "None")}</dd>
                     </div>
                     {properties.linkTarget && (
                       <div>
-                        <dt>链接目标</dt>
+                        <dt>{ui("链接目标", "Link target")}</dt>
                         <dd>{properties.linkTarget}</dd>
                       </div>
                     )}
@@ -380,26 +408,26 @@ export function PathPropertiesDialog({
                 </article>
 
                 <article>
-                  <h3>时间与访问</h3>
+                  <h3>{ui("时间与访问", "Time and access")}</h3>
                   <dl>
                     <div>
-                      <dt>创建时间</dt>
+                      <dt>{ui("创建时间", "Created")}</dt>
                       <dd><DateValue value={properties.createdAt} /></dd>
                     </div>
                     <div>
-                      <dt>修改时间</dt>
+                      <dt>{ui("修改时间", "Modified")}</dt>
                       <dd><DateValue value={properties.modifiedAt} /></dd>
                     </div>
                     <div>
-                      <dt>访问时间</dt>
+                      <dt>{ui("访问时间", "Accessed")}</dt>
                       <dd><DateValue value={properties.accessedAt} /></dd>
                     </div>
                     <div>
-                      <dt>当前权限</dt>
+                      <dt>{ui("当前权限", "Current access")}</dt>
                       <dd className="path-properties-access">
-                        {properties.readable && <span><Check size={11} />读取</span>}
-                        {properties.writable && <span><Check size={11} />写入</span>}
-                        {!properties.readable && !properties.writable && "无访问权限"}
+                        {properties.readable && <span><Check size={11} />{ui("读取", "Read")}</span>}
+                        {properties.writable && <span><Check size={11} />{ui("写入", "Write")}</span>}
+                        {!properties.readable && !properties.writable && ui("无访问权限", "No access")}
                       </dd>
                     </div>
                   </dl>
@@ -410,7 +438,7 @@ export function PathPropertiesDialog({
         </div>
 
         <footer>
-          <span><CalendarClock size={13} /> 信息直接读取自当前文件系统</span>
+          <span><CalendarClock size={13} /> {ui("信息直接读取自当前文件系统", "Information read directly from the current file system")}</span>
           <div>
             <button
               type="button"
@@ -421,12 +449,12 @@ export function PathPropertiesDialog({
               }}
             >
               <Pencil size={12} />
-              重命名
+              {ui("重命名", "Rename")}
             </button>
             <button type="button" onClick={() => void api.revealPath(activePath)}>
-              在文件管理器中显示
+              {ui("在文件管理器中显示", "Show in File Explorer")}
             </button>
-            <button type="button" className="primary" onClick={onClose}>完成</button>
+            <button type="button" className="primary" onClick={onClose}>{ui("完成", "Done")}</button>
           </div>
         </footer>
       </section>

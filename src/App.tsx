@@ -1,13 +1,22 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties
+} from "react";
 import { Bot, CloudOff, Database, Palette, ShieldCheck } from "lucide-react";
 import { api } from "./lib/api";
 import {
   effectBackgrounds,
   effectDefinitions,
-  effectLabels,
   isEffectMode,
   isLightEffect
 } from "./lib/effects";
+import { setAppLanguage, useI18n, type TranslationKey } from "./lib/i18n";
 import type {
   AppSettings,
   AppUpdateInfo,
@@ -47,8 +56,8 @@ const fallbackStatus: IndexerStatus = {
   state: "idle",
   entries: 0,
   progress: 0,
-  root: "本机所有磁盘",
-  message: "正在连接索引核心"
+  root: "All local drives",
+  message: "Connecting to the index service"
 };
 
 function initialEffectMode(): EffectMode {
@@ -67,6 +76,7 @@ function initialView(): ViewId {
 }
 
 export default function App() {
+  const { t, ui, runtimeText } = useI18n();
   const [view, setView] = useState<ViewId>(initialView);
   const [overview, setOverview] = useState<SystemOverview>();
   const [settings, setSettings] = useState<AppSettings>();
@@ -74,6 +84,7 @@ export default function App() {
   const [history, setHistory] = useState<MigrationRecord[]>([]);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo>();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(238);
   const [settingsModule, setSettingsModule] =
     useState<SettingsModuleId>("update");
   const [selectedPath, setSelectedPath] = useState("");
@@ -85,6 +96,14 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [startupEffect] = useState<EffectMode>(initialEffectMode);
   const effectRequest = useRef(0);
+  const viewScrollRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      viewScrollRef.current?.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [view]);
 
   const notify = useCallback((type: ToastItem["type"], message: string) => {
     const id = Date.now() + Math.floor(Math.random() * 1_000);
@@ -112,30 +131,34 @@ export default function App() {
         setOverview(overviewResult.value);
         setIndexer(overviewResult.value.indexer);
       } else {
-        failures.push(`系统信息：${String(overviewResult.reason)}`);
+        failures.push(`${ui("系统信息", "System overview")}: ${String(overviewResult.reason)}`);
       }
       if (settingsResult.status === "fulfilled") {
         setSettings(settingsResult.value);
+        setAppLanguage(settingsResult.value.language);
       } else {
-        failures.push(`设置：${String(settingsResult.reason)}`);
+        failures.push(`${ui("设置", "Settings")}: ${String(settingsResult.reason)}`);
       }
       if (migrationsResult.status === "fulfilled") {
         setHistory(migrationsResult.value);
       } else {
-        failures.push(`迁移记录：${String(migrationsResult.reason)}`);
+        failures.push(`${ui("迁移记录", "Migration history")}: ${String(migrationsResult.reason)}`);
       }
       if (analysisResult.status === "fulfilled") {
         if (analysisResult.value) setSelectedPath(analysisResult.value.summary.path);
       } else {
-        failures.push(`分析记录：${String(analysisResult.reason)}`);
+        failures.push(`${ui("分析记录", "Analysis history")}: ${String(analysisResult.reason)}`);
       }
       if (layoutResult.status === "fulfilled") {
         setSidebarCollapsed(Boolean(layoutResult.value.sidebarCollapsed));
+        if (layoutResult.value.sidebarWidth) {
+          setSidebarWidth(Math.max(190, Math.min(360, layoutResult.value.sidebarWidth)));
+        }
       } else {
-        failures.push(`界面布局：${String(layoutResult.reason)}`);
+        failures.push(`${ui("界面布局", "UI layout")}: ${String(layoutResult.reason)}`);
       }
       if (failures.length > 0) {
-        notify("error", `部分启动数据暂不可用：${failures.join("；")}`);
+        notify("error", `${ui("部分启动数据暂不可用", "Some startup data is temporarily unavailable")}: ${failures.join("; ")}`);
       }
     });
 
@@ -145,7 +168,7 @@ export default function App() {
         const next = items.filter((item) => item.id !== record.id);
         return [record, ...next];
       });
-      if (record.stage === "linked") notify("success", message);
+      if (record.stage === "linked") notify("success", runtimeText(message));
     });
     const offNavigation = api.onAppNavigation((event) => {
       if (event.path) {
@@ -169,7 +192,10 @@ export default function App() {
         }, 180);
       }
     });
-    const offSettings = api.onSettingsChanged(setSettings);
+    const offSettings = api.onSettingsChanged((updated) => {
+      setSettings(updated);
+      setAppLanguage(updated.language);
+    });
     const offUpdate = api.onUpdateStatus(setUpdateInfo);
     void api.getUpdateState().then(setUpdateInfo).catch(() => undefined);
     return () => {
@@ -179,7 +205,7 @@ export default function App() {
       offSettings();
       offUpdate();
     };
-  }, [notify]);
+  }, [notify, runtimeText, ui]);
 
   const refreshUpdate = useCallback(async () => {
     const result = await api.checkForUpdates(true);
@@ -193,11 +219,29 @@ export default function App() {
       void api
         .updateUiLayout({ sidebarCollapsed: next })
         .catch((error) =>
-          notify("error", `无法保存侧边栏状态：${error instanceof Error ? error.message : String(error)}`)
+          notify("error", `${ui("无法保存侧边栏状态", "Unable to save the sidebar state")}: ${error instanceof Error ? error.message : String(error)}`)
         );
       return next;
     });
-  }, [notify]);
+  }, [notify, ui]);
+
+  const resizeSidebar = useCallback(
+    (width: number, collapsed: boolean, commit: boolean) => {
+      const normalizedWidth = Math.max(190, Math.min(360, Math.round(width)));
+      setSidebarWidth(normalizedWidth);
+      setSidebarCollapsed(collapsed);
+      if (!commit) return;
+      void api
+        .updateUiLayout({ sidebarWidth: normalizedWidth, sidebarCollapsed: collapsed })
+        .catch((error) =>
+          notify(
+            "error",
+            `${ui("无法保存侧边栏宽度", "Unable to save the sidebar width")}: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+    },
+    [notify, ui]
+  );
 
   const effectMode = settings?.effectMode ?? startupEffect;
   useEffect(() => {
@@ -207,7 +251,8 @@ export default function App() {
     document
       .querySelector('meta[name="theme-color"]')
       ?.setAttribute("content", effectBackgrounds[effectMode]);
-  }, [effectMode]);
+    document.title = `CDriveShiftAI · ${t("app.tagline")}`;
+  }, [effectMode, t]);
 
   const switchEffect = useCallback(
     async (mode: EffectMode) => {
@@ -338,14 +383,19 @@ export default function App() {
   ]);
 
   return (
-    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
+    <div
+      className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
       <BackgroundFX mode={effectMode} />
       <Sidebar
         active={view}
         onChange={setView}
         indexer={indexer}
         collapsed={sidebarCollapsed}
+        width={sidebarWidth}
         onToggle={toggleSidebar}
+        onResize={resizeSidebar}
         updateInfo={updateInfo}
       />
       <main className="main-stage">
@@ -355,8 +405,8 @@ export default function App() {
             <Database size={14} />
             <span>
               {indexer.state === "ready"
-                ? `自研索引 · ${indexer.mode.toUpperCase()}`
-                : "正在准备索引"}
+                ? t("top.indexReady", { mode: indexer.mode.toUpperCase() })
+                : t("top.indexPreparing")}
             </span>
           </div>
           <div className="topbar-right">
@@ -365,15 +415,15 @@ export default function App() {
               className="privacy-pill"
               title={
                 settings?.ai.enabled
-                  ? "AI 辅助已启用；发送范围由隐私设置控制。点击查看设置"
-                  : "当前仅使用本地规则分析，不会向 AI 服务发送数据。点击配置 AI"
+                  ? t("top.aiEnabledTip")
+                  : t("top.aiLocalTip")
               }
               onClick={() => setView("settings")}
             >
               {settings?.ai.enabled ? <Bot size={14} /> : <CloudOff size={14} />}
-              {settings?.ai.enabled ? "AI：辅助分析" : "AI：仅本地"}
+              {settings?.ai.enabled ? t("top.aiEnabled") : t("top.aiLocal")}
             </button>
-            <div className="effect-switcher" title="即时切换场景特效">
+            <div className="effect-switcher" title={t("top.switchTheme")}>
               <Palette size={14} />
               {effectDefinitions.map(({ id: mode }) => (
                 <button
@@ -382,20 +432,20 @@ export default function App() {
                   onClick={() => void switchEffect(mode)}
                   key={mode}
                 >
-                  {effectLabels[mode]}
+                  {t(`effect.${mode}.label` as TranslationKey)}
                 </button>
               ))}
             </div>
             <ShieldCheck className="shield-top" size={17} />
           </div>
         </div>
-        <section className="view-scroll">
+        <section className="view-scroll" ref={viewScrollRef} key={view}>
           <Suspense
             fallback={
               <div className="view-loading-shell" role="status" aria-live="polite">
                 <span className="spinner" />
-                <strong>正在打开功能页面</strong>
-                <small>界面模块按需载入，索引和数据不会重新构建。</small>
+                <strong>{t("loading.page")}</strong>
+                <small>{t("loading.detail")}</small>
               </div>
             }
           >

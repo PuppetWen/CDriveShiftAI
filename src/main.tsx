@@ -1,6 +1,7 @@
 import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { translate } from "./lib/i18n";
 import "./styles.css";
 
 const QuickSearchWindow = lazy(() =>
@@ -24,7 +25,7 @@ const Root =
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <Suspense fallback={<div className="bootstrap-loading" aria-label="正在启动 CDriveShiftAI" />}>
+    <Suspense fallback={<div className="bootstrap-loading" aria-label={`${translate("loading.page")} CDriveShiftAI`} />}>
       <Root />
     </Suspense>
   </StrictMode>

@@ -20,12 +20,14 @@ import {
   Pencil,
   Play,
   Search,
+  ShieldAlert,
   Sparkles,
   Trash2,
   X
 } from "lucide-react";
 import { api } from "../lib/api";
-import { formatBytes, formatDate } from "../lib/format";
+import { useI18n } from "../lib/i18n";
+import { formatBytes } from "../lib/format";
 import type { SearchResult } from "../types";
 
 interface SearchContextMenuProps {
@@ -40,6 +42,7 @@ interface SearchContextMenuProps {
   onFindSameName: (name: string) => void;
   onFilterExtension: (extension: string) => void;
   onProperties: (path: string) => void;
+  onForceDelete: (path: string) => void;
   onDeleted: (path: string) => void;
   onRenamed: (oldPath: string, newPath: string) => void;
   notify: (type: "success" | "error", message: string) => void;
@@ -80,10 +83,12 @@ export function SearchContextMenu({
   onFindSameName,
   onFilterExtension,
   onProperties,
+  onForceDelete,
   onDeleted,
   onRenamed,
   notify
 }: SearchContextMenuProps) {
+  const { ui, formatDate } = useI18n();
   const [renaming, setRenaming] = useState(initialRename);
   const [newName, setNewName] = useState(item.name);
   const [busy, setBusy] = useState("");
@@ -157,7 +162,8 @@ export function SearchContextMenu({
         .catch((error) =>
           notify(
             "error",
-            `无法保存重命名窗口位置：${error instanceof Error ? error.message : String(error)}`
+            ui("无法保存重命名窗口位置：", "Could not save the rename window position: ") +
+              (error instanceof Error ? error.message : String(error))
           )
         );
     };
@@ -253,7 +259,11 @@ export function SearchContextMenu({
     void api
       .updateUiLayout({ searchRenamePosition: finalPosition })
       .catch((error) =>
-        notify("error", `无法保存重命名窗口位置：${error instanceof Error ? error.message : String(error)}`)
+        notify(
+          "error",
+          ui("无法保存重命名窗口位置：", "Could not save the rename window position: ") +
+            (error instanceof Error ? error.message : String(error))
+        )
       );
   };
 
@@ -276,13 +286,13 @@ export function SearchContextMenu({
   };
 
   const copyTo = async () => {
-    const destination = await api.chooseDirectory("选择复制目标目录");
+    const destination = await api.chooseDirectory(ui("选择复制目标目录", "Choose destination folder"));
     if (!destination) return;
     await run(
-      "复制到",
+      "copy-to",
       async () => {
         const output = await api.copyPathToDirectory(item.path, destination);
-        notify("success", `已复制到 ${output}`);
+        notify("success", ui(`已复制到 ${output}`, `Copied to ${output}`));
       },
       undefined
     );
@@ -295,12 +305,12 @@ export function SearchContextMenu({
       return;
     }
     await run(
-      "重命名",
+      "rename",
       async () => {
         const output = await api.renamePath(item.path, value);
         onRenamed(item.path, output);
       },
-      "重命名完成"
+      ui("重命名完成", "Rename completed")
     );
   };
 
@@ -310,7 +320,7 @@ export function SearchContextMenu({
       ref={menuRef}
       style={{ left: position.x, top: position.y }}
       role="menu"
-      aria-label={`${item.name} 的操作菜单`}
+      aria-label={ui(`${item.name} 的操作菜单`, `Actions for ${item.name}`)}
       onContextMenu={(event) => event.preventDefault()}
     >
       <header
@@ -329,18 +339,18 @@ export function SearchContextMenu({
           <span>{item.path}</span>
           <small>
             {renaming
-              ? "按住这里拖动 · 松开后自动记住位置"
+              ? ui("按住这里拖动 · 松开后自动记住位置", "Drag here · the position is saved when released")
               : (
                   <>
-                    {item.isDirectory ? "文件夹" : extension ? extension.toUpperCase() : "文件"}
+                    {item.isDirectory ? ui("文件夹", "Folder") : extension ? extension.toUpperCase() : ui("文件", "File")}
                     {" · "}
-                    {!item.isDirectory || item.size > 0 ? formatBytes(item.size) : "大小计算中"}
+                    {!item.isDirectory || item.size > 0 ? formatBytes(item.size) : ui("大小计算中", "Calculating size")}
                     {item.modifiedAt ? ` · ${formatDate(item.modifiedAt)}` : ""}
                   </>
                 )}
           </small>
         </div>
-        <button type="button" onClick={onClose} aria-label="关闭菜单">
+        <button type="button" onClick={onClose} aria-label={ui("关闭菜单", "Close menu")}>
           <X size={14} />
         </button>
       </header>
@@ -349,7 +359,7 @@ export function SearchContextMenu({
         <div className="context-rename">
           <label>
             <Pencil size={14} />
-            重命名
+            {ui("重命名", "Rename")}
           </label>
           <input
             autoFocus
@@ -362,10 +372,10 @@ export function SearchContextMenu({
           />
           <div>
             <button type="button" onClick={() => setRenaming(false)}>
-              取消
+              {ui("取消", "Cancel")}
             </button>
             <button type="button" className="confirm" onClick={() => void renameItem()}>
-              确认
+              {ui("确认", "Confirm")}
             </button>
           </div>
         </div>
@@ -376,28 +386,28 @@ export function SearchContextMenu({
               type="button"
               className="context-primary"
               onClick={() =>
-                void run("打开", () => api.openPath(item.path))
+                void run("open", () => api.openPath(item.path))
               }
             >
               <Play size={15} />
-              <span>{item.isDirectory ? "打开文件夹" : "使用系统默认方式打开"}</span>
+              <span>{item.isDirectory ? ui("打开文件夹", "Open folder") : ui("使用系统默认方式打开", "Open with the default app")}</span>
               <kbd>Enter</kbd>
             </button>
             <button
               type="button"
-              onClick={() => void run("定位", () => api.revealPath(item.path))}
+              onClick={() => void run("reveal", () => api.revealPath(item.path))}
             >
               <FolderOpen size={15} />
-              <span>在文件资源管理器中显示</span>
+              <span>{ui("在文件资源管理器中显示", "Show in File Explorer")}</span>
               <kbd>Ctrl ↵</kbd>
             </button>
             {!item.isDirectory && (
               <button
                 type="button"
-                onClick={() => void run("打开方式", () => api.openWith(item.path))}
+                onClick={() => void run("open-with", () => api.openWith(item.path))}
               >
                 <AppWindow size={15} />
-                <span>选择其他应用打开…</span>
+                <span>{ui("选择其他应用打开…", "Open with another app…")}</span>
               </button>
             )}
           </div>
@@ -412,7 +422,7 @@ export function SearchContextMenu({
                 }}
               >
                 <Search size={15} />
-                <span>在此文件夹内搜索名称</span>
+                <span>{ui("在此文件夹内搜索名称", "Search names in this folder")}</span>
               </button>
               <button
                 type="button"
@@ -422,7 +432,7 @@ export function SearchContextMenu({
                 }}
               >
                 <FileSearch size={15} />
-                <span>在此文件夹内搜索内容</span>
+                <span>{ui("在此文件夹内搜索内容", "Search contents in this folder")}</span>
               </button>
               <button
                 type="button"
@@ -432,7 +442,7 @@ export function SearchContextMenu({
                 }}
               >
                 <Sparkles size={15} />
-                <span>AI 目录归属分析</span>
+                <span>{ui("AI 目录归属分析", "AI folder ownership analysis")}</span>
               </button>
               <button
                 type="button"
@@ -442,7 +452,7 @@ export function SearchContextMenu({
                 }}
               >
                 <ArrowRightLeft size={15} />
-                <span>进入安全迁移</span>
+                <span>{ui("进入安全迁移", "Open safe migration")}</span>
               </button>
             </div>
           )}
@@ -451,34 +461,34 @@ export function SearchContextMenu({
             <button
               type="button"
               onClick={() =>
-                void run("复制路径", () => api.copyText(item.path), "完整路径已复制")
+                void run("copy-path", () => api.copyText(item.path), ui("完整路径已复制", "Full path copied"))
               }
             >
               <Clipboard size={15} />
-              <span>复制完整路径</span>
+              <span>{ui("复制完整路径", "Copy full path")}</span>
               <kbd>Ctrl ⇧ C</kbd>
             </button>
             <button
               type="button"
               onClick={() =>
-                void run("复制名称", () => api.copyText(item.name), "名称已复制")
+                void run("copy-name", () => api.copyText(item.name), ui("名称已复制", "Name copied"))
               }
             >
               <Copy size={15} />
-              <span>复制文件名/文件夹名</span>
+              <span>{ui("复制文件名/文件夹名", "Copy file or folder name")}</span>
             </button>
             <button
               type="button"
               onClick={() =>
-                void run("复制父路径", () => api.copyText(parentPath(item.path)), "父路径已复制")
+                void run("copy-parent", () => api.copyText(parentPath(item.path)), ui("父路径已复制", "Parent path copied"))
               }
             >
               <Copy size={15} />
-              <span>复制父目录路径</span>
+              <span>{ui("复制父目录路径", "Copy parent folder path")}</span>
             </button>
             <button type="button" disabled={Boolean(busy)} onClick={() => void copyTo()}>
               <FileInput size={15} />
-              <span>{busy === "复制到" ? "正在复制…" : "复制到…"}</span>
+              <span>{busy === "copy-to" ? ui("正在复制…", "Copying…") : ui("复制到…", "Copy to…")}</span>
             </button>
           </div>
 
@@ -491,7 +501,7 @@ export function SearchContextMenu({
               }}
             >
               <Search size={15} />
-              <span>查找同名项目</span>
+              <span>{ui("查找同名项目", "Find items with the same name")}</span>
             </button>
             {!item.isDirectory && extension && (
               <button
@@ -502,12 +512,12 @@ export function SearchContextMenu({
                 }}
               >
                 <Filter size={15} />
-                <span>只显示 .{extension} 文件</span>
+                <span>{ui(`只显示 .${extension} 文件`, `Show only .${extension} files`)}</span>
               </button>
             )}
             <button type="button" onClick={beginRename}>
               <Pencil size={15} />
-              <span>重命名</span>
+              <span>{ui("重命名", "Rename")}</span>
               <kbd>F2</kbd>
             </button>
             <button
@@ -518,7 +528,7 @@ export function SearchContextMenu({
               }}
             >
               <Info size={15} />
-              <span>属性</span>
+              <span>{ui("属性", "Properties")}</span>
               <kbd>Alt ↵</kbd>
             </button>
           </div>
@@ -529,12 +539,12 @@ export function SearchContextMenu({
               className="danger"
               onClick={() =>
                 void run(
-                  "删除",
+                  "delete",
                   async () => {
                     const deleted = await api.trashPath(item.path);
                     if (deleted) {
                       onDeleted(item.path);
-                      notify("success", "已移入回收站");
+                      notify("success", ui("已移入回收站", "Moved to the Recycle Bin"));
                     }
                   },
                   undefined
@@ -542,8 +552,20 @@ export function SearchContextMenu({
               }
             >
               <Trash2 size={15} />
-              <span>删除到回收站</span>
+              <span>{ui("删除到回收站", "Move to Recycle Bin")}</span>
               <kbd>Delete</kbd>
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => {
+                onForceDelete(item.path);
+                onClose();
+              }}
+            >
+              <ShieldAlert size={15} />
+              <span>{ui("强制永久删除…", "Force permanent deletion…")}</span>
+              <kbd>Shift Del</kbd>
             </button>
           </div>
         </>

@@ -9,6 +9,7 @@ import {
   isEffectMode,
   isLightEffect
 } from "../lib/effects";
+import { setAppLanguage, useI18n, type TranslationKey } from "../lib/i18n";
 import type {
   AppSettings,
   EffectMode,
@@ -22,8 +23,8 @@ const initialIndexer: IndexerStatus = {
   state: "idle",
   entries: 0,
   progress: 0,
-  root: "本机所有磁盘",
-  message: "正在连接全盘名称索引"
+  root: "All local drives",
+  message: "Connecting to the full-disk name index"
 };
 
 function initialEffectMode(): EffectMode {
@@ -32,6 +33,7 @@ function initialEffectMode(): EffectMode {
 }
 
 export function QuickSearchWindow() {
+  const { t, formatNumber } = useI18n();
   const [overview, setOverview] = useState<SystemOverview>();
   const [indexer, setIndexer] = useState(initialIndexer);
   const [settings, setSettings] = useState<AppSettings>();
@@ -56,11 +58,17 @@ export function QuickSearchWindow() {
         setOverview(overviewResult.value);
         setIndexer(overviewResult.value.indexer);
       }
-      if (settingsResult.status === "fulfilled") setSettings(settingsResult.value);
+      if (settingsResult.status === "fulfilled") {
+        setSettings(settingsResult.value);
+        setAppLanguage(settingsResult.value.language);
+      }
       if (indexerResult.status === "fulfilled") setIndexer(indexerResult.value);
     });
     const offStatus = api.onIndexerStatus(setIndexer);
-    const offSettings = api.onSettingsChanged(setSettings);
+    const offSettings = api.onSettingsChanged((updated) => {
+      setSettings(updated);
+      setAppLanguage(updated.language);
+    });
     return () => {
       offStatus();
       offSettings();
@@ -71,7 +79,8 @@ export function QuickSearchWindow() {
     document.documentElement.dataset.effect = effectMode;
     document.documentElement.style.background = effectBackgrounds[effectMode];
     document.documentElement.style.colorScheme = isLightEffect(effectMode) ? "light" : "dark";
-  }, [effectMode]);
+    document.title = t("quick.title");
+  }, [effectMode, t]);
 
   const switchEffect = useCallback(
     async (mode: EffectMode) => {
@@ -106,28 +115,28 @@ export function QuickSearchWindow() {
       <header className="quick-search-titlebar">
         <span className="quick-search-brand">
           <Sparkles size={16} />
-          <strong>CDriveShiftAI · 独立极速搜索</strong>
+          <strong>{t("quick.title")}</strong>
         </span>
         <div className="quick-search-title-actions">
           <span className="quick-search-title-status">
             <Database size={12} />
             {indexer.state === "ready"
-              ? `${indexer.entries.toLocaleString()} 条索引`
-              : indexer.message ?? "正在准备索引"}
+              ? t("quick.indexEntries", { count: formatNumber(indexer.entries) })
+              : t("quick.indexPreparing")}
           </span>
-          <div className="quick-search-effect-switcher" aria-label="切换界面主题">
+          <div className="quick-search-effect-switcher" aria-label={t("quick.switchTheme")}>
             <Palette size={12} aria-hidden="true" />
             {effectDefinitions.map((effect) => (
               <button
                 className={effect.id === effectMode ? "active" : ""}
                 key={effect.id}
                 type="button"
-                title={`${effect.title}：${effect.subtitle}`}
-                aria-label={`切换到${effect.title}`}
+                title={`${t(`effect.${effect.id}.title` as TranslationKey)} · ${t(`effect.${effect.id}.subtitle` as TranslationKey)}`}
+                aria-label={t(`effect.${effect.id}.title` as TranslationKey)}
                 aria-pressed={effect.id === effectMode}
                 onClick={() => void switchEffect(effect.id)}
               >
-                {effect.label}
+                {t(`effect.${effect.id}.label` as TranslationKey)}
               </button>
             ))}
           </div>
@@ -147,7 +156,7 @@ export function QuickSearchWindow() {
 
       <div className="quick-search-handoff-note">
         <Search size={12} />
-        搜索、筛选、正则、书签、属性与右键功能和主程序共用；“分析”或“迁移”会接续到主窗口。
+        {t("quick.handoff")}
       </div>
       <Toasts
         items={toasts}

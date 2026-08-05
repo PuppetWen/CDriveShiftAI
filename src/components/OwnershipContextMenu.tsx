@@ -12,7 +12,7 @@ import {
   X
 } from "lucide-react";
 import { api } from "../lib/api";
-import { formatDate } from "../lib/format";
+import { useI18n } from "../lib/i18n";
 import type { OwnershipMapEntry } from "../types";
 
 interface OwnershipContextMenuProps {
@@ -27,16 +27,6 @@ interface OwnershipContextMenuProps {
   notify: (type: "success" | "error", message: string) => void;
 }
 
-const categoryLabels: Record<OwnershipMapEntry["category"], string> = {
-  application: "应用安装目录",
-  "application-data": "应用数据",
-  cache: "缓存/临时数据",
-  "user-data": "用户数据",
-  development: "开发数据",
-  system: "系统组件",
-  unknown: "待识别目录"
-};
-
 export function OwnershipContextMenu({
   entry,
   x,
@@ -48,8 +38,18 @@ export function OwnershipContextMenu({
   onDeleted,
   notify
 }: OwnershipContextMenuProps) {
+  const { ui, formatDate } = useI18n();
   const [busy, setBusy] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
+  const categoryLabels: Record<OwnershipMapEntry["category"], string> = {
+    application: ui("应用安装目录", "Application installation"),
+    "application-data": ui("应用数据", "Application data"),
+    cache: ui("缓存/临时数据", "Cache / temporary data"),
+    "user-data": ui("用户数据", "User data"),
+    development: ui("开发数据", "Development data"),
+    system: ui("系统组件", "System component"),
+    unknown: ui("待识别目录", "Unidentified folder")
+  };
 
   useEffect(() => {
     const close = (event: PointerEvent) => {
@@ -89,7 +89,7 @@ export function OwnershipContextMenu({
       ref={menuRef}
       style={{ left: x, top: y }}
       role="menu"
-      aria-label={`${entry.name} 的目录操作菜单`}
+      aria-label={ui(`${entry.name} 的目录操作菜单`, `Folder actions for ${entry.name}`)}
       onContextMenu={(event) => event.preventDefault()}
     >
       <header className="context-target ownership-context-target">
@@ -105,17 +105,17 @@ export function OwnershipContextMenu({
             {entry.lastModified ? ` · ${formatDate(entry.lastModified)}` : ""}
           </small>
         </div>
-        <button type="button" onClick={onClose} aria-label="关闭菜单">
+        <button type="button" onClick={onClose} aria-label={ui("关闭菜单", "Close menu")}>
           <X size={14} />
         </button>
       </header>
 
       <div className="ownership-context-evidence">
-        <span className={`risk ${entry.risk}`}>{entry.risk === "blocked" ? "系统保护" : `风险 ${entry.risk}`}</span>
+        <span className={`risk ${entry.risk}`}>{entry.risk === "blocked" ? ui("系统保护", "System protected") : ui(`风险 ${entry.risk}`, `Risk: ${entry.risk}`)}</span>
         <strong>
           {entry.owner
-            ? `${Math.round(entry.owner.confidence * 100)}% 本地证据匹配`
-            : "尚未匹配到已安装应用"}
+            ? ui(`${Math.round(entry.owner.confidence * 100)}% 本地证据匹配`, `${Math.round(entry.owner.confidence * 100)}% local evidence match`)
+            : ui("尚未匹配到已安装应用", "No installed application matched")}
         </strong>
         <small>{entry.explanation}</small>
       </div>
@@ -125,19 +125,19 @@ export function OwnershipContextMenu({
           type="button"
           className="context-primary"
           disabled={Boolean(busy)}
-          onClick={() => void run("打开", () => api.openPath(entry.path))}
+          onClick={() => void run("open", () => api.openPath(entry.path))}
         >
           <Play size={15} />
-          <span>打开文件夹</span>
+          <span>{ui("打开文件夹", "Open folder")}</span>
           <kbd>Enter</kbd>
         </button>
         <button
           type="button"
           disabled={Boolean(busy)}
-          onClick={() => void run("定位", () => api.revealPath(entry.path))}
+          onClick={() => void run("reveal", () => api.revealPath(entry.path))}
         >
           <FolderOpen size={15} />
-          <span>在文件资源管理器中显示</span>
+          <span>{ui("在文件资源管理器中显示", "Show in File Explorer")}</span>
           <kbd>Ctrl ↵</kbd>
         </button>
       </div>
@@ -151,7 +151,7 @@ export function OwnershipContextMenu({
           }}
         >
           <Sparkles size={15} />
-          <span>详细 AI 目录归属分析</span>
+          <span>{ui("详细 AI 目录归属分析", "Detailed AI folder ownership analysis")}</span>
         </button>
         <button
           type="button"
@@ -162,24 +162,24 @@ export function OwnershipContextMenu({
           }}
         >
           <ArrowRightLeft size={15} />
-          <span>{entry.risk === "blocked" ? "系统保护目录不可迁移" : "进入安全迁移"}</span>
+          <span>{entry.risk === "blocked" ? ui("系统保护目录不可迁移", "System-protected folders cannot be moved") : ui("进入安全迁移", "Open safe migration")}</span>
         </button>
       </div>
 
       <div className="context-section">
         <button
           type="button"
-          onClick={() => void run("复制路径", () => api.copyText(entry.path), "完整路径已复制")}
+          onClick={() => void run("copy-path", () => api.copyText(entry.path), ui("完整路径已复制", "Full path copied"))}
         >
           <Clipboard size={15} />
-          <span>复制完整路径</span>
+          <span>{ui("复制完整路径", "Copy full path")}</span>
         </button>
         <button
           type="button"
-          onClick={() => void run("复制名称", () => api.copyText(entry.name), "目录名称已复制")}
+          onClick={() => void run("copy-name", () => api.copyText(entry.name), ui("目录名称已复制", "Folder name copied"))}
         >
           <Copy size={15} />
-          <span>复制目录名称</span>
+          <span>{ui("复制目录名称", "Copy folder name")}</span>
         </button>
         <button
           type="button"
@@ -189,7 +189,7 @@ export function OwnershipContextMenu({
           }}
         >
           <Info size={15} />
-          <span>目录属性</span>
+          <span>{ui("目录属性", "Folder properties")}</span>
           <kbd>Alt ↵</kbd>
         </button>
       </div>
@@ -200,17 +200,17 @@ export function OwnershipContextMenu({
           className="danger"
           disabled={entry.risk === "blocked" || Boolean(busy)}
           onClick={() =>
-            void run("删除", async () => {
+            void run("delete", async () => {
               const deleted = await api.trashPath(entry.path);
               if (deleted) {
                 onDeleted(entry.path);
-                notify("success", "已移入回收站");
+                notify("success", ui("已移入回收站", "Moved to the Recycle Bin"));
               }
             })
           }
         >
           <Trash2 size={15} />
-          <span>{entry.risk === "blocked" ? "系统保护目录不可删除" : "删除到回收站"}</span>
+          <span>{entry.risk === "blocked" ? ui("系统保护目录不可删除", "System-protected folders cannot be deleted") : ui("删除到回收站", "Move to Recycle Bin")}</span>
           <kbd>Delete</kbd>
         </button>
       </div>

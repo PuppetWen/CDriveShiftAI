@@ -168,6 +168,87 @@ try {
   await capture(`cdriveshiftai-${requestedView}.png`);
 
   if (requestedView === "settings") {
+    const iconAlignment = await evaluate(`(() => {
+      const update = document.querySelector(".brand-update-button")?.getBoundingClientRect();
+      const collapse = document.querySelector(".sidebar-collapse-button")?.getBoundingClientRect();
+      const bullet = document.querySelector(".update-release-items > span > i")?.getBoundingClientRect();
+      const item = document.querySelector(".update-release-items > span");
+      if (!update || !collapse || !bullet || !item) return null;
+      const itemBounds = item.getBoundingClientRect();
+      const lineHeight = Number.parseFloat(getComputedStyle(item).lineHeight);
+      return {
+        brandDelta: Math.abs(update.top + update.height / 2 - (collapse.top + collapse.height / 2)),
+        releaseDelta: Math.abs(bullet.top + bullet.height / 2 - (itemBounds.top + lineHeight / 2))
+      };
+    })()`);
+    if (!iconAlignment || iconAlignment.brandDelta > 3 || iconAlignment.releaseDelta > 3) {
+      throw new Error(`Icon/text alignment regression: ${JSON.stringify(iconAlignment)}`);
+    }
+    const sidebarResize = await evaluate(`(() => {
+      const sidebar = document.querySelector(".sidebar");
+      const handle = document.querySelector(".sidebar-resize-handle");
+      if (!sidebar || !handle) return null;
+      const sidebarBounds = sidebar.getBoundingClientRect();
+      const handleBounds = handle.getBoundingClientRect();
+      return {
+        x: handleBounds.left + handleBounds.width / 2,
+        y: handleBounds.top + 120,
+        before: sidebarBounds.width
+      };
+    })()`);
+    if (!sidebarResize) throw new Error("Sidebar resize handle was unavailable");
+    await evaluate('document.querySelector(".sidebar-resize-handle")?.focus()');
+    await send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "ArrowRight",
+      code: "ArrowRight",
+      windowsVirtualKeyCode: 39,
+      nativeVirtualKeyCode: 39
+    });
+    await send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "ArrowRight",
+      code: "ArrowRight",
+      windowsVirtualKeyCode: 39,
+      nativeVirtualKeyCode: 39
+    });
+    await waitFor(
+      `document.querySelector(".sidebar")?.getBoundingClientRect().width > ${JSON.stringify(sidebarResize.before)} + 8`
+    );
+    await evaluate('document.querySelector(".sidebar-resize-handle")?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))');
+    await waitFor('Math.abs((document.querySelector(".sidebar")?.getBoundingClientRect().width ?? 0) - 238) < 2');
+    const liveDrag = await evaluate(`(() => {
+      const handle = document.querySelector(".sidebar-resize-handle");
+      if (!handle) return null;
+      const bounds = handle.getBoundingClientRect();
+      return { x: bounds.left + bounds.width / 2, y: bounds.top + 150 };
+    })()`);
+    if (!liveDrag) throw new Error("Sidebar drag target was unavailable");
+    await send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: liveDrag.x,
+      y: liveDrag.y,
+      button: "left",
+      clickCount: 1
+    });
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: liveDrag.x + 82,
+      y: liveDrag.y,
+      button: "left"
+    });
+    const liveWidth = await evaluate('document.querySelector(".sidebar")?.getBoundingClientRect().width ?? 0');
+    if (liveWidth < 305) throw new Error(`Sidebar did not track the pointer immediately: ${liveWidth}`);
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: liveDrag.x + 82,
+      y: liveDrag.y,
+      button: "left",
+      clickCount: 1
+    });
+    await evaluate('document.querySelector(".sidebar-resize-handle")?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))');
+    await waitFor('Math.abs((document.querySelector(".sidebar")?.getBoundingClientRect().width ?? 0) - 238) < 2');
+
     const updateDot = await evaluate(`(() => {
       const button = document.querySelector(".brand-update-button");
       if (!(button instanceof HTMLButtonElement)) return null;
@@ -189,6 +270,112 @@ try {
     await waitFor('document.querySelector(".themed-tooltip") !== null');
     await capture("cdriveshiftai-settings-version-tooltip.png");
     await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 4, y: 4 });
+    await evaluate('document.querySelectorAll(".settings-module-nav button")[1]?.click()');
+    await waitFor('document.querySelector(".language-picker-trigger") !== null');
+    await evaluate('document.querySelector(".language-picker-trigger")?.click()');
+    await waitFor('document.querySelector(".language-picker-popover") !== null');
+    await capture("cdriveshiftai-language-picker.png");
+    await evaluate(`(() => {
+      const option = [...document.querySelectorAll(".language-picker-list button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "English");
+      if (!(option instanceof HTMLButtonElement)) return false;
+      option.click();
+      return true;
+    })()`);
+    await waitFor('[...document.querySelectorAll(".sidebar-bottom .nav-item span")].some((item) => item.textContent?.trim() === "Settings")');
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll(".settings-module-nav button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "Updates & diagnostics");
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`);
+    await waitFor('document.querySelector(".update-settings") !== null');
+    const englishUpdateLeak = await evaluate(`(() => {
+      const text = document.querySelector(".update-settings")?.textContent ?? "";
+      return [...new Set(text.match(/[\\u3400-\\u9fff]+/gu) ?? [])];
+    })()`);
+    if (englishUpdateLeak.length > 0) {
+      throw new Error(
+        `Chinese text leaked into English update status or release notes: ${JSON.stringify(englishUpdateLeak)}`
+      );
+    }
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll(".settings-module-nav button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "Index & shortcuts");
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`);
+    await waitFor('document.querySelector(".settings-system-stack") !== null');
+    const englishSystemLeak = await evaluate('/[\\u3400-\\u9fff]/u.test(document.querySelector(".settings-system-stack")?.textContent ?? "")');
+    if (englishSystemLeak) throw new Error("Chinese text leaked into the English system settings module");
+    await clickButton("Fast search");
+    await waitFor('document.querySelector(".search-filter-workbench") !== null');
+    const englishSearchLayout = await evaluate(`(() => {
+      const consoleText = document.querySelector(".search-console")?.textContent ?? "";
+      const buttons = [...document.querySelectorAll(".match-mode-segments button")];
+      const location = document.querySelector(".search-filter-location")?.getBoundingClientRect();
+      const match = document.querySelector(".search-filter-match")?.getBoundingClientRect();
+      const order = document.querySelector(".search-filter-order")?.getBoundingClientRect();
+      return {
+        chineseLeak: /[\\u3400-\\u9fff]/u.test(consoleText),
+        clipped: buttons.some((button) => button.scrollWidth > button.clientWidth + 1),
+        labels: buttons.map((button) => button.textContent?.trim()),
+        sameRow: Boolean(location && match && order) &&
+          Math.abs(location.top - match.top) < 2 &&
+          Math.abs(location.top - order.top) < 2,
+        visible: Boolean(location) && location.top >= 56 && location.top < window.innerHeight
+      };
+    })()`);
+    if (
+      englishSearchLayout.chineseLeak ||
+      englishSearchLayout.clipped ||
+      !englishSearchLayout.sameRow ||
+      !englishSearchLayout.visible
+    ) {
+      throw new Error(`English search localization/layout regression: ${JSON.stringify(englishSearchLayout)}`);
+    }
+    await wait(360);
+    await capture("cdriveshiftai-search-english.png");
+    await clickButton("Disk ownership map");
+    await waitFor('document.querySelector(".ownership-board") !== null');
+    await wait(220);
+    const ownershipRuntimeLeak = await evaluate(`(() => {
+      const text = [...document.querySelectorAll(".ownership-owner")]
+        .map((item) => item.textContent ?? "")
+        .join(" ");
+      return [
+        "Windows 应用安装体系",
+        "Windows 用户配置体系",
+        "面向全体用户的共享应用配置",
+        "卷影复制、还原点和文件系统服务数据",
+        "该卷的回收站系统数据",
+        "路径与 Windows 约定系统目录精确匹配"
+      ].some((value) => text.includes(value));
+    })()`);
+    if (ownershipRuntimeLeak) {
+      throw new Error("Known ownership-map result text remained Chinese in English mode");
+    }
+    await clickButton("Settings");
+    await waitFor('document.querySelector(".settings-page") !== null');
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll(".settings-module-nav button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "Appearance & language");
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`);
+    await waitFor('document.querySelector(".language-picker-trigger") !== null');
+    await evaluate('document.querySelector(".language-picker-trigger")?.click()');
+    await evaluate(`(() => {
+      const option = [...document.querySelectorAll(".language-picker-list button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "简体中文");
+      if (!(option instanceof HTMLButtonElement)) return false;
+      option.click();
+      return true;
+    })()`);
+    await waitFor('[...document.querySelectorAll(".sidebar-bottom .nav-item span")].some((item) => item.textContent?.trim() === "设置")');
     await evaluate(`(() => {
       const button = [...document.querySelectorAll(".settings-module-nav button")]
         .find((item) => item.querySelector("strong")?.textContent?.trim() === "索引与快捷操作");
@@ -202,6 +389,26 @@ try {
   }
 
   if (requestedView === "search") {
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll(".search-mode-switch button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "内容搜索");
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`);
+    await waitFor('document.querySelector(".content-match-options") !== null');
+    await clickButton("选择内容索引目录");
+    await waitFor('document.querySelector(".scope-clear-button") !== null');
+    await evaluate('document.querySelector(".scope-clear-button")?.click()');
+    await waitFor('document.querySelector(".scope-clear-button") === null');
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll(".search-mode-switch button")]
+        .find((item) => item.querySelector("strong")?.textContent?.trim() === "名称搜索");
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`);
+    await waitFor('document.querySelector(".search-filter-workbench") !== null');
     await evaluate(`(() => {
       const input = document.querySelector(".search-input-wrap input");
       if (!input) return false;
@@ -373,6 +580,30 @@ try {
       y: pathRect.y
     });
     await waitFor('document.querySelector(".themed-tooltip") !== null', true, 12);
+    const pathTooltipLayout = await evaluate(`(() => {
+      const path = document.querySelector(".result-path-cell");
+      const tooltip = document.querySelector(".themed-tooltip--wrap");
+      if (!path || !tooltip) return null;
+      const bounds = tooltip.getBoundingClientRect();
+      return {
+        expected: path.textContent,
+        actual: tooltip.querySelector("span")?.textContent,
+        overflowX: tooltip.scrollWidth - tooltip.clientWidth,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        viewportWidth: innerWidth,
+        viewportHeight: innerHeight
+      };
+    })()`);
+    if (!pathTooltipLayout || pathTooltipLayout.actual !== pathTooltipLayout.expected) {
+      throw new Error(`Search result path tooltip did not expose the complete path: ${JSON.stringify(pathTooltipLayout)}`);
+    }
+    if (pathTooltipLayout.overflowX > 1) {
+      throw new Error(`Search result path tooltip still clips horizontally: ${JSON.stringify(pathTooltipLayout)}`);
+    }
+    if (pathTooltipLayout.right > pathTooltipLayout.viewportWidth + 1 || pathTooltipLayout.bottom > pathTooltipLayout.viewportHeight + 1) {
+      throw new Error(`Search result path tooltip escaped the viewport: ${JSON.stringify(pathTooltipLayout)}`);
+    }
     await capture("cdriveshiftai-search-result-tooltip-crystal.png");
     await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 4, y: 4 });
     await waitFor('document.querySelector(".themed-tooltip") === null', true, 12);
@@ -403,6 +634,34 @@ try {
     await waitFor('document.querySelector(".search-context-menu") !== null');
     await wait(160);
     await capture("cdriveshiftai-search-context-menu.png");
+    const forceDeleteClicked = await evaluate(`(() => {
+      const button = [...document.querySelectorAll(".search-context-menu button")]
+        .find((item) => item.querySelector("span")?.textContent?.trim() === "强制永久删除…");
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`);
+    if (!forceDeleteClicked) throw new Error("Force-delete action was unavailable");
+    await waitFor('document.querySelector(".force-delete-dialog") !== null');
+    await waitFor('document.querySelector(".force-delete-processes") !== null');
+    await capture("cdriveshiftai-search-force-delete-preview.png");
+    await evaluate('document.querySelector(".force-delete-dialog > header > button")?.click()');
+    await waitFor('document.querySelector(".force-delete-dialog") === null');
+    await send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: resultRect.x,
+      y: resultRect.y,
+      button: "right",
+      clickCount: 1
+    });
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: resultRect.x,
+      y: resultRect.y,
+      button: "right",
+      clickCount: 1
+    });
+    await waitFor('document.querySelector(".search-context-menu") !== null');
     const propertiesClicked = await evaluate(`(() => {
       const button = [...document.querySelectorAll(".search-context-menu button")]
         .find((item) => item.querySelector("span")?.textContent?.trim() === "属性");
@@ -497,7 +756,7 @@ try {
       button: "left",
       clickCount: 1
     });
-    const propertiesMoved = await evaluate(`(() => {
+    await waitFor(`(() => {
       const bounds = document.querySelector(".path-properties-dialog")?.getBoundingClientRect();
       return Boolean(
         bounds &&
@@ -505,7 +764,6 @@ try {
         bounds.top > ${JSON.stringify(propertiesHandle.beforeY)} + 20
       );
     })()`);
-    if (!propertiesMoved) throw new Error("Properties window did not move");
     await send("Input.dispatchMouseEvent", {
       type: "mousePressed",
       x: 14,
@@ -684,6 +942,10 @@ try {
     })()`);
     if (!contentModeClicked) throw new Error("Content search mode button was unavailable");
     await waitFor('document.querySelector(".content-match-options") !== null');
+    await clickButton("选择内容索引目录");
+    await waitFor('document.querySelector(".scope-clear-button") !== null');
+    await evaluate('document.querySelector(".scope-clear-button")?.click()');
+    await waitFor('document.querySelector(".scope-clear-button") === null');
     await evaluate(`(() => {
       const input = document.querySelector(".search-input-wrap input");
       if (!(input instanceof HTMLInputElement)) return false;
@@ -940,8 +1202,7 @@ try {
   await capture("cdriveshiftai-ai-provider-saved.png");
   await evaluate('document.querySelector(".settings-page")?.scrollTo({ top: 0 })');
   await evaluate(`(() => {
-    const button = [...document.querySelectorAll(".settings-module-nav button")]
-      .find((item) => item.querySelector("strong")?.textContent?.trim() === "界面外观");
+    const button = document.querySelectorAll(".settings-module-nav button")[1];
     if (!(button instanceof HTMLButtonElement)) return false;
     button.click();
     return true;

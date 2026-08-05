@@ -27,38 +27,48 @@ const categoryExtensions: Partial<Record<SearchCategory, readonly string[]>> = {
 export const regexTemplates = [
   {
     name: "IPv4 地址",
+    englishName: "IPv4 address",
     pattern: String.raw`\b(?:\d{1,3}\.){3}\d{1,3}\b`,
-    description: "查找日志、配置里的 IPv4 地址"
+    description: "查找日志、配置里的 IPv4 地址",
+    englishDescription: "Find IPv4 addresses in logs and configuration files"
   },
   {
     name: "邮箱地址",
+    englishName: "Email address",
     pattern: String.raw`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`,
-    description: "查找常见电子邮箱格式"
+    description: "查找常见电子邮箱格式",
+    englishDescription: "Find common email address formats"
   },
   {
     name: "日期",
+    englishName: "Date",
     pattern: String.raw`\b\d{4}[-/]\d{2}[-/]\d{2}\b`,
-    description: "匹配 2026-07-28 或 2026/07/28"
+    description: "匹配 2026-07-28 或 2026/07/28",
+    englishDescription: "Match dates such as 2026-07-28 or 2026/07/28"
   },
   {
     name: "HTTP 错误码",
+    englishName: "HTTP error code",
     pattern: String.raw`\b[45]\d{2}\b`,
-    description: "查找 4xx 与 5xx 状态码"
+    description: "查找 4xx 与 5xx 状态码",
+    englishDescription: "Find 4xx and 5xx status codes"
   },
   {
     name: "密钥线索",
+    englishName: "Credential clue",
     pattern: String.raw`(?:api[_-]?key|token|secret)\s*[:=]\s*\S+`,
-    description: "查找常见 Key、Token、Secret 赋值"
+    description: "查找常见 Key、Token、Secret 赋值",
+    englishDescription: "Find common Key, Token, or Secret assignments"
   }
 ] as const;
 
 export const regexTokens = [
-  { label: "任意内容", value: ".*", hint: "任意数量字符" },
-  { label: "数字", value: String.raw`\d+`, hint: "一个或多个数字" },
-  { label: "空白", value: String.raw`\s+`, hint: "一个或多个空白" },
-  { label: "单词边界", value: String.raw`\b`, hint: "限定完整单词" },
-  { label: "二选一", value: "(?:A|B)", hint: "匹配 A 或 B" },
-  { label: "英文字母", value: "[A-Za-z]+", hint: "一个或多个字母" }
+  { label: "任意内容", englishLabel: "Any content", value: ".*", hint: "任意数量字符", englishHint: "Any number of characters" },
+  { label: "数字", englishLabel: "Digits", value: String.raw`\d+`, hint: "一个或多个数字", englishHint: "One or more digits" },
+  { label: "空白", englishLabel: "Whitespace", value: String.raw`\s+`, hint: "一个或多个空白", englishHint: "One or more whitespace characters" },
+  { label: "单词边界", englishLabel: "Word boundary", value: String.raw`\b`, hint: "限定完整单词", englishHint: "Restrict a match to a whole word" },
+  { label: "二选一", englishLabel: "Either / or", value: "(?:A|B)", hint: "匹配 A 或 B", englishHint: "Match A or B" },
+  { label: "英文字母", englishLabel: "Letters", value: "[A-Za-z]+", hint: "一个或多个字母", englishHint: "One or more Latin letters" }
 ] as const;
 
 export function defaultFilters(): SearchFilters {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Cpu } from "lucide-react";
 import type { AiModelInfo } from "../types";
+import { useI18n } from "../lib/i18n";
 
 interface AiModelPickerProps {
   models: AiModelInfo[];
@@ -19,6 +20,7 @@ export function AiModelPicker({
   onChange,
   onCommit
 }: AiModelPickerProps) {
+  const { ui } = useI18n();
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
@@ -73,7 +75,7 @@ export function AiModelPicker({
       <button
         type="button"
         disabled={disabled || models.length === 0}
-        aria-label="展开远程模型列表"
+        aria-label={ui("展开远程模型列表", "Expand the remote model list")}
         aria-expanded={open}
         onClick={() => {
           setFilter("");
@@ -84,10 +86,10 @@ export function AiModelPicker({
       </button>
 
       {open && models.length > 0 && (
-        <div className="model-picker-popover" role="listbox" aria-label="远程模型列表">
+        <div className="model-picker-popover" role="listbox" aria-label={ui("远程模型列表", "Remote model list")}>
           <header>
             <span>
-              <Cpu size={13} /> 服务端返回的对话模型
+              <Cpu size={13} /> {ui("服务端返回的对话模型", "Chat models returned by the provider")}
             </span>
             <small>{filtered.length} / {models.length}</small>
           </header>
@@ -114,7 +116,7 @@ export function AiModelPicker({
             ))}
             {filtered.length === 0 && (
               <div className="model-picker-empty">
-                列表中没有匹配项；保留当前文本即可把它作为手动模型 ID 测试。
+                {ui("列表中没有匹配项；保留当前文本即可把它作为手动模型 ID 测试。", "No matching item. Keep the current text to test it as a manual model ID.")}
               </div>
             )}
           </div>

@@ -13,7 +13,8 @@ import {
   Trash2
 } from "lucide-react";
 import { api } from "../lib/api";
-import { formatBytes, formatDate } from "../lib/format";
+import { formatBytes } from "../lib/format";
+import { useI18n } from "../lib/i18n";
 import type { MigrationRecord } from "../types";
 import {
   PathOpenFeedback,
@@ -27,21 +28,22 @@ interface HistoryViewProps {
   onRefresh: () => Promise<void>;
 }
 
-function stageLabel(stage: MigrationRecord["stage"]): string {
+function stageLabel(stage: MigrationRecord["stage"], ui: (zh: string, en: string) => string): string {
   const labels: Record<MigrationRecord["stage"], string> = {
-    preflight: "预检",
-    copying: "复制中",
-    verifying: "校验中",
-    switching: "切换中",
-    linked: "运行中",
-    "rolling-back": "回滚中",
-    "rolled-back": "已回滚",
-    failed: "失败"
+    preflight: ui("预检", "Preflight"),
+    copying: ui("复制中", "Copying"),
+    verifying: ui("校验中", "Verifying"),
+    switching: ui("切换中", "Switching"),
+    linked: ui("运行中", "Active"),
+    "rolling-back": ui("回滚中", "Restoring"),
+    "rolled-back": ui("已回滚", "Restored"),
+    failed: ui("失败", "Failed")
   };
   return labels[stage];
 }
 
 export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
+  const { t, ui, formatNumber, formatDate: formatLocaleDate } = useI18n();
   const [rollbackId, setRollbackId] = useState("");
   const [busyId, setBusyId] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -111,7 +113,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
       setSelected(new Set());
       setConfirmDelete(false);
       await onRefresh();
-      notify("success", `已删除 ${deleted} 条迁移记录；磁盘中的文件和链接未被改动`);
+      notify("success", ui(`已删除 ${deleted} 条迁移记录；磁盘中的文件和链接未被改动`, `Deleted ${deleted} migration records. Files and links on disk were not changed.`));
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
@@ -139,7 +141,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
     setBusyId(record.id);
     try {
       await api.rollbackMigration(record.id);
-      notify("success", "数据已恢复到原始磁盘，目标磁盘迁移副本已删除");
+      notify("success", ui("数据已恢复到原始磁盘，目标磁盘迁移副本已删除", "Data was restored to the original drive and the migrated destination copy was removed"));
       setRollbackId("");
       await onRefresh();
     } catch (error) {
@@ -156,8 +158,8 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
       notify(
         "success",
         updated.migrationCount > 1
-          ? `再次迁移完成，当前已迁移 ${updated.migrationCount} 次`
-          : "迁移完成"
+          ? ui(`再次迁移完成，当前已迁移 ${updated.migrationCount} 次`, `Migration completed again; migrated ${updated.migrationCount} times in total`)
+          : ui("迁移完成", "Migration complete")
       );
       await onRefresh();
     } catch (error) {
@@ -171,11 +173,11 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
     <div className="page history-page">
       <PageTitle
         eyebrow="AUDIT TRAIL"
-        title="每一次移动，都有迹可循。"
-        description="事务记录保留源盘、目标盘、链接类型、空间和状态；数据持久保存在程序旁的 .cdriveshiftai-data/cdriveshiftai-state.json，退出应用不会清空。"
+        title={t("page.historyTitle")}
+        description={t("page.historyDescription")}
         action={
           <div className="history-toolbar">
-            <Badge>{records.length} 条记录</Badge>
+            <Badge>{formatNumber(records.length)} {ui("条记录", "records")}</Badge>
             {records.length > 0 && (
               <>
                 <button
@@ -199,8 +201,8 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                   )}
                   {selected.size === selectableRecords.length &&
                   selectableRecords.length > 0
-                    ? "取消全选"
-                    : "多选记录"}
+                    ? ui("取消全选", "Clear selection")
+                    : ui("多选记录", "Select records")}
                 </button>
                 <button
                   type="button"
@@ -209,7 +211,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                   onClick={() => setConfirmDelete(true)}
                 >
                   <Trash2 size={14} />
-                  删除所选 {selected.size > 0 ? selected.size : ""}
+                  {ui("删除所选", "Delete selected")} {selected.size > 0 ? formatNumber(selected.size) : ""}
                 </button>
               </>
             )}
@@ -221,11 +223,11 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
         <section className="history-delete-confirm glass-card">
           <AlertTriangle size={19} />
           <div>
-            <strong>确认删除 {selected.size} 条迁移记录？</strong>
+            <strong>{ui(`确认删除 ${selected.size} 条迁移记录？`, `Delete ${selected.size} migration records?`)}</strong>
             <span>
-              此操作只删除日志，不会删除、移动或恢复磁盘数据。
+              {ui("此操作只删除日志，不会删除、移动或恢复磁盘数据。", "This deletes only the log records; it does not delete, move, or restore disk data.")}
               {selectedLinkedCount > 0 &&
-                ` 其中 ${selectedLinkedCount} 条仍在使用链接；删除后将无法再通过 CDriveShiftAI 自动恢复。`}
+                ui(` 其中 ${selectedLinkedCount} 条仍在使用链接；删除后将无法再通过 CDriveShiftAI 自动恢复。`, ` ${selectedLinkedCount} selected records still use links; after deletion, CDriveShiftAI can no longer restore them automatically.`)}
             </span>
           </div>
           <button
@@ -234,7 +236,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
             disabled={deleting}
             onClick={() => setConfirmDelete(false)}
           >
-            取消
+            {ui("取消", "Cancel")}
           </button>
           <button
             type="button"
@@ -243,14 +245,14 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
             onClick={() => void deleteSelected()}
           >
             {deleting ? <span className="spinner light" /> : <Trash2 size={14} />}
-            确认删除记录
+            {ui("确认删除记录", "Delete records")}
           </button>
         </section>
       )}
 
       {records.length === 0 ? (
-        <EmptyState icon={<History size={31} />} title="暂无迁移记录">
-          完成第一次安全迁移后，这里会出现完整的事务轨迹。
+        <EmptyState icon={<History size={31} />} title={ui("暂无迁移记录", "No migration records yet")}>
+          {ui("完成第一次安全迁移后，这里会出现完整的事务轨迹。", "The complete transaction trail appears here after your first safe migration.")}
         </EmptyState>
       ) : (
         <section className="history-list">
@@ -265,8 +267,8 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                 className="history-select"
                 title={
                   busyStages.has(record.stage)
-                    ? "正在执行的迁移记录不能删除"
-                    : "选择此迁移记录"
+                    ? ui("正在执行的迁移记录不能删除", "An active migration record cannot be deleted")
+                    : ui("选择此迁移记录", "Select this migration record")
                 }
               >
                 <input
@@ -299,7 +301,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                 <div className="history-head">
                   <div>
                     <strong>{record.source.split(/[\\/]/).at(-1)}</strong>
-                    <span>{formatDate(record.startedAt)}</span>
+                    <span>{formatLocaleDate(record.startedAt)}</span>
                   </div>
                   <Badge
                     tone={
@@ -310,14 +312,14 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                           : "neutral"
                     }
                   >
-                    {stageLabel(record.stage)}
+                    {stageLabel(record.stage, ui)}
                   </Badge>
                 </div>
                 <div className="history-route">
                   <button
                     className={`path-openable ${classNameFor(record.source)}`}
                     type="button"
-                    title="单击在资源管理器中定位；双击直接打开"
+                    title={ui("单击在资源管理器中定位；双击直接打开", "Click to reveal in File Explorer; double-click to open")}
                     onClick={() => queueReveal(record.source)}
                     onDoubleClick={(event) => {
                       event.preventDefault();
@@ -333,7 +335,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                   <button
                     className={`path-openable ${classNameFor(record.destination)}`}
                     type="button"
-                    title="单击在资源管理器中定位；双击直接打开"
+                    title={ui("单击在资源管理器中定位；双击直接打开", "Click to reveal in File Explorer; double-click to open")}
                     onClick={() => queueReveal(record.destination)}
                     onDoubleClick={(event) => {
                       event.preventDefault();
@@ -348,29 +350,29 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                 </div>
                 <div className="history-foot">
                   <div>
-                    <span>迁移空间</span>
+                    <span>{ui("迁移空间", "Migrated space")}</span>
                     <strong>{formatBytes(record.totalBytes)}</strong>
                   </div>
                   <div>
-                    <span>链接方式</span>
+                    <span>{ui("链接方式", "Link type")}</span>
                     <strong>
                       {record.linkType === "junction"
-                        ? "目录联接"
+                        ? ui("目录联接", "Directory junction")
                         : record.linkType === "symbolic-link"
-                          ? "符号链接"
+                          ? ui("符号链接", "Symbolic link")
                           : "—"}
                     </strong>
                   </div>
                   {record.migrationCount > 1 && (
                     <div>
-                      <span>迁移次数</span>
-                      <strong>已迁移 {record.migrationCount} 次</strong>
+                      <span>{ui("迁移次数", "Migration count")}</span>
+                      <strong>{ui(`已迁移 ${record.migrationCount} 次`, `Migrated ${record.migrationCount} times`)}</strong>
                     </div>
                   )}
                   {record.error && <p className="record-error">{record.error}</p>}
                   {record.stage === "linked" && rollbackId !== record.id && (
                     <button className="secondary-button" type="button" onClick={() => setRollbackId(record.id)}>
-                      <RotateCcw size={14} /> 恢复到原位置
+                      <RotateCcw size={14} /> {ui("恢复到原位置", "Restore to original location")}
                     </button>
                   )}
                   {record.stage === "rolled-back" && (
@@ -385,23 +387,23 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                       ) : (
                         <Redo2 size={14} />
                       )}
-                      {busyId === record.id ? "再次迁移中…" : "再次迁移"}
+                      {busyId === record.id ? ui("再次迁移中…", "Migrating again…") : ui("再次迁移", "Migrate again")}
                     </button>
                   )}
                 </div>
                 {rollbackId === record.id && (
                   <div className="rollback-confirm">
                     <AlertTriangle size={17} />
-                    <span>恢复会先复制并校验源目录，确认恢复完整后删除目标磁盘迁移副本。</span>
+                    <span>{ui("恢复会先复制并校验源目录，确认恢复完整后删除目标磁盘迁移副本。", "Restore first copies and verifies the source directory, then removes the migrated destination copy after integrity is confirmed.")}</span>
                     <button type="button" onClick={() => setRollbackId("")}>
-                      取消
+                      {ui("取消", "Cancel")}
                     </button>
                     <button
                       type="button"
                       disabled={busyId === record.id}
                       onClick={() => void rollback(record)}
                     >
-                      {busyId === record.id ? "回滚中…" : "确认回滚"}
+                      {busyId === record.id ? ui("回滚中…", "Restoring…") : ui("确认回滚", "Confirm restore")}
                     </button>
                   </div>
                 )}

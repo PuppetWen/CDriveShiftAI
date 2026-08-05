@@ -30,6 +30,8 @@ import {
 } from "./ai-client";
 import { configureApplicationDataPaths } from "./data-root";
 import { createDiagnosticReport } from "./diagnostics";
+import { ForceDeleteService } from "./force-delete";
+import { nativeStrings } from "./i18n";
 import {
   configureLogger,
   getLogDirectory,
@@ -104,6 +106,11 @@ let lastVisibleUpdateCheckAt = 0;
 const store = new AppStore();
 let migrationService: MigrationService;
 const aiVerifications = new Map<string, { fingerprint: string; expiresAt: number }>();
+const forceDeleteService = new ForceDeleteService({
+  applicationExecutable: process.execPath,
+  applicationDataRoot,
+  createVerificationId: randomUUID
+});
 
 function syncSearchBackgroundMode(): void {
   const hasVisibleWindow = [mainWindow, quickSearchWindow, uninstallRestoreWindow].some(
@@ -348,7 +355,9 @@ function showAsSoonAsRenderable(window: BrowserWindow, maximized = false): void 
 }
 
 function createWindow(): BrowserWindow {
-  const effect = store.getSettings().effectMode;
+  const settings = store.getSettings();
+  const effect = settings.effectMode;
+  const strings = nativeStrings(settings.language);
   const colors = effectColors[effect];
   const restored = restoreWindowBounds(
     store.getUiLayout().mainWindowBounds,
@@ -364,7 +373,7 @@ function createWindow(): BrowserWindow {
     show: false,
     backgroundColor: colors.background,
     icon: applicationIconPath(),
-    title: "CDriveShiftAI · 全盘 AI 智迁",
+    title: `CDriveShiftAI · ${strings.tagline}`,
     titleBarStyle: "hidden",
     titleBarOverlay: {
       color: "#00000000",
@@ -423,11 +432,21 @@ function createWindow(): BrowserWindow {
 }
 
 function emitSettingsChanged(settings: AppSettings): void {
+  const strings = nativeStrings(settings.language);
   for (const window of [mainWindow, quickSearchWindow]) {
     if (window && !window.isDestroyed()) {
       window.webContents.send("settings:changed", settings);
       applyNativeEffect(settings.effectMode, window);
     }
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setTitle(`CDriveShiftAI · ${strings.tagline}`);
+  }
+  if (quickSearchWindow && !quickSearchWindow.isDestroyed()) {
+    quickSearchWindow.setTitle(strings.quickWindow);
+  }
+  if (uninstallRestoreWindow && !uninstallRestoreWindow.isDestroyed()) {
+    uninstallRestoreWindow.setTitle(strings.uninstallWindow);
   }
 }
 
@@ -522,6 +541,7 @@ function createQuickSearchWindow(): BrowserWindow {
     return quickSearchWindow;
   }
   const settings = store.getSettings();
+  const strings = nativeStrings(settings.language);
   const colors = effectColors[settings.effectMode];
   const restored = restoreWindowBounds(
     store.getUiLayout().quickSearchWindowBounds,
@@ -537,7 +557,7 @@ function createQuickSearchWindow(): BrowserWindow {
     show: false,
     backgroundColor: colors.background,
     icon: applicationIconPath(),
-    title: "CDriveShiftAI 极速搜索",
+    title: strings.quickWindow,
     titleBarStyle: "hidden",
     titleBarOverlay: {
       color: "#00000000",
@@ -571,6 +591,7 @@ function createQuickSearchWindow(): BrowserWindow {
 
 function createUninstallRestoreWindow(): BrowserWindow {
   const settings = store.getSettings();
+  const strings = nativeStrings(settings.language);
   const colors = effectColors[settings.effectMode];
   const window = new BrowserWindow({
     width: 940,
@@ -582,7 +603,7 @@ function createUninstallRestoreWindow(): BrowserWindow {
     maximizable: false,
     backgroundColor: colors.background,
     icon: applicationIconPath(),
-    title: "CDriveShiftAI · 卸载前恢复",
+    title: strings.uninstallWindow,
     titleBarStyle: "hidden",
     titleBarOverlay: {
       color: "#00000000",
@@ -646,27 +667,28 @@ async function chooseTrayAiProvider(providerId: AiProviderId): Promise<void> {
 }
 
 function createTray(): void {
+  const settings = store.getSettings();
+  const strings = nativeStrings(settings.language);
   if (!tray) {
     const image = nativeImage.createFromPath(applicationIconPath()).resize({
       width: 20,
       height: 20
     });
     tray = new Tray(image);
-    tray.setToolTip("CDriveShiftAI · 全盘 AI 智迁");
     tray.on("double-click", () => showMainView("overview"));
   }
+  tray.setToolTip(`CDriveShiftAI · ${strings.tagline}`);
 
-  const settings = store.getSettings();
   const providerLabel =
     trayAiProviders.find((item) => item.id === settings.ai.provider)?.label ??
     settings.ai.provider;
   const viewItems: MenuItemConstructorOptions[] = [
-    ["空间总览", "overview", "overview"],
-    ["极速搜索", "search", "search"],
-    ["磁盘归属地图", "ownership-map", "map"],
-    ["AI 归属分析", "analyze", "ai"],
-    ["安全迁移", "migrate", "move"],
-    ["迁移记录", "history", "history"]
+    [strings.overview, "overview", "overview"],
+    [strings.search, "search", "search"],
+    [strings.ownership, "ownership-map", "map"],
+    [strings.analyze, "analyze", "ai"],
+    [strings.migrate, "migrate", "move"],
+    [strings.history, "history", "history"]
   ].map(([label, view, icon]) => ({
     label,
     icon: createTrayMenuIcon(icon as TrayIconKind),
@@ -675,29 +697,29 @@ function createTray(): void {
 
   const template: MenuItemConstructorOptions[] = [
     {
-      label: "打开 CDriveShiftAI",
+      label: strings.open,
       icon: createTrayMenuIcon("app"),
       click: () => showMainView("overview")
     },
     {
-      label: "独立极速搜索",
+      label: strings.quickSearch,
       icon: createTrayMenuIcon("search", "#45aaba"),
       click: () => createQuickSearchWindow()
     },
     { type: "separator" },
     {
-      label: "快速功能",
+      label: strings.quickFunctions,
       icon: createTrayMenuIcon("quick", "#d9a441"),
       submenu: viewItems
     },
     {
-      label: `AI 服务 · ${providerLabel}`,
+      label: `${strings.aiService} · ${providerLabel}`,
       icon: createTrayMenuIcon("ai", settings.ai.enabled ? "#32a879" : "#9a7b45"),
       submenu: [
         {
           label: settings.ai.verifiedAt
-            ? `${settings.ai.enabled ? "已启用" : "已暂停"} · ${settings.ai.model || providerLabel}`
-            : "尚未完成连接测试",
+            ? `${settings.ai.enabled ? strings.enabled : strings.paused} · ${settings.ai.model || providerLabel}`
+            : strings.notTested,
           icon: createTrayMenuIcon("ai-status"),
           enabled: false
         },
@@ -716,7 +738,7 @@ function createTray(): void {
           click: () => {
             void chooseTrayAiProvider(provider.id).catch((error) => {
               void dialog.showErrorBox(
-                "无法切换 AI 服务",
+                strings.unableAi,
                 error instanceof Error ? error.message : String(error)
               );
             });
@@ -724,21 +746,21 @@ function createTray(): void {
         })),
         { type: "separator" },
         {
-          label: "配置 URL、Key 与模型…",
+          label: strings.configureAi,
           icon: createTrayMenuIcon("ai-config"),
           click: () => showMainView("settings", { focus: "ai-settings" })
         }
       ]
     },
     {
-      label: "界面主题",
+      label: strings.theme,
       icon: createTrayMenuIcon("theme", "#a36fd1"),
       submenu: ([
-        ["aurora", "方块 · 像素湖境"],
-        ["matrix", "科技 · HUD 数据流"],
-        ["calm", "晶境 · 玻璃流光"],
-        ["ember", "熔橙 · 熔芯蜂巢"],
-        ["ivory", "暖瓷 · 米白陶影"]
+        ["aurora", strings.aurora],
+        ["matrix", strings.matrix],
+        ["calm", strings.calm],
+        ["ember", strings.ember],
+        ["ivory", strings.ivory]
       ] as const).map(([effectMode, label]) => ({
         label,
         type: "radio" as const,
@@ -760,13 +782,13 @@ function createTray(): void {
       }))
     },
     {
-      label: "设置与快捷键",
+      label: strings.settings,
       icon: createTrayMenuIcon("settings"),
       click: () => showMainView("settings")
     },
     { type: "separator" },
     {
-      label: "退出",
+      label: strings.exit,
       icon: createTrayMenuIcon("exit", "#bd5d5d"),
       click: () => app.quit()
     }
@@ -1507,6 +1529,14 @@ function registerIpc(): void {
     await shell.trashItem(value);
     return true;
   });
+
+  ipcMain.handle("shell:force-delete-preview", (_event, targetPath: unknown) =>
+    forceDeleteService.preview(assertString(targetPath, "路径"))
+  );
+
+  ipcMain.handle("shell:force-delete-execute", (_event, verificationId: unknown) =>
+    forceDeleteService.execute(assertString(verificationId, "强制删除确认 ID", 128))
+  );
 
   ipcMain.handle(
     "shell:search-context-menu",
