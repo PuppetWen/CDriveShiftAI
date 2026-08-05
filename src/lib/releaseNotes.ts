@@ -5,63 +5,63 @@ export const bundledReleaseNotes: {
   summary: string;
   sections: AppUpdateReleaseSection[];
 } = {
-  version: "0.0.7",
-  summary: "本版补齐多语言界面、搜索结果路径提示和受控强制删除，并优化侧边栏与筛选布局。",
+  version: "0.0.8",
+  summary: "本版修复 Windows 索引缓存覆盖失败与残缺缓存误判，确保少量异常结果会自动重建。",
   sections: [
     {
-      title: "搜索与文件操作",
+      title: "索引缓存修复",
       items: [
-        "长路径悬浮提示会显示完整内容、自动换行，并始终限制在当前窗口内。",
-        "右键菜单新增受控强制删除：先识别并关闭占用进程，再删除文件或目录，并提供失败明细。",
-        "目录名称搜索、实时新增与删除、分页加载、完整排序和内容搜索范围清理均完成回归。"
+        "修复已有缓存刷新时 Windows 返回 os error 5、无法覆盖旧索引的问题。",
+        "新缓存会在释放旧内存映射后原子替换；发布失败会恢复原文件，不留下半成品。",
+        "持久化失败时改为明确显示仅本次会话可用，并记录可导出的诊断信息。"
       ]
     },
     {
-      title: "语言与界面",
+      title: "完整性保护",
       items: [
-        "设置新增不少于十种主流语言，主导航、搜索、设置、迁移、归属地图和运行状态会同步切换。",
-        "侧边栏支持平滑拖动调整宽度和折叠，图标、标题、更新记录与筛选控件重新校准对齐。",
-        "五套主题统一覆盖新语言选择器、完整路径提示与强制删除确认窗口。"
+        "明显残缺的系统盘缓存不再标记为 CACHED，而会在启动时自动废弃并重建。",
+        "MFT 返回异常少量结果时自动改用完整目录扫描，避免把局部结果保存为全盘索引。",
+        "扫描最终仍不完整时保持错误状态，不再显示索引已就绪。"
       ]
     },
     {
-      title: "性能与稳定性",
+      title: "回归验证",
       items: [
-        "616 万级持久化索引继续使用原生分页查询，前台搜索保持亚秒响应。",
-        "托盘静默时销毁渲染器并暂停后台全量工作，只保留索引监听、快捷键和托盘能力。",
-        "缓存重启、增量重放、动态新增删除、干净退出和强制删除占用进程均加入自动化验证。"
+        "新增 Windows 已有缓存覆盖、残缺缓存拒绝和原文件回滚自动化测试。",
+        "缓存重启、增量重放、强制刷新和动态文件变化回归通过。",
+        "616 万条真实持久化索引完成包含、完整词和模糊查询性能复测。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: typeof bundledReleaseNotes = {
-  version: "0.0.7",
+  version: "0.0.8",
   summary:
-    "This release completes multilingual UI coverage, full-path tooltips, controlled force deletion, and layout refinements.",
+    "This release fixes Windows cache replacement failures and prevents incomplete indexes from being reported as ready.",
   sections: [
     {
-      title: "Search and file actions",
+      title: "Index cache fix",
       items: [
-        "Long-path tooltips now expose the complete path, wrap naturally, and remain inside the current window.",
-        "The result context menu adds controlled force deletion that identifies and closes locking processes before removal.",
-        "Directory name search, live creates and deletes, paging, full-result sorting, and content-scope clearing are covered by regression tests."
+        "Fixed os error 5 when a Windows refresh attempted to replace an existing persistent index.",
+        "The old memory map is released before atomic publication; a failed publication restores the previous cache.",
+        "A persistence failure is now reported as session-only index availability and recorded in exportable diagnostics."
       ]
     },
     {
-      title: "Languages and interface",
+      title: "Integrity safeguards",
       items: [
-        "Settings now offer more than ten major languages across navigation, search, settings, migration, ownership results, and runtime status.",
-        "The sidebar resizes smoothly and collapses, while icons, headings, release notes, and filter controls have been realigned.",
-        "All five themes cover the language picker, full-path tooltip, and force-delete confirmation dialog."
+        "An obviously incomplete system-drive cache is rejected and rebuilt instead of being marked CACHED.",
+        "An implausibly small MFT result automatically falls back to a complete directory scan.",
+        "A scan that remains incomplete stays in an error state and is never published as ready."
       ]
     },
     {
-      title: "Performance and stability",
+      title: "Regression coverage",
       items: [
-        "The native paged search engine keeps multi-million-entry persisted-index queries within a sub-second target.",
-        "Tray idle mode destroys renderer processes and suspends bulk background work while preserving watchers, shortcuts, and tray access.",
-        "Automated coverage now includes cache restart, delta replay, live filesystem changes, clean shutdown, and locked-file force deletion."
+        "Automated tests now cover Windows replacement of an existing cache, incomplete-cache rejection, and rollback.",
+        "Cache restart, delta replay, forced refresh, and live filesystem changes pass regression testing.",
+        "Contains, whole-word, and fuzzy queries were rechecked against a real 6.16-million-entry cache."
       ]
     }
   ]

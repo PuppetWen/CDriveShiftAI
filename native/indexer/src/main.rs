@@ -20,6 +20,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CACHE_MAGIC: &[u8; 8] = b"CSIDX02\0";
 const CONTENT_INDEX_VERSION: u32 = 3;
+// A normal Windows system volume always contains far more entries than this.
+// Keeping the threshold conservative lets us reject an interrupted/stale cache
+// without making assumptions about optional data drives.
+const MINIMUM_SYSTEM_DRIVE_ENTRIES: usize = 10_000;
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -551,6 +555,74 @@ fn normalized_path_hash(value: &str) -> u64 {
         }
     }
     hash
+}
+
+fn is_drive_root(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+fn system_drive_root() -> Option<String> {
+    let value = env::var("SystemDrive").ok()?;
+    let drive = value.as_bytes().first().copied()?;
+    drive
+        .is_ascii_alphabetic()
+        .then(|| format!("{}:\\", (drive as char).to_ascii_uppercase()))
+}
+
+fn path_belongs_to_root(path_value: &str, root: &str) -> bool {
+    path_value
+        .get(..root.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(root))
+}
+
+fn validate_global_entry_count<'a>(
+    roots: &[String],
+    paths: impl Iterator<Item = &'a str>,
+) -> io::Result<()> {
+    let Some(system_root) = system_drive_root() else {
+        return Ok(());
+    };
+    if !roots.iter().all(|root| is_drive_root(root))
+        || !roots
+            .iter()
+            .any(|root| root.eq_ignore_ascii_case(&system_root))
+    {
+        return Ok(());
+    }
+
+    let system_entries = paths
+        .filter(|path_value| path_belongs_to_root(path_value, &system_root))
+        .take(MINIMUM_SYSTEM_DRIVE_ENTRIES)
+        .count();
+    if system_entries < MINIMUM_SYSTEM_DRIVE_ENTRIES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "incomplete system-drive index: only {system_entries} entries under {system_root}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_entry_cache(roots: &[String], index: &SearchIndex) -> io::Result<()> {
+    validate_global_entry_count(
+        roots,
+        index
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(entry_index, _)| index.live.get(*entry_index).copied().unwrap_or(false))
+            .filter_map(|(entry_index, _)| index.path(entry_index)),
+    )
+}
+
+fn validate_scanned_entries(roots: &[String], entries: &[Entry]) -> io::Result<()> {
+    validate_global_entry_count(roots, entries.iter().map(|entry| entry.path.as_str()))
 }
 
 fn wait_while_backgrounded(backgrounded: &AtomicBool, stopping: &AtomicBool) -> bool {
@@ -1409,6 +1481,9 @@ fn save_cache(
         fs::create_dir_all(parent)?;
     }
     let temporary = cache_path.with_extension("tmp");
+    let backup = cache_path.with_extension("previous");
+    let _ = fs::remove_file(&temporary);
+    let _ = fs::remove_file(&backup);
     let mut writer = BufWriter::new(File::create(&temporary)?);
     writer.write_all(CACHE_MAGIC)?;
     let root_bytes = root.as_bytes();
@@ -1431,7 +1506,23 @@ fn save_cache(
     }
     writer.flush()?;
     drop(writer);
-    fs::rename(temporary, cache_path)?;
+    // std::fs::rename cannot replace an existing destination on Windows and
+    // reports access denied (os error 5). Move the old cache aside first, then
+    // restore it if publishing the newly written cache fails.
+    let had_previous = cache_path.exists();
+    if had_previous {
+        fs::rename(cache_path, &backup)?;
+    }
+    if let Err(error) = fs::rename(&temporary, cache_path) {
+        if had_previous {
+            let _ = fs::rename(&backup, cache_path);
+        }
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if had_previous {
+        let _ = fs::remove_file(&backup);
+    }
     Ok(())
 }
 
@@ -3215,6 +3306,7 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
                     ),
                 ),
             };
+            validate_entry_cache(&state.roots, &index)?;
             Ok((index, delta_count, message))
         })();
 
@@ -3246,7 +3338,21 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
             Err(error) if state.stopping.load(Ordering::Relaxed) => {
                 let _ = error;
             }
-            Err(_) => {
+            Err(error) => {
+                eprintln!("persisted index rejected; rebuilding: {error}");
+                update_status(
+                    &state,
+                    &output,
+                    Status {
+                        mode: "repair".to_string(),
+                        state: "indexing".to_string(),
+                        entries: 0,
+                        progress: 0.02,
+                        root: state.display_root.clone(),
+                        updated_at: None,
+                        message: Some("检测到旧索引不完整或不可用，正在自动重建".to_string()),
+                    },
+                );
                 set_indexing_priority(false);
                 start_scan(Arc::clone(&state), output.clone());
                 return;
@@ -3341,7 +3447,29 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     break;
                 }
                 match ntfs::enumerate(root, &state.backgrounded, &state.stopping) {
-                    Ok(mut entries) => combined.append(&mut entries),
+                    Ok(mut entries)
+                        if validate_scanned_entries(std::slice::from_ref(root), &entries)
+                            .is_ok() =>
+                    {
+                        combined.append(&mut entries)
+                    }
+                    Ok(entries) => {
+                        used_walker = true;
+                        output.status(&Status {
+                            mode: "hybrid".to_string(),
+                            state: "indexing".to_string(),
+                            entries: combined.len(),
+                            progress,
+                            root: state.display_root.clone(),
+                            updated_at: None,
+                            message: Some(format!(
+                                "{} 的 MFT 结果不完整（仅 {} 条），正在改用完整目录扫描",
+                                root,
+                                entries.len()
+                            )),
+                        });
+                        combined.extend(walk_filesystem(root, &output, &state));
+                    }
                     Err(mft_error) => {
                         used_walker = true;
                         output.status(&Status {
@@ -3360,9 +3488,10 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     }
                 }
             }
+            let validation = validate_scanned_entries(&state.roots, &combined);
             (
                 if used_walker { "hybrid" } else { "mft" }.to_string(),
-                Ok::<Vec<Entry>, io::Error>(combined),
+                validation.map(|_| combined),
             )
         };
 
@@ -3372,7 +3501,8 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
             for root in &state.roots {
                 combined.extend(walk_filesystem(root, &output, &state));
             }
-            ("walker".to_string(), Ok::<Vec<Entry>, io::Error>(combined))
+            let validation = validate_scanned_entries(&state.roots, &combined);
+            ("walker".to_string(), validation.map(|_| combined))
         };
 
         match result {
@@ -3397,6 +3527,18 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     },
                 );
                 let cache_key = state.roots.join("|");
+                // A cached index keeps the old file memory-mapped. Release that
+                // mapping immediately before replacing the file on Windows.
+                // Searches remain available again as soon as the new in-memory
+                // or mapped index is installed below.
+                let previous_index = {
+                    let mut current = state
+                        .index
+                        .write()
+                        .unwrap_or_else(|error| error.into_inner());
+                    std::mem::take(&mut *current)
+                };
+                drop(previous_index);
                 let save_result = save_cache(
                     &state.cache_path,
                     &cache_key,
@@ -3404,21 +3546,32 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     &state.backgrounded,
                     &state.stopping,
                 );
-                let cache_error = save_result.err();
+                let mut cache_error = save_result.err();
+                let mut entries = Some(entries);
                 let mut index = if cache_error.is_none() {
-                    drop(entries);
                     match load_cache_index(&state.cache_path, &state.backgrounded, &state.stopping)
                     {
-                        Ok((_cached_root, index)) => index,
-                        Err(_) => {
-                            state.scanning.store(false, Ordering::SeqCst);
-                            set_indexing_priority(false);
-                            return;
+                        Ok((_cached_root, index)) => {
+                            entries.take();
+                            index
+                        }
+                        Err(error) => {
+                            cache_error = Some(error);
+                            let Some(index) = SearchIndex::from_entries_controlled(
+                                entries.take().unwrap_or_default(),
+                                &state.backgrounded,
+                                &state.stopping,
+                            ) else {
+                                state.scanning.store(false, Ordering::SeqCst);
+                                set_indexing_priority(false);
+                                return;
+                            };
+                            index
                         }
                     }
                 } else {
                     let Some(index) = SearchIndex::from_entries_controlled(
-                        entries,
+                        entries.take().unwrap_or_default(),
                         &state.backgrounded,
                         &state.stopping,
                     ) else {
@@ -3444,6 +3597,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                 state.generation.fetch_add(1, Ordering::AcqRel);
                 drop(delta_guard);
                 trim_process_working_set();
+                let persistent_cache = cache_error.is_none();
                 let cache_message = match (cache_error, delta_result.err()) {
                     (Some(cache_error), Some(delta_error)) => Some(format!(
                         "索引可用，但缓存和增量日志读取失败：{}；{}",
@@ -3457,7 +3611,11 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     &state,
                     &output,
                     Status {
-                        mode,
+                        mode: if persistent_cache {
+                            mode
+                        } else {
+                            "volatile".to_string()
+                        },
                         state: "ready".to_string(),
                         entries: count,
                         progress: 1.0,
@@ -3853,9 +4011,13 @@ fn main() {
 mod tests {
     use super::{
         contains_whole_word, fuzzy_subsequence_score, lowercase_name_signature, name_signature,
-        normalized_path_hash, Entry, SearchIndex,
+        load_cache_index, normalized_path_hash, save_cache, system_drive_root,
+        validate_global_entry_count, Entry, SearchIndex, MINIMUM_SYSTEM_DRIVE_ENTRIES,
     };
+    use std::env;
+    use std::fs;
     use std::sync::atomic::AtomicBool;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn streaming_name_signature_preserves_case_folded_matches() {
@@ -3873,6 +4035,76 @@ mod tests {
             normalized_path_hash("C:/Users/Puppet/AppData"),
             normalized_path_hash("c:\\users\\puppet\\appdata")
         );
+    }
+
+    #[test]
+    fn incomplete_system_drive_cache_is_rejected() {
+        let Some(system_root) = system_drive_root() else {
+            return;
+        };
+        let roots = vec![system_root.clone()];
+        let paths = (0..120)
+            .map(|index| format!("{system_root}partial-{index}"))
+            .collect::<Vec<_>>();
+        assert!(validate_global_entry_count(&roots, paths.iter().map(String::as_str)).is_err());
+
+        let paths = (0..MINIMUM_SYSTEM_DRIVE_ENTRIES)
+            .map(|index| format!("{system_root}complete-{index}"))
+            .collect::<Vec<_>>();
+        assert!(validate_global_entry_count(&roots, paths.iter().map(String::as_str)).is_ok());
+    }
+
+    #[test]
+    fn cache_save_replaces_existing_file_on_windows() {
+        let test_root = env::temp_dir().join(format!(
+            "cshift-cache-replace-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&test_root).expect("create test directory");
+        let cache_path = test_root.join("search-index-v1.bin");
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        save_cache(
+            &cache_path,
+            "T:\\",
+            &[Entry {
+                path: r"T:\first.txt".to_string(),
+                is_directory: false,
+                size: 1,
+            }],
+            &backgrounded,
+            &stopping,
+        )
+        .expect("save initial cache");
+        save_cache(
+            &cache_path,
+            "T:\\",
+            &[
+                Entry {
+                    path: r"T:\second.txt".to_string(),
+                    is_directory: false,
+                    size: 2,
+                },
+                Entry {
+                    path: r"T:\third.txt".to_string(),
+                    is_directory: false,
+                    size: 3,
+                },
+            ],
+            &backgrounded,
+            &stopping,
+        )
+        .expect("replace existing cache");
+        let (root, index) =
+            load_cache_index(&cache_path, &backgrounded, &stopping).expect("load replacement");
+        assert_eq!(root, "T:\\");
+        assert_eq!(index.len(), 2);
+        drop(index);
+        fs::remove_dir_all(test_root).expect("remove test directory");
     }
 
     #[test]

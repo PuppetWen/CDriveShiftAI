@@ -159,6 +159,9 @@ export class SearchService {
     child.stderr.on("data", (chunk) => {
       const message = chunk.toString("utf8").trim();
       if (message) this.status.message = message.slice(-300);
+      if (message) {
+        logger.warn("indexer.stderr", { message: message.slice(-2_000) });
+      }
       if (message && process.env.CDRIVESHIFTAI_TRIM_DIAGNOSTICS === "1") {
         process.stderr.write(`${message}\n`);
       }
@@ -927,10 +930,22 @@ export class SearchService {
 
   private updateStatus(status: IndexerStatus): void {
     const previousState = this.status.state;
+    const previousMode = this.status.mode;
     if (status.state === "indexing" && previousState !== "indexing") {
       this.lastFullRefreshRequestedAt = Date.now();
     }
     this.status = structuredClone(status);
+    if (status.state !== previousState || status.mode !== previousMode) {
+      logger.info("indexer.status_changed", {
+        previousState,
+        previousMode,
+        state: status.state,
+        mode: status.mode,
+        entries: status.entries,
+        progress: status.progress,
+        message: status.message
+      });
+    }
     this.onStatus(this.getStatus());
     if (status.state === "ready" && previousState !== "ready") {
       void this.scheduleDailyRefresh();

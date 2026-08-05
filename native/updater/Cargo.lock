@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "cshift-updater"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "serde",
  "serde_json",
