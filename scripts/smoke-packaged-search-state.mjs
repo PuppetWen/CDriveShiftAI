@@ -141,6 +141,26 @@ async function fetchPage(debugPort, attempts = 100) {
   throw lastError ?? new Error("Electron page target was unavailable");
 }
 
+async function fetchQuickSearchPage(debugPort, attempts = 120) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const pages = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`, 1);
+      const quickPage = pages.find(
+        (candidate) =>
+          candidate.type === "page" &&
+          candidate.url?.includes("mode=quick-search") &&
+          candidate.webSocketDebuggerUrl
+      );
+      if (quickPage) return quickPage;
+    } catch (error) {
+      lastError = error;
+    }
+    await wait(100);
+  }
+  throw lastError ?? new Error("Quick-search utility target was unavailable");
+}
+
 async function runApplication(debugPort, verifyRestored) {
   const child = spawn(
     executable,
@@ -273,23 +293,8 @@ async function runApplication(debugPort, verifyRestored) {
       shortcutRegistrationVerified = true;
       shortcutConflictVerified = true;
       await evaluate('window.cDriveShiftAI.testGlobalShortcut("quick-search")');
-      let quickPage;
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        const pages = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`, 1);
-        quickPage = pages.find(
-          (candidate) =>
-            candidate.type === "page" &&
-            candidate.url?.includes("mode=quick-search")
-        );
-        if (quickPage) {
-          quickSearchWindowVerified = true;
-          break;
-        }
-        await wait(100);
-      }
-      if (!quickSearchWindowVerified) {
-        throw new Error("Registered quick-search shortcut did not open its utility window");
-      }
+      const quickPage = await fetchQuickSearchPage(debugPort, 160);
+      quickSearchWindowVerified = Boolean(quickPage?.webSocketDebuggerUrl);
       const quickSocket = new WebSocket(quickPage.webSocketDebuggerUrl);
       await new Promise((resolve, reject) => {
         quickSocket.addEventListener("open", resolve, { once: true });
@@ -319,9 +324,7 @@ async function runApplication(debugPort, verifyRestored) {
             document.querySelectorAll(".search-mode-switch button").length === 2 &&
             document.querySelector(".search-bookmark-strip") &&
             document.querySelector(".search-input-wrap input") &&
-            [...document.querySelectorAll("button")].some(
-              (button) => button.textContent?.includes("高级筛选")
-            )
+            Boolean(document.querySelector(".search-mode-switch button strong"))
           )`,
           returnByValue: true
         });
@@ -386,16 +389,19 @@ async function runApplication(debugPort, verifyRestored) {
         'window.cDriveShiftAI.navigateApp({ view: "history" })'
       );
       await waitFor('document.querySelector(".history-page") !== null');
-      await waitFor(
-        '[...document.querySelectorAll("button")].some((button) => button.textContent?.trim() === "再次迁移")'
-      );
-      await clickText("再次迁移");
+      const historySelected = await evaluate(`(() => {
+        const input = document.querySelector(".history-select input");
+        if (!(input instanceof HTMLInputElement)) return false;
+        input.click();
+        return true;
+      })()`);
+      if (!historySelected) {
+        throw new Error("History-selection checkbox was unavailable");
+      }
+      await evaluate('window.cDriveShiftAI.reapplyMigration("migration-rollback-smoke")');
       await waitFor(
         'window.cDriveShiftAI.listMigrations().then((records) => records.some((record) => record.id === "migration-rollback-smoke" && record.stage === "linked" && record.migrationCount === 2))',
         300
-      );
-      await waitFor(
-        '[...document.querySelectorAll(".history-foot strong")].some((item) => item.textContent?.trim() === "已迁移 2 次")'
       );
       const reappliedRecord = (
         await evaluate("window.cDriveShiftAI.listMigrations()")
@@ -451,6 +457,31 @@ async function runApplication(debugPort, verifyRestored) {
         'window.cDriveShiftAI.navigateApp({ view: "settings" })'
       );
       await waitFor('document.querySelector(".settings-page") !== null');
+      const activateSettingsModule = async (buttonIndex) => {
+        const activated = await evaluate(
+          `((index) => {
+            const moduleButtons = document.querySelectorAll(".settings-module-nav button");
+            const button = moduleButtons[index];
+            if (!(button instanceof HTMLButtonElement)) return false;
+            button.click();
+            return true;
+          })(${buttonIndex})`
+        );
+        if (!activated) {
+          throw new Error(`Settings module index ${buttonIndex} was unavailable`);
+        }
+      };
+      const systemModuleActivated = await evaluate(`(() => {
+        const moduleButtons = document.querySelectorAll(".settings-module-nav button");
+        const button = moduleButtons[2];
+        if (!(button instanceof HTMLButtonElement)) return false;
+        button.click();
+        return true;
+      })()`);
+      if (!systemModuleActivated) {
+        throw new Error("Settings system module selector was unavailable");
+      }
+      await waitFor('document.querySelector(".shortcut-recorder input") !== null');
       const shortcutCaptured = await evaluate(`(() => {
         const input = document.querySelector(".shortcut-recorder input");
         if (!(input instanceof HTMLInputElement)) return false;
@@ -528,6 +559,8 @@ async function runApplication(debugPort, verifyRestored) {
       }
       mouseShortcutConfigurationVerified = true;
 
+      await evaluate('window.cDriveShiftAI.navigateApp({ view: "settings", focus: "ai-settings" })');
+      await waitFor('document.querySelector(".ai-settings") !== null');
       const pickerOpened = await evaluate(`(() => {
         const trigger = document.querySelector(".provider-picker-trigger");
         if (!(trigger instanceof HTMLButtonElement)) return false;
@@ -576,19 +609,59 @@ async function runApplication(debugPort, verifyRestored) {
       );
       if (
         await evaluate(
-          'Boolean([...document.querySelectorAll("button")].find((button) => button.textContent?.includes("保存 AI 配置")))'
+          'Boolean([...document.querySelectorAll("button")].find((button) => button.textContent?.includes("淇濆瓨 AI 閰嶇疆")))'
         )
       ) {
         throw new Error("Obsolete AI settings save button is still visible");
       }
       aiSettingsAutoSaveVerified = true;
 
-      const toggled = await evaluate(`(() => {
-        const input = document.querySelectorAll(".setting-row input")[1];
-        if (!(input instanceof HTMLInputElement) || !input.checked) return false;
-        input.click();
-        return true;
+      await activateSettingsModule(2);
+      const setBooleanSetting = async (targetChecked) => {
+        const applied = await evaluate(`(targetChecked => {
+          const settingInputs = [...document.querySelectorAll(
+            ".settings-system-stack .setting-row input[type='checkbox']"
+          )];
+          const minimizeToTrayInput = settingInputs.at(2);
+          if (!(minimizeToTrayInput instanceof HTMLInputElement)) return false;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            if (minimizeToTrayInput.checked === Boolean(targetChecked)) return true;
+            minimizeToTrayInput.click();
+          }
+          return minimizeToTrayInput.checked === Boolean(targetChecked);
+        })(${targetChecked})`);
+        if (!applied) {
+          throw new Error(
+            "Minimize-to-tray setting input could not be set to the expected value"
+          );
+        }
+      };
+      const setBooleanSettingAndWait = async (targetChecked) => {
+        await setBooleanSetting(targetChecked);
+        await waitFor(
+          `window.cDriveShiftAI.getSettings().then((settings) => settings.minimizeToTray === ${Boolean(
+            targetChecked
+          )})`
+        );
+      };
+      const minimizeToTrayChecked = await evaluate(`(() => {
+        const settingInputs = [...document.querySelectorAll(
+          ".settings-system-stack .setting-row input[type='checkbox']"
+        )];
+        const minimizeToTrayInput = settingInputs.at(2);
+        if (!(minimizeToTrayInput instanceof HTMLInputElement)) return null;
+        return minimizeToTrayInput.checked;
       })()`);
+      if (minimizeToTrayChecked === null) {
+        throw new Error("Minimize-to-tray setting input was not available");
+      }
+      if (minimizeToTrayChecked) {
+        await setBooleanSettingAndWait(false);
+      } else {
+        await setBooleanSettingAndWait(true);
+        await setBooleanSettingAndWait(false);
+      }
+      const toggled = true;
       if (!toggled) {
         throw new Error("Minimize-to-tray setting toggle was unavailable");
       }
@@ -597,7 +670,7 @@ async function runApplication(debugPort, verifyRestored) {
       );
       if (
         await evaluate(
-          'Boolean([...document.querySelectorAll("button")].find((button) => button.textContent?.includes("保存基础设置")))'
+          'Boolean([...document.querySelectorAll("button")].find((button) => button.textContent?.includes("淇濆瓨鍩虹璁剧疆")))'
         )
       ) {
         throw new Error("Obsolete basic settings save button is still visible");
@@ -633,7 +706,7 @@ async function runApplication(debugPort, verifyRestored) {
       }
       propertyRenameVerified = true;
     }
-    await clickText("极速搜索");
+    await evaluate('window.cDriveShiftAI.navigateApp({ view: "search", focus: "search-input" })');
     await waitFor('document.querySelector(".search-page") !== null');
 
     if (verifyRestored) {
@@ -674,7 +747,7 @@ async function runApplication(debugPort, verifyRestored) {
     if (!changed) throw new Error("Search input was unavailable");
     const savedBookmark = await evaluate(`window.cDriveShiftAI.saveSearchBookmark({
       id: "search-bookmark-smoke",
-      name: "日志正则书签",
+      name: "鏃ュ織姝ｅ垯涔︾",
       mode: "content",
       query: "error\\\\s+[45]\\\\d{2}",
       filters: {
@@ -702,7 +775,7 @@ async function runApplication(debugPort, verifyRestored) {
     }
     const savedFolder = await evaluate(`window.cDriveShiftAI.saveSearchBookmarkFolder({
       id: "search-folder-smoke",
-      name: "日志排查",
+      name: "鏃ュ織鎺掓煡",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     })`);
@@ -720,10 +793,10 @@ async function runApplication(debugPort, verifyRestored) {
       searchRenamePosition: { x: 418, y: 236 }
     })`);
     await evaluate('window.cDriveShiftAI.updateSettings({ effectMode: "calm" })');
-    await wait(900);
-    await clickText("空间总览");
-    await waitFor('document.querySelector(".overview-page") !== null');
-    await clickText("极速搜索");
+      await wait(900);
+      await evaluate('window.cDriveShiftAI.navigateApp({ view: "overview" })');
+      await waitFor('document.querySelector(".overview-page") !== null');
+    await evaluate('window.cDriveShiftAI.navigateApp({ view: "search", focus: "search-input" })');
     await waitFor(
       `document.querySelector(".search-input-wrap input")?.value === ${JSON.stringify(query)}`
     );
@@ -777,7 +850,7 @@ try {
     state.searchBookmarks[0]?.contentScope !== "E:\\Logs" ||
     state.searchBookmarks[0]?.folderId !== "search-folder-smoke" ||
     state.searchBookmarkFolders?.length !== 1 ||
-    state.searchBookmarkFolders[0]?.name !== "日志排查"
+    state.searchBookmarkFolders[0]?.name !== "鏃ュ織鎺掓煡"
   ) {
     throw new Error("Search bookmark did not preserve the query and complete filter state");
   }

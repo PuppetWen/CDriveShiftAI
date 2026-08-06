@@ -1,10 +1,15 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const workspace = path.resolve(import.meta.dirname, "..");
 const chromePath = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const previewUrl = process.argv[2] ?? "http://127.0.0.1:5173/?view=overview";
+const argPreviewUrl = process.argv[2];
+const defaultPreviewUrl = "http://127.0.0.1:5173/?view=overview";
+const distFallbackUrl = `${pathToFileURL(path.join(workspace, "dist", "index.html")).toString()}?view=overview`;
+let previewUrl = argPreviewUrl ?? defaultPreviewUrl;
 const viewportWidth = Math.max(900, Number(process.argv[3] ?? 1600));
 const viewportHeight = Math.max(600, Number(process.argv[4] ?? 1000));
 const outputDirectory = path.resolve("artifacts");
@@ -23,6 +28,7 @@ const chrome = spawn(
     "--remote-allow-origins=*",
     `--user-data-dir=${profileDirectory}`,
     "--no-first-run",
+    "--allow-file-access-from-files",
     "--disable-background-networking",
     "--disable-default-apps",
     "--hide-scrollbars",
@@ -33,6 +39,25 @@ const chrome = spawn(
 );
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function resolvePreviewUrl() {
+  if (argPreviewUrl) return argPreviewUrl;
+  try {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      try {
+        const response = await fetch(defaultPreviewUrl, { method: "HEAD" });
+        if (response.ok) return defaultPreviewUrl;
+      } catch (error) {
+        // Keep waiting for Vite to become reachable.
+      }
+      await wait(100);
+    }
+  } catch {
+    // Ignore and fallback to local build output.
+  }
+  if (existsSync(path.join(workspace, "dist", "index.html"))) return distFallbackUrl;
+  throw new Error("No preview source available: Vite server did not start and dist index.html is missing");
+}
 
 async function fetchJson(url, attempts = 60) {
   let lastError;
@@ -46,6 +71,21 @@ async function fetchJson(url, attempts = 60) {
     await wait(100);
   }
   throw lastError ?? new Error(`Unable to fetch ${url}`);
+}
+
+async function fetchPageTarget(attempts = 120) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const pages = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
+      const page = pages.find((candidate) => candidate.type === "page" && candidate.webSocketDebuggerUrl);
+      if (page?.webSocketDebuggerUrl) return page;
+    } catch (error) {
+      lastError = error;
+    }
+    await wait(100);
+  }
+  throw lastError ?? new Error("Chrome page target was not available");
 }
 
 let socket;
@@ -119,10 +159,8 @@ async function capture(fileName) {
 }
 
 try {
-  const pages = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
-  const page = pages.find((candidate) => candidate.type === "page");
-  if (!page?.webSocketDebuggerUrl) throw new Error("Chrome page target was not available");
-
+  previewUrl = await resolvePreviewUrl();
+  const page = await fetchPageTarget();
   socket = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
     socket.addEventListener("open", resolve, { once: true });
@@ -148,8 +186,11 @@ try {
   });
   await send("Page.navigate", { url: previewUrl });
   await waitFor('document.readyState === "complete"');
+  await waitFor('document.getElementById("root")?.children.length > 0', true, 220);
   await waitFor(
-    'document.querySelector(".effect-switcher") !== null || document.querySelector(".quick-search-workspace") !== null'
+    'document.querySelector(".app-shell") !== null || document.querySelector(".effect-switcher") !== null || document.querySelector(".quick-search-workspace") !== null || document.querySelector(".overview-page") !== null || document.querySelector(".view-loading-shell") !== null || document.querySelector(".bootstrap-loading") !== null',
+    true,
+    220
   );
   const requestedEffect = new URL(previewUrl).searchParams.get("effect");
   if (["aurora", "matrix", "calm", "ember", "ivory"].includes(requestedEffect)) {

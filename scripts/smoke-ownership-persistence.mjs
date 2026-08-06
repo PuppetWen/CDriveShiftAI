@@ -30,6 +30,23 @@ async function fetchJson(url, attempts = 120) {
   throw lastError ?? new Error(`Unable to fetch ${url}`);
 }
 
+async function fetchPage(debugPort, attempts = 120) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const pages = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`, 1);
+      const page = pages.find(
+        (candidate) => candidate.type === "page" && candidate.webSocketDebuggerUrl
+      );
+      if (page) return page;
+    } catch (error) {
+      lastError = error;
+    }
+    await wait(100);
+  }
+  throw lastError ?? new Error("Electron page target was unavailable");
+}
+
 async function withApplication(debugPort, task) {
   const child = spawn(
     executable,
@@ -42,9 +59,7 @@ async function withApplication(debugPort, task) {
   );
   let socket;
   try {
-    const pages = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
-    const page = pages.find((candidate) => candidate.type === "page");
-    if (!page?.webSocketDebuggerUrl) throw new Error("Electron page target was unavailable");
+    const page = await fetchPage(debugPort);
     socket = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
       socket.addEventListener("open", resolve, { once: true });

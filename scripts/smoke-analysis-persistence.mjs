@@ -50,9 +50,21 @@ async function withApplication(debugPort, task) {
   );
   let socket;
   try {
-    const pages = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
-    const page = pages.find((candidate) => candidate.type === "page");
-    if (!page?.webSocketDebuggerUrl) throw new Error("Electron page target was unavailable");
+    let page;
+    let lastError;
+    for (let attempt = 0; attempt < 140; attempt += 1) {
+      try {
+        const pages = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`, 1);
+        page = pages.find((candidate) => candidate.type === "page" && candidate.webSocketDebuggerUrl);
+        if (page) break;
+      } catch (error) {
+        lastError = error;
+      }
+      await wait(100);
+    }
+    if (!page?.webSocketDebuggerUrl) {
+      throw lastError ?? new Error("Electron page target was unavailable");
+    }
     socket = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
       socket.addEventListener("open", resolve, { once: true });
