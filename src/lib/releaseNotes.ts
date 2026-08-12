@@ -5,63 +5,63 @@ export const bundledReleaseNotes: {
   summary: string;
   sections: AppUpdateReleaseSection[];
 } = {
-  version: "0.0.8",
-  summary: "本版修复 Windows 索引缓存覆盖失败与残缺缓存误判，确保少量异常结果会自动重建。",
+  version: "0.0.10",
+  summary: "本版修复含 Junction 或符号链接的目录无法安全迁移的问题，并将链接纳入完整性校验。",
   sections: [
     {
-      title: "索引缓存修复",
+      title: "链接安全迁移",
       items: [
-        "修复已有缓存刷新时 Windows 返回 os error 5、无法覆盖旧索引的问题。",
-        "新缓存会在释放旧内存映射后原子替换；发布失败会恢复原文件，不留下半成品。",
-        "持久化失败时改为明确显示仅本次会话可用，并记录可导出的诊断信息。"
+        "Junction、目录符号链接和文件符号链接不再被误报为无法读取的条目。",
+        "迁移会复制链接本身而不展开目标，避免循环、重复数据或链接丢失。",
+        "预检计划新增链接数量，并继续阻止真实权限错误或不完整扫描。"
       ]
     },
     {
-      title: "完整性保护",
+      title: "完整性校验",
       items: [
-        "明显残缺的系统盘缓存不再标记为 CACHED，而会在启动时自动废弃并重建。",
-        "MFT 返回异常少量结果时自动改用完整目录扫描，避免把局部结果保存为全盘索引。",
-        "扫描最终仍不完整时保持错误状态，不再显示索引已就绪。"
+        "复制后同时核对文件数、目录数、总字节数和重解析点数量。",
+        "每个链接的相对路径与目标都会逐项比较，缺失或变化时不会执行切换。",
+        "校验以复制完成后的当前源目录为准，可发现复制期间发生的大多数变化。"
       ]
     },
     {
-      title: "回归验证",
+      title: "使用要求与验证",
       items: [
-        "新增 Windows 已有缓存覆盖、残缺缓存拒绝和原文件回滚自动化测试。",
-        "缓存重启、增量重放、强制刷新和动态文件变化回归通过。",
-        "616 万条真实持久化索引完成包含、完整词和模糊查询性能复测。"
+        "迁移前仍必须完全退出关联应用；Windows 无法可靠枚举所有打开文件。",
+        "新增真实 Robocopy Junction 复制和目录汇总回归测试。",
+        "49 项单元测试、类型检查和生产构建全部通过。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: typeof bundledReleaseNotes = {
-  version: "0.0.8",
+  version: "0.0.10",
   summary:
-    "This release fixes Windows cache replacement failures and prevents incomplete indexes from being reported as ready.",
+    "This release enables safe migration of directories containing junctions or symbolic links and verifies every preserved link.",
   sections: [
     {
-      title: "Index cache fix",
+      title: "Link-safe migration",
       items: [
-        "Fixed os error 5 when a Windows refresh attempted to replace an existing persistent index.",
-        "The old memory map is released before atomic publication; a failed publication restores the previous cache.",
-        "A persistence failure is now reported as session-only index availability and recorded in exportable diagnostics."
+        "Junctions, directory symlinks, and file symlinks are no longer reported as unreadable entries.",
+        "Migration copies links themselves instead of expanding their targets, preventing loops, duplication, or missing links.",
+        "The preflight plan reports link counts while continuing to block genuine permission and incomplete-scan errors."
       ]
     },
     {
-      title: "Integrity safeguards",
+      title: "Integrity verification",
       items: [
-        "An obviously incomplete system-drive cache is rejected and rebuilt instead of being marked CACHED.",
-        "An implausibly small MFT result automatically falls back to a complete directory scan.",
-        "A scan that remains incomplete stays in an error state and is never published as ready."
+        "Post-copy verification compares file counts, directory counts, total bytes, and reparse-point counts.",
+        "Every link's relative path and target are compared before the source path is switched.",
+        "Verification rescans the current source after copying to detect most changes made during the copy."
       ]
     },
     {
-      title: "Regression coverage",
+      title: "Requirements and validation",
       items: [
-        "Automated tests now cover Windows replacement of an existing cache, incomplete-cache rejection, and rollback.",
-        "Cache restart, delta replay, forced refresh, and live filesystem changes pass regression testing.",
-        "Contains, whole-word, and fuzzy queries were rechecked against a real 6.16-million-entry cache."
+        "Related applications must still be fully closed because Windows cannot reliably enumerate every open file.",
+        "Regression coverage now performs a real Robocopy junction-preservation test.",
+        "All 49 unit tests, type checks, and production builds passed."
       ]
     }
   ]

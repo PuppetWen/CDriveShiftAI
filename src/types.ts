@@ -258,6 +258,8 @@ export interface DirectorySummary {
   totalBytes: number;
   fileCount: number;
   directoryCount: number;
+  reparsePointCount: number;
+  reparsePoints?: Array<{ relativePath: string; target: string }>;
   lastModified?: string;
   extensionBreakdown: Array<{ extension: string; count: number; bytes: number }>;
   largestChildren: Array<{ path: string; bytes: number; isDirectory: boolean }>;
@@ -372,6 +374,7 @@ export interface PreflightResult {
   availableBytes: number;
   fileCount: number;
   directoryCount: number;
+  reparsePointCount: number;
   risk: "low" | "medium" | "high" | "blocked";
   warnings: string[];
   blockers: string[];

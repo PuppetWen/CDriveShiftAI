@@ -113,6 +113,7 @@ function createMockAnalysis(targetPath: string, useAi = false): AnalysisResult {
     totalBytes: 3.8 * 1024 ** 3,
     fileCount: 18_426,
     directoryCount: 1_284,
+    reparsePointCount: 2,
     lastModified: analyzedAt,
     extensionBreakdown: [
       { extension: ".jsonl", count: 7_210, bytes: 1.4 * 1024 ** 3 },
@@ -700,6 +701,7 @@ const browserFallback: CDriveShiftApi = {
       availableBytes: 612 * 1024 ** 3,
       fileCount: 8_426,
       directoryCount: 318,
+      reparsePointCount: 2,
       risk: "medium",
       warnings: ["演示模式：迁移前请完全退出关联应用。"],
       blockers: [],

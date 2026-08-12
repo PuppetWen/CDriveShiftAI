@@ -276,6 +276,10 @@ export function MigrateView({
                 <strong>{formatNumber(preflight.directoryCount)}</strong>
               </div>
               <div>
+                <span>{ui("链接", "Links")}</span>
+                <strong>{formatNumber(preflight.reparsePointCount)}</strong>
+              </div>
+              <div>
                 <span>{ui("目标可用", "Destination available")}</span>
                 <strong>{formatBytes(preflight.availableBytes)}</strong>
               </div>
@@ -370,7 +374,7 @@ export function MigrateView({
             )}
             <div className="warning-box">
               <AlertTriangle size={17} />
-              <span>{ui("开始前请完全退出关联应用。切换成功后，源盘旧副本会删除以实际释放空间。", "Close all related applications before starting. After a successful switch, the old source copy is removed to free actual disk space.")}</span>
+              <span>{ui("开始前必须完全退出关联应用；程序仍在运行或持续写入时，迁移可能失败或丢失切换瞬间的新写入。应用无法可靠识别所有文件占用。", "Close all related applications before starting. If a program remains active or keeps writing, migration can fail or lose writes made during the switch. The application cannot reliably detect every open file.")}</span>
             </div>
             <ul className="warning-list">
               {preflight.warnings.map((warning) => (

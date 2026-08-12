@@ -16,7 +16,7 @@ import { summarizeDirectory } from "./analyzer";
 import { hasSignificantAnalysisChange } from "./analysis-freshness";
 import { migrationDestinationFor } from "./migration-path";
 import { AppStore } from "./store";
-import type { MigrationRecord, PreflightResult } from "./types";
+import type { DirectorySummary, MigrationRecord, PreflightResult } from "./types";
 import {
   isHighRiskApplicationPath,
   isPathWithin,
@@ -42,27 +42,31 @@ async function availableBytes(candidate: string): Promise<number> {
   return Number(stats.bavail) * Number(stats.bsize);
 }
 
-function runRobocopy(source: string, destination: string): Promise<void> {
+export function migrationRobocopyArguments(source: string, destination: string): string[] {
+  return [
+    source,
+    destination,
+    "/E",
+    "/COPY:DAT",
+    "/DCOPY:DAT",
+    "/R:2",
+    "/W:1",
+    "/SJ",
+    "/SL",
+    "/MT:16",
+    "/NP",
+    "/NJH",
+    "/NJS",
+    "/NFL",
+    "/NDL"
+  ];
+}
+
+export function runRobocopy(source: string, destination: string): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile(
       "robocopy.exe",
-      [
-        source,
-        destination,
-        "/E",
-        "/COPY:DAT",
-        "/DCOPY:DAT",
-        "/R:2",
-        "/W:1",
-        "/XJ",
-        "/SL",
-        "/MT:16",
-        "/NP",
-        "/NJH",
-        "/NJS",
-        "/NFL",
-        "/NDL"
-      ],
+      migrationRobocopyArguments(source, destination),
       {
         windowsHide: true,
         maxBuffer: 4 * 1024 * 1024,
@@ -85,21 +89,41 @@ function runRobocopy(source: string, destination: string): Promise<void> {
   });
 }
 
-async function verifyCopy(
-  source: string,
-  destination: string,
-  expected?: { totalBytes: number; fileCount: number; directoryCount: number }
-) {
-  const sourceSummary = expected ?? (await summarizeDirectory(source));
-  const destinationSummary = await summarizeDirectory(destination);
+function normalizedReparsePoints(summary: DirectorySummary): string[] {
+  return (summary.reparsePoints ?? [])
+    .map(({ relativePath, target }) =>
+      `${relativePath.replaceAll("/", "\\").toLocaleLowerCase()}\u0000${target
+        .replaceAll("/", "\\")
+        .toLocaleLowerCase()}`
+    )
+    .sort();
+}
+
+async function verifyCopy(source: string, destination: string) {
+  const [sourceSummary, destinationSummary] = await Promise.all([
+    summarizeDirectory(source, { includeReparsePoints: true }),
+    summarizeDirectory(destination, { includeReparsePoints: true })
+  ]);
+  if (sourceSummary.scanErrors.length > 0) {
+    throw new Error(`源目录复验失败：${sourceSummary.scanErrors[0]}`);
+  }
+  if (destinationSummary.scanErrors.length > 0) {
+    throw new Error(`目标目录复验失败：${destinationSummary.scanErrors[0]}`);
+  }
+  const sourceReparsePoints = normalizedReparsePoints(sourceSummary);
+  const destinationReparsePoints = normalizedReparsePoints(destinationSummary);
   const matches =
     sourceSummary.totalBytes === destinationSummary.totalBytes &&
     sourceSummary.fileCount === destinationSummary.fileCount &&
-    sourceSummary.directoryCount === destinationSummary.directoryCount;
+    sourceSummary.directoryCount === destinationSummary.directoryCount &&
+    sourceSummary.reparsePointCount === destinationSummary.reparsePointCount &&
+    sourceReparsePoints.length === destinationReparsePoints.length &&
+    sourceReparsePoints.every((entry, index) => entry === destinationReparsePoints[index]);
   if (!matches) {
     throw new Error(
       `副本校验不一致：源目录 ${sourceSummary.fileCount} 个文件 / ${sourceSummary.totalBytes} 字节，` +
-        `目标目录 ${destinationSummary.fileCount} 个文件 / ${destinationSummary.totalBytes} 字节`
+        `${sourceSummary.reparsePointCount} 个重解析点；目标目录 ${destinationSummary.fileCount} 个文件 / ` +
+        `${destinationSummary.totalBytes} 字节，${destinationSummary.reparsePointCount} 个重解析点`
     );
   }
   return destinationSummary;
@@ -230,6 +254,7 @@ export class MigrationService {
         availableBytes: 0,
         fileCount: 0,
         directoryCount: 0,
+        reparsePointCount: 0,
         risk: "blocked",
         warnings,
         blockers: ["路径格式无效"]
@@ -252,6 +277,7 @@ export class MigrationService {
     let requiredBytes = 0;
     let fileCount = 0;
     let directoryCount = 0;
+    let reparsePointCount = 0;
     let free = 0;
     if (blockers.length === 0) {
       const stats = await lstat(source);
@@ -263,13 +289,19 @@ export class MigrationService {
       requiredBytes = summary.totalBytes;
       fileCount = summary.fileCount;
       directoryCount = summary.directoryCount;
+      reparsePointCount = summary.reparsePointCount;
       free = await availableBytes(destinationBase);
       const safetyMargin = Math.max(512 * 1024 ** 2, Math.ceil(requiredBytes * 0.03));
       if (free < requiredBytes + safetyMargin) {
         blockers.push("目标磁盘可用空间不足（已包含 3% 或 512 MB 的安全余量）");
       }
       if (summary.scanErrors.length > 0) {
-        blockers.push("源目录存在无法读取的条目，无法保证完整迁移");
+        blockers.push(`源目录扫描不完整，无法保证完整迁移：${summary.scanErrors[0]}`);
+      }
+      if (reparsePointCount > 0) {
+        warnings.push(
+          `检测到 ${reparsePointCount.toLocaleString()} 个目录联接或符号链接；迁移时将复制链接本身，不会展开链接目标。`
+        );
       }
       if (fileCount > 200_000) warnings.push("文件数量较多，复制和逐项校验会需要较长时间。");
     }
@@ -300,6 +332,7 @@ export class MigrationService {
       availableBytes: free,
       fileCount,
       directoryCount,
+      reparsePointCount,
       risk,
       warnings,
       blockers
@@ -395,11 +428,7 @@ export class MigrationService {
       record.stage = "verifying";
       record.copiedBytes = record.totalBytes;
       await this.persist(record, "正在核对文件数、目录数与总字节数");
-      await verifyCopy(preflight.source, stagingPath, {
-        totalBytes: preflight.requiredBytes,
-        fileCount: preflight.fileCount,
-        directoryCount: preflight.directoryCount
-      });
+      await verifyCopy(preflight.source, stagingPath);
 
       record.stage = "switching";
       await this.persist(record, "副本校验通过，正在执行原子切换");
@@ -480,7 +509,7 @@ export class MigrationService {
     let sourceRestored = false;
     try {
       await runRobocopy(record.destination, restorePath);
-      await verifyCopy(record.destination, restorePath, targetSummary);
+      await verifyCopy(record.destination, restorePath);
       await unlink(record.source);
       await rename(restorePath, record.source);
       sourceRestored = true;
@@ -506,7 +535,7 @@ export class MigrationService {
     }
 
     try {
-      await verifyCopy(record.destination, record.source, targetSummary);
+      await verifyCopy(record.destination, record.source);
       await removeTreeAtExactPath(
         record.destination,
         path.dirname(record.destination)

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, opendir, readdir } from "node:fs/promises";
+import { lstat, opendir, readdir, readlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -44,7 +44,10 @@ function firstChild(root: string, itemPath: string): string {
   return path.join(root, first);
 }
 
-export async function summarizeDirectory(inputPath: string): Promise<DirectorySummary> {
+export async function summarizeDirectory(
+  inputPath: string,
+  options: { includeReparsePoints?: boolean } = {}
+): Promise<DirectorySummary> {
   const root = normalizeWindowsPath(inputPath);
   const rootStat = await lstat(root);
   if (!rootStat.isDirectory()) throw new Error("所选路径不是目录");
@@ -53,11 +56,13 @@ export async function summarizeDirectory(inputPath: string): Promise<DirectorySu
   let totalBytes = 0;
   let fileCount = 0;
   let directoryCount = 1;
+  let reparsePointCount = 0;
   let newestMtime = rootStat.mtimeMs;
   const extensionMap = new Map<string, { count: number; bytes: number }>();
   const childMap = new Map<string, ChildAggregate>();
   const sampleNames: string[] = [];
   const scanErrors: string[] = [];
+  const reparsePoints: Array<{ relativePath: string; target: string }> = [];
   const queue = [root];
   let processed = 0;
 
@@ -83,7 +88,19 @@ export async function summarizeDirectory(inputPath: string): Promise<DirectorySu
 
       const entryPath = path.join(current, entry.name);
       if (entry.isSymbolicLink()) {
-        if (scanErrors.length < 20) scanErrors.push(`已跳过重解析点：${entryPath}`);
+        reparsePointCount += 1;
+        if (options.includeReparsePoints) {
+          try {
+            reparsePoints.push({
+              relativePath: path.relative(root, entryPath),
+              target: await readlink(entryPath)
+            });
+          } catch (error) {
+            if (scanErrors.length < 20) {
+              scanErrors.push(`${entryPath}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
+        }
         continue;
       }
 
@@ -140,6 +157,8 @@ export async function summarizeDirectory(inputPath: string): Promise<DirectorySu
     totalBytes,
     fileCount,
     directoryCount,
+    reparsePointCount,
+    ...(options.includeReparsePoints ? { reparsePoints } : {}),
     lastModified: new Date(newestMtime).toISOString(),
     extensionBreakdown,
     largestChildren,

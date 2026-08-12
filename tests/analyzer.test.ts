@@ -1,5 +1,8 @@
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { portableCandidateScores } from "../electron/analyzer";
+import { portableCandidateScores, summarizeDirectory } from "../electron/analyzer";
 import { inferKnownDirectory } from "../electron/directory-knowledge";
 import { hasSignificantAnalysisChange } from "../electron/analysis-freshness";
 
@@ -18,6 +21,30 @@ describe("directory ownership evidence", () => {
     expect(candidates[0]?.evidence.join("\n")).toContain(
       "E:\\PortableApps\\RedScope AI\\redscope.exe"
     );
+  });
+
+  const windowsIt = process.platform === "win32" ? it : it.skip;
+  windowsIt("counts a directory junction without treating it as a scan failure", async () => {
+    const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "cdriveshift-summary-"));
+    try {
+      const versionedDirectory = path.join(temporaryRoot, "versioned");
+      await mkdir(versionedDirectory);
+      await writeFile(path.join(versionedDirectory, "manifest.json"), "{}", "utf8");
+      await symlink(versionedDirectory, path.join(temporaryRoot, "latest"), "junction");
+
+      const summary = await summarizeDirectory(temporaryRoot, {
+        includeReparsePoints: true
+      });
+
+      expect(summary.scanErrors).toEqual([]);
+      expect(summary.fileCount).toBe(1);
+      expect(summary.reparsePointCount).toBe(1);
+      expect(summary.reparsePoints).toEqual([
+        { relativePath: "latest", target: versionedDirectory }
+      ]);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 
   it("does not invent a portable application match without name or path evidence", () => {
