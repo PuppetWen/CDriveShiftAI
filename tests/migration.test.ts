@@ -2,7 +2,11 @@ import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from "node:fs
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { migrationRobocopyArguments, runRobocopy } from "../electron/migration";
+import {
+  migrationRobocopyArguments,
+  normalizeReparseTarget,
+  runRobocopy
+} from "../electron/migration";
 
 describe("migration copy options", () => {
   it("copies junctions and symbolic links as links instead of expanding or excluding them", () => {
@@ -28,7 +32,9 @@ describe("migration copy options", () => {
 
       const copiedLink = path.join(destination, "latest");
       expect((await lstat(copiedLink)).isSymbolicLink()).toBe(true);
-      expect(await readlink(copiedLink)).toBe(target);
+      expect(normalizeReparseTarget(await readlink(copiedLink))).toBe(
+        normalizeReparseTarget(target)
+      );
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }

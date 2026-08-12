@@ -89,12 +89,22 @@ export function runRobocopy(source: string, destination: string): Promise<void> 
   });
 }
 
+export function normalizeReparseTarget(target: string): string {
+  let normalized = target.replaceAll("/", "\\");
+  if (/^\\\\\?\\[a-z]:\\/iu.test(normalized)) normalized = normalized.slice(4);
+  if (/^\\\?\?\\[a-z]:\\/iu.test(normalized)) normalized = normalized.slice(4);
+  normalized = path.win32.normalize(normalized);
+  const root = path.win32.parse(normalized).root;
+  while (normalized.length > root.length && normalized.endsWith("\\")) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized.toLocaleLowerCase();
+}
+
 function normalizedReparsePoints(summary: DirectorySummary): string[] {
   return (summary.reparsePoints ?? [])
     .map(({ relativePath, target }) =>
-      `${relativePath.replaceAll("/", "\\").toLocaleLowerCase()}\u0000${target
-        .replaceAll("/", "\\")
-        .toLocaleLowerCase()}`
+      `${path.win32.normalize(relativePath).toLocaleLowerCase()}\u0000${normalizeReparseTarget(target)}`
     )
     .sort();
 }

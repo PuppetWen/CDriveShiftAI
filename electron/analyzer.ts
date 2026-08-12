@@ -87,7 +87,17 @@ export async function summarizeDirectory(
       }
 
       const entryPath = path.join(current, entry.name);
-      if (entry.isSymbolicLink()) {
+      let stats;
+      try {
+        stats = await lstat(entryPath);
+      } catch (error) {
+        if (scanErrors.length < 20) {
+          scanErrors.push(`${entryPath}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        continue;
+      }
+
+      if (entry.isSymbolicLink() || stats.isSymbolicLink()) {
         reparsePointCount += 1;
         if (options.includeReparsePoints) {
           try {
@@ -100,16 +110,6 @@ export async function summarizeDirectory(
               scanErrors.push(`${entryPath}: ${error instanceof Error ? error.message : String(error)}`);
             }
           }
-        }
-        continue;
-      }
-
-      let stats;
-      try {
-        stats = await lstat(entryPath);
-      } catch (error) {
-        if (scanErrors.length < 20) {
-          scanErrors.push(`${entryPath}: ${error instanceof Error ? error.message : String(error)}`);
         }
         continue;
       }

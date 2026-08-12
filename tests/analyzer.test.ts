@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { portableCandidateScores, summarizeDirectory } from "../electron/analyzer";
 import { inferKnownDirectory } from "../electron/directory-knowledge";
 import { hasSignificantAnalysisChange } from "../electron/analysis-freshness";
+import { normalizeReparseTarget } from "../electron/migration";
 
 describe("directory ownership evidence", () => {
   it("uses portable executables from another drive as first-party ownership evidence", () => {
@@ -39,9 +40,10 @@ describe("directory ownership evidence", () => {
       expect(summary.scanErrors).toEqual([]);
       expect(summary.fileCount).toBe(1);
       expect(summary.reparsePointCount).toBe(1);
-      expect(summary.reparsePoints).toEqual([
-        { relativePath: "latest", target: versionedDirectory }
-      ]);
+      expect(summary.reparsePoints?.[0]?.relativePath).toBe("latest");
+      expect(normalizeReparseTarget(summary.reparsePoints?.[0]?.target ?? "")).toBe(
+        normalizeReparseTarget(versionedDirectory)
+      );
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
