@@ -12,3 +12,15 @@ export function uiScaleProgress(value: number): number {
   const normalized = normalizeUiScale(value);
   return ((normalized - UI_SCALE_MIN) / (UI_SCALE_MAX - UI_SCALE_MIN)) * 100;
 }
+
+export function uiScaleFromLockedDrag(
+  startValue: number,
+  screenDeltaX: number,
+  initialTrackWidth: number
+): number {
+  if (!Number.isFinite(screenDeltaX) || !Number.isFinite(initialTrackWidth) || initialTrackWidth <= 0) {
+    return normalizeUiScale(startValue);
+  }
+  const range = UI_SCALE_MAX - UI_SCALE_MIN;
+  return normalizeUiScale(startValue + (screenDeltaX / initialTrackWidth) * range);
+}

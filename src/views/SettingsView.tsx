@@ -34,7 +34,8 @@ import {
   ShieldCheck,
   Sparkles,
   Wifi,
-  X
+  X,
+  ZoomIn
 } from "lucide-react";
 import { api } from "../lib/api";
 import { effectDefinitions } from "../lib/effects";
@@ -60,6 +61,7 @@ import {
   UI_SCALE_MIN,
   UI_SCALE_STEP,
   normalizeUiScale,
+  uiScaleFromLockedDrag,
   uiScaleProgress
 } from "../lib/uiScale";
 import {
@@ -78,6 +80,7 @@ import type {
   AppUpdateInfo,
   EffectMode,
   IndexerStatus,
+  MagnifierStatus,
   MouseShortcutButton,
   MouseShortcutStatus,
   SettingsModuleId,
@@ -115,6 +118,15 @@ function captureShortcut(event: React.KeyboardEvent<HTMLInputElement>): string |
         : event.key;
   if (!parts.length || !key) return undefined;
   return [...parts, key].join("+");
+}
+
+function magnifierModifiersFromWheel(event: React.WheelEvent<HTMLElement>): string | undefined {
+  const parts: string[] = [];
+  if (event.ctrlKey) parts.push("Ctrl");
+  if (event.altKey) parts.push("Alt");
+  if (event.shiftKey) parts.push("Shift");
+  if (event.metaKey) parts.push("Win");
+  return parts.length ? parts.join("+") : undefined;
 }
 
 function formatUpdateBytes(value: number): string {
@@ -353,10 +365,20 @@ export function SettingsView({
   const [activeReleaseModule, setActiveReleaseModule] = useState<string>();
   const [mouseShortcutStatus, setMouseShortcutStatus] =
     useState<MouseShortcutStatus>();
+  const [magnifierStatus, setMagnifierStatus] = useState<MagnifierStatus>();
+  const [magnifierRecording, setMagnifierRecording] = useState(false);
+  const [magnifierRecorderHint, setMagnifierRecorderHint] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [aiTest, setAiTest] = useState<AiTestResult>();
   const effectRequest = useRef(0);
   const uiScaleRequest = useRef(0);
+  const uiScaleDraftRef = useRef(settings.uiScale);
+  const uiScaleDrag = useRef<{
+    pointerId: number;
+    startScreenX: number;
+    startValue: number;
+    initialTrackWidth: number;
+  } | undefined>(undefined);
   const behaviorRequests = useRef({
     launchAtLogin: 0,
     launchMinimized: 0,
@@ -367,6 +389,7 @@ export function SettingsView({
     "quick-search": 0
   });
   const mouseShortcutRequest = useRef(0);
+  const magnifierRequest = useRef(0);
   const mouseCaptureBlockUntil = useRef(0);
   const aiDraftRequest = useRef(0);
   const apiKeyDirty = useRef(false);
@@ -438,6 +461,18 @@ export function SettingsView({
       if (previous.mouseQuickSearchHoldMs !== settings.mouseQuickSearchHoldMs) {
         next.mouseQuickSearchHoldMs = settings.mouseQuickSearchHoldMs;
       }
+      if (previous.magnifierEnabled !== settings.magnifierEnabled) {
+        next.magnifierEnabled = settings.magnifierEnabled;
+      }
+      if (previous.magnifierModifiers !== settings.magnifierModifiers) {
+        next.magnifierModifiers = settings.magnifierModifiers;
+      }
+      if (previous.magnifierWidth !== settings.magnifierWidth) {
+        next.magnifierWidth = settings.magnifierWidth;
+      }
+      if (previous.magnifierHeight !== settings.magnifierHeight) {
+        next.magnifierHeight = settings.magnifierHeight;
+      }
       if (JSON.stringify(previous.indexRoots) !== JSON.stringify(settings.indexRoots)) {
         next.indexRoots = settings.indexRoots;
       }
@@ -453,6 +488,7 @@ export function SettingsView({
       return next;
     });
     persistedSettingsRef.current = settings;
+    uiScaleDraftRef.current = settings.uiScale;
   }, [settings]);
 
   useEffect(() => {
@@ -467,6 +503,42 @@ export function SettingsView({
       cancelled = true;
     };
   }, [settings.mouseQuickSearchButton, settings.mouseQuickSearchHoldMs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getMagnifierStatus()
+      .then((status) => {
+        if (!cancelled) setMagnifierStatus(status);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    settings.magnifierEnabled,
+    settings.magnifierModifiers,
+    settings.magnifierWidth,
+    settings.magnifierHeight
+  ]);
+
+  useEffect(() => {
+    if (!magnifierRecording) return;
+    const blockBrowserZoom = (event: WheelEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".magnifier-recorder")) {
+        event.preventDefault();
+      }
+    };
+    document.addEventListener("wheel", blockBrowserZoom, {
+      capture: true,
+      passive: false
+    });
+    return () => {
+      document.removeEventListener("wheel", blockBrowserZoom, true);
+      void api.setMagnifierCapture(false).catch(() => undefined);
+    };
+  }, [magnifierRecording, notify]);
 
   const chooseEffect = async (effectMode: EffectMode) => {
     const request = ++effectRequest.current;
@@ -511,6 +583,7 @@ export function SettingsView({
 
   const commitUiScale = async (value: number, notifySuccess = false) => {
     const uiScale = normalizeUiScale(value);
+    uiScaleDraftRef.current = uiScale;
     const previous = persistedSettingsRef.current.uiScale;
     if (uiScale === previous) {
       setDraft((current) => ({ ...current, uiScale }));
@@ -524,18 +597,43 @@ export function SettingsView({
       persistedSettingsRef.current = updated;
       onSettings(updated);
       setDraft((current) => ({ ...current, uiScale: updated.uiScale }));
+      uiScaleDraftRef.current = updated.uiScale;
       if (notifySuccess) {
         notify(
           "success",
-          ui("字体与界面大小已应用", "Text and interface size applied")
+          ui("字体大小已应用", "Text size applied")
         );
       }
     } catch (error) {
       if (request !== uiScaleRequest.current) return;
       setDraft((current) => ({ ...current, uiScale: previous }));
+      uiScaleDraftRef.current = previous;
       void api.previewUiScale(previous).catch(() => undefined);
       notify("error", error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const previewUiScale = (value: number) => {
+    const uiScale = normalizeUiScale(value);
+    if (uiScale === uiScaleDraftRef.current) return uiScale;
+    uiScaleDraftRef.current = uiScale;
+    setDraft((current) => ({ ...current, uiScale }));
+    void api.previewUiScale(uiScale).catch((error) =>
+      notify("error", error instanceof Error ? error.message : String(error))
+    );
+    return uiScale;
+  };
+
+  const updateLockedUiScaleDrag = (event: React.PointerEvent<HTMLInputElement>) => {
+    const drag = uiScaleDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return uiScaleDraftRef.current;
+    return previewUiScale(
+      uiScaleFromLockedDrag(
+        drag.startValue,
+        event.screenX - drag.startScreenX,
+        drag.initialTrackWidth
+      )
+    );
   };
 
   const updateBehaviorSetting = async (
@@ -697,6 +795,50 @@ export function SettingsView({
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
       setTestingMouseShortcut(false);
+    }
+  };
+
+  const commitMagnifier = async (
+    patch: Partial<
+      Pick<
+        AppSettings,
+        | "magnifierEnabled"
+        | "magnifierModifiers"
+        | "magnifierWidth"
+        | "magnifierHeight"
+      >
+    >
+  ) => {
+    const previous = persistedSettingsRef.current;
+    const changed = Object.entries(patch).some(
+      ([field, value]) => previous[field as keyof AppSettings] !== value
+    );
+    if (!changed) return;
+    const request = ++magnifierRequest.current;
+    setDraft((current) => ({ ...current, ...patch }));
+    try {
+      const updated = await api.updateSettings(patch);
+      if (request !== magnifierRequest.current) return;
+      persistedSettingsRef.current = updated;
+      onSettings(updated);
+      setDraft((current) => ({
+        ...current,
+        magnifierEnabled: updated.magnifierEnabled,
+        magnifierModifiers: updated.magnifierModifiers,
+        magnifierWidth: updated.magnifierWidth,
+        magnifierHeight: updated.magnifierHeight
+      }));
+      setMagnifierStatus(await api.getMagnifierStatus());
+    } catch (error) {
+      if (request !== magnifierRequest.current) return;
+      setDraft((current) => ({
+        ...current,
+        magnifierEnabled: previous.magnifierEnabled,
+        magnifierModifiers: previous.magnifierModifiers,
+        magnifierWidth: previous.magnifierWidth,
+        magnifierHeight: previous.magnifierHeight
+      }));
+      notify("error", error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -1412,11 +1554,11 @@ export function SettingsView({
             <Eye size={20} />
           </div>
           <div>
-            <h2>{ui("字体与界面大小", "Text and interface size")}</h2>
+            <h2>{ui("字体大小", "Text size")}</h2>
             <p>
               {ui(
-                "同步调整文字、按钮、间距和图标；拖动时实时缩放，松开后自动保存。",
-                "Scale text, controls, spacing, and icons together. Drag for a live preview and release to save."
+                "调整应用中的全部文字，包括搜索结果；不会放大卡片、按钮、间距或图标。",
+                "Adjust all app text, including search results, without scaling cards, controls, spacing, or icons."
               )}
             </p>
           </div>
@@ -1427,7 +1569,7 @@ export function SettingsView({
             <span>Aa</span>
             <span>
               <strong>{ui("标准字体为 100%", "Standard text is 100%")}</strong>
-              <small>{ui("拖动滑杆调整字体与整个界面的比例", "Drag to scale text and the whole interface")}</small>
+              <small>{ui("拖动滑杆仅调整应用内文字", "Drag to resize app text only")}</small>
             </span>
           </div>
           <div
@@ -1444,18 +1586,62 @@ export function SettingsView({
               max={UI_SCALE_MAX}
               step={UI_SCALE_STEP}
               value={draft.uiScale}
-              aria-label={ui("字体与界面缩放百分比", "Text and interface scale percentage")}
+              aria-label={ui("字体缩放百分比", "Text scale percentage")}
               aria-valuetext={`${Math.round(draft.uiScale * 100)}%`}
               onChange={(event) => {
-                const uiScale = normalizeUiScale(event.currentTarget.valueAsNumber);
-                setDraft((current) => ({ ...current, uiScale }));
-                void api.previewUiScale(uiScale).catch((error) =>
-                  notify("error", error instanceof Error ? error.message : String(error))
-                );
+                if (!uiScaleDrag.current) previewUiScale(event.currentTarget.valueAsNumber);
               }}
-              onPointerUp={(event) => void commitUiScale(event.currentTarget.valueAsNumber, true)}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.currentTarget.focus({ preventScroll: true });
+                const rect = event.currentTarget.getBoundingClientRect();
+                const slider = event.currentTarget.closest<HTMLElement>(".ui-scale-slider");
+                const thumbSize = Number.parseFloat(
+                  slider ? getComputedStyle(slider).getPropertyValue("--ui-scale-thumb-size") : "17"
+                );
+                const effectiveTrackWidth = Math.max(1, rect.width - thumbSize);
+                const progress = Math.min(
+                  1,
+                  Math.max(0, (event.clientX - rect.left - thumbSize / 2) / effectiveTrackWidth)
+                );
+                const startValue = normalizeUiScale(
+                  UI_SCALE_MIN + progress * (UI_SCALE_MAX - UI_SCALE_MIN)
+                );
+                uiScaleDrag.current = {
+                  pointerId: event.pointerId,
+                  startScreenX: event.screenX,
+                  startValue,
+                  initialTrackWidth: effectiveTrackWidth
+                };
+                event.currentTarget.setPointerCapture(event.pointerId);
+                previewUiScale(startValue);
+              }}
+              onPointerMove={(event) => {
+                if (uiScaleDrag.current?.pointerId === event.pointerId) {
+                  event.preventDefault();
+                  updateLockedUiScaleDrag(event);
+                }
+              }}
+              onPointerUp={(event) => {
+                if (uiScaleDrag.current?.pointerId !== event.pointerId) return;
+                event.preventDefault();
+                const uiScale = updateLockedUiScaleDrag(event);
+                uiScaleDrag.current = undefined;
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+                void commitUiScale(uiScale, true);
+              }}
+              onPointerCancel={(event) => {
+                if (uiScaleDrag.current?.pointerId !== event.pointerId) return;
+                const uiScale = uiScaleDraftRef.current;
+                uiScaleDrag.current = undefined;
+                void commitUiScale(uiScale);
+              }}
               onKeyUp={(event) => void commitUiScale(event.currentTarget.valueAsNumber, true)}
-              onBlur={() => void commitUiScale(draft.uiScale)}
+              onBlur={() => {
+                if (!uiScaleDrag.current) void commitUiScale(uiScaleDraftRef.current);
+              }}
             />
             <div className="ui-scale-scale" aria-hidden="true">
               <span>50%</span>
@@ -1835,6 +2021,142 @@ export function SettingsView({
                     ui("正在检查 Windows Raw Input 全局监听", "Checking the Windows Raw Input global listener")}
                 </span>
                 <small>{ui("先点击录入框，再按后退侧键、前进侧键或中键；短按原功能保持不变。", "Click the recorder, then press back, forward, or middle; normal short-click behavior remains unchanged.")}</small>
+              </footer>
+            </article>
+            <article className="mouse-shortcut-card magnifier-shortcut-card">
+              <header>
+                <span>
+                  <ZoomIn size={15} />
+                  <span>
+                    <strong>{ui("全屏局部放大镜", "Desktop lens")}</strong>
+                    <small>
+                      {ui(
+                        "在所有显示器和程序上跟随鼠标；按住组合键时滚动滚轮调整倍率。",
+                        "Follows the pointer across displays and apps; hold the shortcut and scroll to change magnification."
+                      )}
+                    </small>
+                  </span>
+                </span>
+                <label className="magnifier-master">
+                  <input
+                    type="checkbox"
+                    checked={draft.magnifierEnabled}
+                    onChange={(event) =>
+                      void commitMagnifier({ magnifierEnabled: event.target.checked })
+                    }
+                  />
+                  <span className="toggle" />
+                  {draft.magnifierEnabled ? ui("已开启", "Enabled") : ui("已关闭", "Disabled")}
+                </label>
+              </header>
+              <div className="magnifier-controls">
+                <div className="mouse-button-setting">
+                  <span>{ui("组合键 + 滚轮", "Modifier + wheel")}</span>
+                  <button
+                    type="button"
+                    className={
+                      magnifierRecording
+                        ? "mouse-button-recorder recording magnifier-recorder"
+                        : "mouse-button-recorder magnifier-recorder"
+                    }
+                    onClick={() => {
+                      if (magnifierRecording) return;
+                      setMagnifierRecorderHint(
+                        ui("正在暂停放大镜监听…", "Pausing the lens listener…")
+                      );
+                      void api
+                        .setMagnifierCapture(true)
+                        .then(() => {
+                          setMagnifierRecording(true);
+                          setMagnifierRecorderHint(
+                            ui("请按住组合键并滚动一次滚轮…", "Hold the modifiers and scroll once…")
+                          );
+                        })
+                        .catch((error) =>
+                          notify("error", error instanceof Error ? error.message : String(error))
+                        );
+                    }}
+                    onWheel={(event) => {
+                      if (!magnifierRecording) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      const modifiers = magnifierModifiersFromWheel(event);
+                      if (!modifiers) {
+                        setMagnifierRecorderHint(
+                          ui("至少按住 Ctrl、Alt、Shift 或 Win 中的一个键", "Hold at least Ctrl, Alt, Shift, or Win")
+                        );
+                        return;
+                      }
+                      setMagnifierRecording(false);
+                      setMagnifierRecorderHint(
+                        ui(`已录入：${modifiers} + 滚轮`, `Captured: ${modifiers} + wheel`)
+                      );
+                      void commitMagnifier({ magnifierModifiers: modifiers });
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Escape") return;
+                      event.preventDefault();
+                      setMagnifierRecording(false);
+                      setMagnifierRecorderHint(ui("已取消录入", "Recording cancelled"));
+                    }}
+                  >
+                    <span className="mouse-button-recorder-icon"><ZoomIn size={16} /><i /></span>
+                    <span>
+                      <strong>
+                        {magnifierRecording
+                          ? ui("等待组合键与滚轮…", "Waiting for modifiers and wheel…")
+                          : `${draft.magnifierModifiers} + ${ui("滚轮", "Wheel")}`}
+                      </strong>
+                      <small>{magnifierRecorderHint || ui("点击后按住组合键并滚动一次", "Click, then hold modifiers and scroll once")}</small>
+                    </span>
+                    <kbd>{magnifierRecording ? "REC" : ui("录入", "Record")}</kbd>
+                  </button>
+                </div>
+                <div className="magnifier-size-setting">
+                  <div className="mouse-hold-heading">
+                    <span>{ui("放大镜宽度", "Lens width")}</span>
+                    <output><strong>{draft.magnifierWidth} px</strong></output>
+                  </div>
+                  <input
+                    type="range"
+                    min={160}
+                    max={1200}
+                    step={20}
+                    value={draft.magnifierWidth}
+                    aria-label={ui("局部放大镜宽度", "Desktop lens width")}
+                    onChange={(event) => setDraft((current) => ({ ...current, magnifierWidth: event.currentTarget.valueAsNumber }))}
+                    onPointerUp={(event) => void commitMagnifier({ magnifierWidth: event.currentTarget.valueAsNumber })}
+                    onKeyUp={(event) => void commitMagnifier({ magnifierWidth: event.currentTarget.valueAsNumber })}
+                    onBlur={() => void commitMagnifier({ magnifierWidth: draft.magnifierWidth })}
+                  />
+                  <div className="magnifier-size-scale"><span>160 px</span><span>1200 px</span></div>
+                </div>
+                <div className="magnifier-size-setting">
+                  <div className="mouse-hold-heading">
+                    <span>{ui("放大镜高度", "Lens height")}</span>
+                    <output><strong>{draft.magnifierHeight} px</strong></output>
+                  </div>
+                  <input
+                    type="range"
+                    min={120}
+                    max={900}
+                    step={20}
+                    value={draft.magnifierHeight}
+                    aria-label={ui("局部放大镜高度", "Desktop lens height")}
+                    onChange={(event) => setDraft((current) => ({ ...current, magnifierHeight: event.currentTarget.valueAsNumber }))}
+                    onPointerUp={(event) => void commitMagnifier({ magnifierHeight: event.currentTarget.valueAsNumber })}
+                    onKeyUp={(event) => void commitMagnifier({ magnifierHeight: event.currentTarget.valueAsNumber })}
+                    onBlur={() => void commitMagnifier({ magnifierHeight: draft.magnifierHeight })}
+                  />
+                  <div className="magnifier-size-scale"><span>120 px</span><span>900 px</span></div>
+                </div>
+              </div>
+              <footer>
+                <span>
+                  {magnifierStatus?.available ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
+                  {runtimeText(magnifierStatus?.message) || ui("正在检查 Windows 局部放大镜", "Checking the Windows desktop lens")}
+                </span>
+                <small>{ui("放大范围仅显示画面，不接收鼠标点击；松开组合键后隐藏。", "The lens is click-through and hides when the modifiers are released.")}</small>
               </footer>
             </article>
             <p>{ui("点击录入框后直接按下组合键；离开输入框时自动检查、保存并注册。Backspace 或右侧清除按钮可禁用。", "Click a recorder and press the key combination. Leaving the field checks, saves, and registers it automatically. Press Backspace or use the clear button to disable it.")}</p>

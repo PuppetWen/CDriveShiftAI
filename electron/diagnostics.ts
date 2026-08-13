@@ -171,6 +171,13 @@ export async function createDiagnosticReport(input: DiagnosticInput): Promise<st
       quickSearchShortcutConfigured: Boolean(input.settings.quickSearchShortcut),
       mouseQuickSearchButton: input.settings.mouseQuickSearchButton,
       mouseQuickSearchHoldMs: input.settings.mouseQuickSearchHoldMs,
+      uiScale: input.settings.uiScale,
+      magnifier: {
+        enabled: input.settings.magnifierEnabled,
+        modifiers: input.settings.magnifierModifiers,
+        width: input.settings.magnifierWidth,
+        height: input.settings.magnifierHeight
+      },
       ai: {
         enabled: input.settings.ai.enabled,
         provider: input.settings.ai.provider,

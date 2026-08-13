@@ -10,6 +10,7 @@ import {
   isLightEffect
 } from "../lib/effects";
 import { setAppLanguage, useI18n, type TranslationKey } from "../lib/i18n";
+import { applyTextScale } from "../lib/textScale";
 import type {
   AppSettings,
   EffectMode,
@@ -61,6 +62,7 @@ export function QuickSearchWindow() {
       if (settingsResult.status === "fulfilled") {
         setSettings(settingsResult.value);
         setAppLanguage(settingsResult.value.language);
+        applyTextScale(settingsResult.value.uiScale);
       }
       if (indexerResult.status === "fulfilled") setIndexer(indexerResult.value);
     });
@@ -68,10 +70,13 @@ export function QuickSearchWindow() {
     const offSettings = api.onSettingsChanged((updated) => {
       setSettings(updated);
       setAppLanguage(updated.language);
+      applyTextScale(updated.uiScale);
     });
+    const offTextScale = api.onTextScalePreview(applyTextScale);
     return () => {
       offStatus();
       offSettings();
+      offTextScale();
     };
   }, []);
 

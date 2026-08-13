@@ -358,7 +358,7 @@ function showAsSoonAsRenderable(window: BrowserWindow, maximized = false): void 
 }
 
 function applyUiScale(window: BrowserWindow, scale: AppSettings["uiScale"]): void {
-  if (!window.isDestroyed()) window.webContents.setZoomFactor(scale);
+  if (!window.isDestroyed()) window.webContents.send("settings:text-scale-preview", scale);
 }
 
 function initializeUiScale(window: BrowserWindow, scale: AppSettings["uiScale"]): void {
@@ -1146,6 +1146,19 @@ function registerIpc(): void {
           settings.mouseQuickSearchHoldMs
         );
       }
+      if (
+        previous.magnifierEnabled !== settings.magnifierEnabled ||
+        previous.magnifierModifiers !== settings.magnifierModifiers ||
+        previous.magnifierWidth !== settings.magnifierWidth ||
+        previous.magnifierHeight !== settings.magnifierHeight
+      ) {
+        await searchService?.configureMagnifier(
+          settings.magnifierEnabled,
+          settings.magnifierModifiers,
+          settings.magnifierWidth,
+          settings.magnifierHeight
+        );
+      }
       emitSettingsChanged(settings);
       createTray();
       return settings;
@@ -1202,6 +1215,19 @@ function registerIpc(): void {
     createQuickSearchWindow();
     return true;
   });
+  ipcMain.handle("shortcut:magnifier-status", () =>
+    searchService?.getMagnifierStatus() ?? {
+      available: false,
+      enabled: store.getSettings().magnifierEnabled,
+      modifiers: store.getSettings().magnifierModifiers,
+      width: store.getSettings().magnifierWidth,
+      height: store.getSettings().magnifierHeight,
+      message: "Windows 局部放大镜尚未启动"
+    }
+  );
+  ipcMain.handle("shortcut:magnifier-capture", (_event, active: unknown) =>
+    searchService?.setMagnifierCapture(active === true) ?? false
+  );
 
   ipcMain.handle("app:navigate", (_event, raw: unknown) => {
     if (!raw || typeof raw !== "object") throw new Error("导航请求无效");
@@ -1409,7 +1435,7 @@ function registerIpc(): void {
     }
     const scale = normalizeStoredUiScale(rawScale);
     const sourceWindow = BrowserWindow.fromWebContents(event.sender);
-    if (sourceWindow) applyUiScale(sourceWindow, scale);
+    event.sender.send("settings:text-scale-preview", scale);
     if (quickSearchWindow && !quickSearchWindow.isDestroyed() && quickSearchWindow !== sourceWindow) {
       applyUiScale(quickSearchWindow, scale);
     }
@@ -2001,6 +2027,12 @@ if (!singleInstance) {
       {
         button: currentSettings.mouseQuickSearchButton,
         holdMs: currentSettings.mouseQuickSearchHoldMs
+      },
+      {
+        enabled: currentSettings.magnifierEnabled,
+        modifiers: currentSettings.magnifierModifiers,
+        width: currentSettings.magnifierWidth,
+        height: currentSettings.magnifierHeight
       }
     );
     migrationService = new MigrationService(store, (record, message) => {

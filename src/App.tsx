@@ -17,6 +17,7 @@ import {
   isLightEffect
 } from "./lib/effects";
 import { setAppLanguage, useI18n, type TranslationKey } from "./lib/i18n";
+import { applyTextScale } from "./lib/textScale";
 import type {
   AppSettings,
   AppUpdateInfo,
@@ -244,6 +245,12 @@ export default function App() {
   );
 
   const effectMode = settings?.effectMode ?? startupEffect;
+  useEffect(() => {
+    applyTextScale(settings?.uiScale ?? 1);
+  }, [settings?.uiScale]);
+
+  useEffect(() => api.onTextScalePreview(applyTextScale), []);
+
   useEffect(() => {
     document.documentElement.dataset.effect = effectMode;
     document.documentElement.style.background = effectBackgrounds[effectMode];

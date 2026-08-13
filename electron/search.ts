@@ -13,6 +13,7 @@ import type {
   IndexerStatus,
   MouseShortcutButton,
   MouseShortcutStatus,
+  MagnifierStatus,
   NativeResponse,
   SearchIndexChangedEvent,
   SearchFilters,
@@ -112,19 +113,26 @@ export class SearchService {
   private lastFullRefreshRequestedAt = 0;
   private backgroundMode = false;
   private mouseShortcutStatus: MouseShortcutStatus;
+  private magnifierStatus: MagnifierStatus;
 
   constructor(
     private readonly onStatus: (status: IndexerStatus) => void,
     private readonly onContentStatus: (status: ContentIndexerStatus) => void,
     private readonly onIndexChanged: (event: SearchIndexChangedEvent) => void,
     private readonly onMouseShortcutHold: () => void,
-    initialMouseShortcut: { button: MouseShortcutButton; holdMs: number }
+    initialMouseShortcut: { button: MouseShortcutButton; holdMs: number },
+    initialMagnifier: { enabled: boolean; modifiers: string; width: number; height: number }
   ) {
     this.mouseShortcutStatus = {
       available: false,
       button: initialMouseShortcut.button,
       holdMs: initialMouseShortcut.holdMs,
       message: "鼠标全局监听正在启动"
+    };
+    this.magnifierStatus = {
+      available: false,
+      ...initialMagnifier,
+      message: "Windows 全屏局部放大镜正在启动"
     };
   }
 
@@ -241,7 +249,11 @@ export class SearchService {
         forceRebuild,
         rebuildReason,
         mouseButton: this.mouseShortcutStatus.button,
-        mouseHoldMs: this.mouseShortcutStatus.holdMs
+        mouseHoldMs: this.mouseShortcutStatus.holdMs,
+        magnifierEnabled: this.magnifierStatus.enabled,
+        magnifierModifiers: this.magnifierStatus.modifiers,
+        magnifierWidth: this.magnifierStatus.width,
+        magnifierHeight: this.magnifierStatus.height
       },
       90_000
     );
@@ -339,6 +351,57 @@ export class SearchService {
             : "Windows Raw Input 监听不可用";
     }
     return this.getMouseShortcutStatus();
+  }
+
+  getMagnifierStatus(): MagnifierStatus {
+    return structuredClone(this.magnifierStatus);
+  }
+
+  async setMagnifierCapture(active: boolean): Promise<boolean> {
+    if (this.child) {
+      await this.request(
+        { op: "setMagnifierCapture", magnifierCaptureActive: active },
+        3_000
+      );
+    }
+    return active;
+  }
+
+  async configureMagnifier(
+    enabled: boolean,
+    modifiers: string,
+    width: number,
+    height: number
+  ): Promise<MagnifierStatus> {
+    this.magnifierStatus = {
+      ...this.magnifierStatus,
+      enabled,
+      modifiers,
+      width,
+      height,
+      message: enabled
+        ? "按住组合键时显示局部放大镜，滚动滚轮可调倍率"
+        : "全屏局部放大镜已关闭"
+    };
+    if (this.child) {
+      const response = (await this.request(
+        {
+          op: "setMagnifier",
+          magnifierEnabled: enabled,
+          magnifierModifiers: modifiers,
+          magnifierWidth: width,
+          magnifierHeight: height
+        },
+        3_000
+      )) as NativeResponse & { available?: boolean };
+      this.magnifierStatus.available = response.available === true;
+      this.magnifierStatus.message = response.available
+        ? enabled
+          ? "按住组合键时显示局部放大镜，滚动滚轮可调倍率"
+          : "全屏局部放大镜已关闭"
+        : "当前 Windows 环境无法创建全局局部放大镜";
+    }
+    return this.getMagnifierStatus();
   }
 
   setBackgroundMode(background: boolean, force = false): void {
@@ -917,6 +980,16 @@ export class SearchService {
         : `Windows Raw Input 监听不可用${
             event.errorCode ? `（错误 ${event.errorCode}）` : ""
           }`;
+      return;
+    }
+    if (response.event === "magnifierStatus") {
+      const event = response as NativeResponse & { available?: boolean; errorCode?: number };
+      this.magnifierStatus.available = event.available === true;
+      this.magnifierStatus.message = event.available
+        ? this.magnifierStatus.enabled
+          ? "全屏局部放大镜可用"
+          : "全屏局部放大镜已关闭"
+        : `Windows 放大镜不可用${event.errorCode ? `（错误 ${event.errorCode}）` : ""}`;
       return;
     }
     if (response.id == null) return;

@@ -10,6 +10,7 @@ import {
 import { api } from "../lib/api";
 import { formatBytes } from "../lib/format";
 import { useI18n } from "../lib/i18n";
+import { applyTextScale } from "../lib/textScale";
 import type { MigrationRecord } from "../types";
 
 export function UninstallRestoreView() {
@@ -22,6 +23,9 @@ export function UninstallRestoreView() {
   const [errors, setErrors] = useState<string[]>([]);
 
   useEffect(() => {
+    void api.getSettings().then((settings) => applyTextScale(settings.uiScale)).catch(() => undefined);
+    const offSettings = api.onSettingsChanged((settings) => applyTextScale(settings.uiScale));
+    const offTextScale = api.onTextScalePreview(applyTextScale);
     void api
       .listMigrations()
       .then((items) => {
@@ -30,6 +34,10 @@ export function UninstallRestoreView() {
         setSelected(new Set(restorable.map((item) => item.id)));
       })
       .finally(() => setLoading(false));
+    return () => {
+      offSettings();
+      offTextScale();
+    };
   }, []);
 
   const selectedRecords = useMemo(

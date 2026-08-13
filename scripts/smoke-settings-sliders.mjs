@@ -9,6 +9,7 @@ const url =
   process.argv[2] ??
   `${pathToFileURL(path.join(workspace, "dist", "index.html")).toString()}?view=settings`;
 const screenshotPath = process.argv[3];
+const shortcutScreenshotPath = process.argv[4];
 async function availablePort() {
   const server = (await import("node:net")).createServer();
   return new Promise((resolve, reject) => {
@@ -104,13 +105,34 @@ try {
   await waitFor('document.querySelector(".ui-scale-slider input") !== null');
   const scale = await evaluate(`(() => {
     const input = document.querySelector(".ui-scale-slider input");
+    input.value = "1";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
     const card = document.querySelector(".ui-scale-settings-card");
     const scroll = document.querySelector(".view-scroll");
+    const marker = document.querySelector(".ui-scale-standard-mark");
+    const slider = document.querySelector(".ui-scale-slider");
+    const inputRect = input.getBoundingClientRect();
+    const markerRect = marker.getBoundingClientRect();
+    const thumbSize = Number.parseFloat(getComputedStyle(slider).getPropertyValue("--ui-scale-thumb-size"));
+    const progress = (Number(input.value) - Number(input.min)) / (Number(input.max) - Number(input.min));
+    const expectedThumbCenter = inputRect.left + thumbSize / 2 + progress * (inputRect.width - thumbSize);
+    const markerCenter = markerRect.left + markerRect.width / 2;
+    const sample = document.querySelector(".ui-scale-preview strong");
+    const baseFontSize = Number.parseFloat(getComputedStyle(sample).fontSize);
+    const baseCardWidth = card.getBoundingClientRect().width;
+    document.documentElement.style.setProperty("--text-scale", "2");
+    const scaledFontSize = Number.parseFloat(getComputedStyle(sample).fontSize);
+    const scaledCardWidth = card.getBoundingClientRect().width;
+    document.documentElement.style.setProperty("--text-scale", "1");
     return {
       min: input.min,
       max: input.max,
       step: input.step,
       width: input.getBoundingClientRect().width,
+      markerOffset: Math.abs(markerCenter - expectedThumbCenter),
+      fontScaleRatio: scaledFontSize / baseFontSize,
+      cardWidthDelta: Math.abs(scaledCardWidth - baseCardWidth),
       cardOverflow: card.scrollWidth > card.clientWidth + 1,
       pageCanScroll: scroll.scrollHeight > scroll.clientHeight
     };
@@ -136,15 +158,38 @@ try {
       cardOverflow: card.scrollWidth > card.clientWidth + 1
     };
   })()`);
+  const magnifier = await evaluate(`(() => {
+    const sliders = [...document.querySelectorAll(".magnifier-size-setting input[type=range]")];
+    const recorder = document.querySelector(".magnifier-recorder");
+    return {
+      count: sliders.length,
+      width: sliders[0] ? { min: sliders[0].min, max: sliders[0].max, step: sliders[0].step } : null,
+      height: sliders[1] ? { min: sliders[1].min, max: sliders[1].max, step: sliders[1].step } : null,
+      recorder: Boolean(recorder)
+    };
+  })()`);
+  if (shortcutScreenshotPath) {
+    await evaluate('document.querySelector(".magnifier-shortcut-card").scrollIntoView({ block: "center" })');
+    await wait(180);
+    const screenshot = await send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: false,
+      fromSurface: true
+    });
+    await writeFile(shortcutScreenshotPath, Buffer.from(screenshot.data, "base64"));
+  }
   if (
     scale.min !== "0.5" || scale.max !== "3" || scale.step !== "0.1" ||
-    scale.width < 200 || scale.cardOverflow || !scale.pageCanScroll ||
+    scale.width < 200 || scale.markerOffset > 1 || scale.cardOverflow || !scale.pageCanScroll ||
+    Math.abs(scale.fontScaleRatio - 2) > 0.02 || scale.cardWidthDelta > 1 ||
     mouse.min !== "0" || mouse.max !== "3000" || mouse.step !== "100" ||
-    mouse.width < 200 || mouse.cardOverflow
+    mouse.width < 200 || mouse.cardOverflow || magnifier.count !== 2 || !magnifier.recorder ||
+    magnifier.width?.min !== "160" || magnifier.width?.max !== "1200" || magnifier.width?.step !== "20" ||
+    magnifier.height?.min !== "120" || magnifier.height?.max !== "900" || magnifier.height?.step !== "20"
   ) {
-    throw new Error(`Slider layout validation failed: ${JSON.stringify({ scale, mouse })}`);
+    throw new Error(`Slider layout validation failed: ${JSON.stringify({ scale, mouse, magnifier })}`);
   }
-  console.log(JSON.stringify({ result: "ok", scale, mouse }, null, 2));
+  console.log(JSON.stringify({ result: "ok", scale, mouse, magnifier }, null, 2));
 } finally {
   socket?.close();
   const exited = new Promise((resolve) => chrome.once("exit", resolve));

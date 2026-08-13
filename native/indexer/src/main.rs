@@ -180,6 +180,11 @@ struct Request {
     rebuild_reason: Option<String>,
     mouse_button: Option<String>,
     mouse_hold_ms: Option<u64>,
+    magnifier_enabled: Option<bool>,
+    magnifier_modifiers: Option<String>,
+    magnifier_width: Option<u64>,
+    magnifier_height: Option<u64>,
+    magnifier_capture_active: Option<bool>,
     limit: Option<usize>,
     cursor: Option<String>,
     sort_by: Option<String>,
@@ -295,6 +300,90 @@ fn mouse_button_name(button: u64) -> &'static str {
     }
 }
 
+#[cfg(windows)]
+struct MagnifierState {
+    available: AtomicBool,
+    enabled: AtomicBool,
+    capture_active: AtomicBool,
+    lens_active: AtomicBool,
+    modifiers: AtomicU64,
+    width: AtomicU64,
+    height: AtomicU64,
+    factor_tenths: AtomicU64,
+    host_window: AtomicUsize,
+    control_window: AtomicUsize,
+}
+
+#[cfg(windows)]
+static MAGNIFIER_STATE: OnceLock<MagnifierState> = OnceLock::new();
+
+#[cfg(windows)]
+fn magnifier_available() -> bool {
+    MAGNIFIER_STATE
+        .get()
+        .is_some_and(|state| state.available.load(Ordering::SeqCst))
+}
+
+#[cfg(not(windows))]
+fn magnifier_available() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn magnifier_modifier_mask(value: &str) -> u64 {
+    value.split('+').fold(0, |mask, part| match part.trim().to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => mask | 1,
+        "alt" => mask | 2,
+        "shift" => mask | 4,
+        "win" | "meta" => mask | 8,
+        _ => mask,
+    })
+}
+
+fn magnifier_size(value: u64, min: u64, max: u64) -> u64 {
+    ((value.clamp(min, max) + 9) / 10) * 10
+}
+
+#[cfg(windows)]
+fn configure_magnifier(enabled: bool, modifiers: &str, width: u64, height: u64) {
+    let Some(state) = MAGNIFIER_STATE.get() else { return; };
+    let modifier_mask = magnifier_modifier_mask(modifiers);
+    state.enabled.store(enabled, Ordering::SeqCst);
+    if !enabled {
+        state.lens_active.store(false, Ordering::SeqCst);
+    }
+    state.modifiers.store(if modifier_mask == 0 { 1 } else { modifier_mask }, Ordering::SeqCst);
+    state.width.store(magnifier_size(width, 160, 1200), Ordering::SeqCst);
+    state.height.store(magnifier_size(height, 120, 900), Ordering::SeqCst);
+    if !enabled {
+        unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+            let host = state.host_window.load(Ordering::SeqCst) as isize;
+            if host != 0 {
+                ShowWindow(host, SW_HIDE);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn configure_magnifier_capture(active: bool) {
+    let Some(state) = MAGNIFIER_STATE.get() else { return; };
+    state.capture_active.store(active, Ordering::SeqCst);
+    if active {
+        state.lens_active.store(false, Ordering::SeqCst);
+        unsafe {
+            update_magnifier_lens(false);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_magnifier_capture(_active: bool) {}
+
+#[cfg(not(windows))]
+fn configure_magnifier(_enabled: bool, _modifiers: &str, _width: u64, _height: u64) {}
+
 fn normalize_mouse_hold_ms(hold_ms: u64) -> u64 {
     hold_ms.min(3_000)
 }
@@ -384,7 +473,27 @@ unsafe extern "system" fn mouse_shortcut_window_proc(
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
         RI_MOUSE_BUTTON_5_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, WM_INPUT,
+        WM_TIMER,
     };
+
+    if message == WM_TIMER {
+        if let Some(state) = MAGNIFIER_STATE.get() {
+            let modifiers_pressed = magnifier_modifiers_pressed(state.modifiers.load(Ordering::SeqCst));
+            if !modifiers_pressed {
+                state.lens_active.store(false, Ordering::SeqCst);
+            }
+            let active = state.available.load(Ordering::SeqCst)
+                && state.enabled.load(Ordering::SeqCst)
+                && !state.capture_active.load(Ordering::SeqCst)
+                && state.lens_active.load(Ordering::SeqCst)
+                && modifiers_pressed;
+            update_magnifier_lens(active);
+        }
+        return 0;
+    }
+    if message == windows_sys::Win32::UI::WindowsAndMessaging::WM_NCHITTEST {
+        return windows_sys::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize;
+    }
 
     if message == WM_INPUT {
         let mut raw = std::mem::MaybeUninit::<RAWINPUT>::zeroed();
@@ -429,9 +538,14 @@ fn start_mouse_shortcut_listener(output: Output) {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
+    use windows_sys::Win32::UI::Magnification::{
+        MagInitialize, MagSetWindowFilterList, MW_FILTERMODE_EXCLUDE, WC_MAGNIFIER,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
-        HWND_MESSAGE, MSG, WNDCLASSW,
+        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, SetLayeredWindowAttributes,
+        SetTimer, SetWindowsHookExW, TranslateMessage, HWND_MESSAGE, LWA_ALPHA, MSG, WH_MOUSE_LL,
+        WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
     };
 
     let listener_output = output.clone();
@@ -447,6 +561,18 @@ fn start_mouse_shortcut_listener(output: Output) {
     {
         return;
     }
+    let _ = MAGNIFIER_STATE.set(MagnifierState {
+        available: AtomicBool::new(false),
+        enabled: AtomicBool::new(false),
+        capture_active: AtomicBool::new(false),
+        lens_active: AtomicBool::new(false),
+        modifiers: AtomicU64::new(1),
+        width: AtomicU64::new(480),
+        height: AtomicU64::new(300),
+        factor_tenths: AtomicU64::new(20),
+        host_window: AtomicUsize::new(0),
+        control_window: AtomicUsize::new(0),
+    });
 
     thread::spawn(move || unsafe {
         let module = GetModuleHandleW(std::ptr::null());
@@ -459,7 +585,7 @@ fn start_mouse_shortcut_listener(output: Output) {
             hInstance: module,
             hIcon: 0,
             hCursor: 0,
-            hbrBackground: 0,
+            hbrBackground: windows_sys::Win32::Graphics::Gdi::CreateSolidBrush(0x0056C7E8),
             lpszMenuName: std::ptr::null(),
             lpszClassName: class_name.as_ptr(),
         };
@@ -508,6 +634,82 @@ fn start_mouse_shortcut_listener(output: Output) {
                 "errorCode": GetLastError()
             }));
             return;
+        }
+
+        if MagInitialize() != 0 {
+            let host = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                class_name.as_ptr(),
+                class_name.as_ptr(),
+                WS_POPUP | WS_CLIPCHILDREN,
+                0,
+                0,
+                480,
+                300,
+                0,
+                0,
+                module,
+                std::ptr::null(),
+            );
+            if host != 0 {
+                SetLayeredWindowAttributes(host, 0, 255, LWA_ALPHA);
+                let control = CreateWindowExW(
+                    0,
+                    WC_MAGNIFIER,
+                    class_name.as_ptr(),
+                    WS_CHILD | WS_VISIBLE,
+                    3,
+                    3,
+                    474,
+                    294,
+                    host,
+                    0,
+                    module,
+                    std::ptr::null(),
+                );
+                if let Some(state) = MAGNIFIER_STATE.get() {
+                    state.host_window.store(host as usize, Ordering::SeqCst);
+                    state.control_window.store(control as usize, Ordering::SeqCst);
+                }
+                if control != 0 {
+                    let mut excluded_window = host;
+                    MagSetWindowFilterList(
+                        control,
+                        MW_FILTERMODE_EXCLUDE,
+                        1,
+                        &mut excluded_window,
+                    );
+                }
+                SetTimer(host, 1, 50, None);
+                let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(magnifier_mouse_hook), module, 0);
+                if control == 0 || hook == 0 {
+                    listener_output.send(&json!({
+                        "event": "magnifierStatus",
+                        "available": false,
+                        "errorCode": GetLastError()
+                    }));
+                } else {
+                    if let Some(state) = MAGNIFIER_STATE.get() {
+                        state.available.store(true, Ordering::SeqCst);
+                    }
+                    listener_output.send(&json!({
+                        "event": "magnifierStatus",
+                        "available": true
+                    }));
+                }
+            } else {
+                listener_output.send(&json!({
+                    "event": "magnifierStatus",
+                    "available": false,
+                    "errorCode": GetLastError()
+                }));
+            }
+        } else {
+            listener_output.send(&json!({
+                "event": "magnifierStatus",
+                "available": false,
+                "errorCode": GetLastError()
+            }));
         }
 
         listener_output.send(&json!({
@@ -568,6 +770,120 @@ fn normalized_path_hash(value: &str) -> u64 {
         }
     }
     hash
+}
+
+#[cfg(windows)]
+unsafe fn magnifier_modifiers_pressed(mask: u64) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RMENU,
+        VK_RSHIFT, VK_RWIN, VK_SHIFT,
+    };
+    let down = |key: u16| GetAsyncKeyState(key as i32) < 0;
+    (mask & 1 == 0 || down(VK_CONTROL))
+        && (mask & 2 == 0 || down(VK_MENU) || down(VK_LMENU) || down(VK_RMENU))
+        && (mask & 4 == 0 || down(VK_SHIFT) || down(VK_LSHIFT) || down(VK_RSHIFT))
+        && (mask & 8 == 0 || down(VK_LWIN) || down(VK_RWIN))
+}
+
+#[cfg(windows)]
+unsafe fn update_magnifier_lens(show: bool) {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::Magnification::{
+        MagSetWindowSource, MagSetWindowTransform, MAGTRANSFORM,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+        SWP_SHOWWINDOW, SW_HIDE,
+    };
+    let Some(state) = MAGNIFIER_STATE.get() else { return; };
+    let host = state.host_window.load(Ordering::SeqCst) as isize;
+    let control = state.control_window.load(Ordering::SeqCst) as isize;
+    if host == 0 || control == 0 { return; }
+    if !show || !state.enabled.load(Ordering::SeqCst) {
+        ShowWindow(host, SW_HIDE);
+        return;
+    }
+    let mut cursor = POINT { x: 0, y: 0 };
+    if GetCursorPos(&mut cursor) == 0 { return; }
+    let width = state.width.load(Ordering::SeqCst) as i32;
+    let height = state.height.load(Ordering::SeqCst) as i32;
+    let content_width = (width - 6).max(1);
+    let content_height = (height - 6).max(1);
+    let factor = state.factor_tenths.load(Ordering::SeqCst) as f32 / 10.0;
+    let source_width = (content_width as f32 / factor).round().max(1.0) as i32;
+    let source_height = (content_height as f32 / factor).round().max(1.0) as i32;
+    let virtual_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    let virtual_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    let virtual_right = virtual_left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    let virtual_bottom = virtual_top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    let source_left = (cursor.x - source_width / 2)
+        .clamp(virtual_left, (virtual_right - source_width).max(virtual_left));
+    let source_top = (cursor.y - source_height / 2)
+        .clamp(virtual_top, (virtual_bottom - source_height).max(virtual_top));
+    let source = RECT {
+        left: source_left,
+        top: source_top,
+        right: source_left + source_width,
+        bottom: source_top + source_height,
+    };
+    let mut transform = MAGTRANSFORM { v: [0.0; 9] };
+    transform.v[0] = factor;
+    transform.v[4] = factor;
+    transform.v[8] = 1.0;
+    MagSetWindowTransform(control, &mut transform);
+    MagSetWindowSource(control, source);
+    SetWindowPos(
+        control,
+        0,
+        3,
+        3,
+        content_width,
+        content_height,
+        SWP_NOACTIVATE | SWP_NOZORDER,
+    );
+    let lens_x = (cursor.x - width / 2).clamp(virtual_left, (virtual_right - width).max(virtual_left));
+    let lens_y = (cursor.y - height / 2).clamp(virtual_top, (virtual_bottom - height).max(virtual_top));
+    SetWindowPos(
+        host,
+        HWND_TOPMOST,
+        lens_x,
+        lens_y,
+        width,
+        height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn magnifier_mouse_hook(
+    code: i32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, MSLLHOOKSTRUCT, WM_MOUSEWHEEL,
+    };
+    if code >= 0 {
+        let Some(state) = MAGNIFIER_STATE.get() else {
+            return CallNextHookEx(0, code, wparam, lparam);
+        };
+        let active = state.available.load(Ordering::SeqCst)
+            && state.enabled.load(Ordering::SeqCst)
+            && !state.capture_active.load(Ordering::SeqCst)
+            && magnifier_modifiers_pressed(state.modifiers.load(Ordering::SeqCst));
+        if wparam as u32 == WM_MOUSEWHEEL && active {
+            let event = &*(lparam as *const MSLLHOOKSTRUCT);
+            let delta = (event.mouseData >> 16) as i16;
+            let current = state.factor_tenths.load(Ordering::SeqCst);
+            let next = if delta > 0 { current.saturating_add(5) } else { current.saturating_sub(5) };
+            state.factor_tenths.store(next.clamp(15, 80), Ordering::SeqCst);
+            state.lens_active.store(true, Ordering::SeqCst);
+            update_magnifier_lens(true);
+            return 1;
+        }
+    }
+    CallNextHookEx(0, code, wparam, lparam)
 }
 
 fn is_drive_root(value: &str) -> bool {
@@ -3686,6 +4002,12 @@ fn run_server() -> io::Result<()> {
                     request.mouse_button.as_deref().unwrap_or("back"),
                     request.mouse_hold_ms.unwrap_or(3_000),
                 );
+                configure_magnifier(
+                    request.magnifier_enabled.unwrap_or(false),
+                    request.magnifier_modifiers.as_deref().unwrap_or("Ctrl"),
+                    request.magnifier_width.unwrap_or(480),
+                    request.magnifier_height.unwrap_or(300),
+                );
                 let requested_root = request.root.unwrap_or_else(|| "*".to_string());
                 #[cfg(windows)]
                 let roots = if requested_root == "*" {
@@ -3796,6 +4118,31 @@ fn run_server() -> io::Result<()> {
                     "available": cfg!(windows),
                     "button": button,
                     "holdMs": hold_ms
+                }));
+            }
+            "setMagnifier" => {
+                let enabled = request.magnifier_enabled.unwrap_or(false);
+                let modifiers = request.magnifier_modifiers.as_deref().unwrap_or("Ctrl");
+                let width = magnifier_size(request.magnifier_width.unwrap_or(480), 160, 1200);
+                let height = magnifier_size(request.magnifier_height.unwrap_or(300), 120, 900);
+                configure_magnifier(enabled, modifiers, width, height);
+                output.send(&json!({
+                    "id": request.id,
+                    "ok": true,
+                    "available": magnifier_available(),
+                    "enabled": enabled,
+                    "modifiers": modifiers,
+                    "width": width,
+                    "height": height
+                }));
+            }
+            "setMagnifierCapture" => {
+                let active = request.magnifier_capture_active.unwrap_or(false);
+                configure_magnifier_capture(active);
+                output.send(&json!({
+                    "id": request.id,
+                    "ok": true,
+                    "active": active
                 }));
             }
             "query" => {

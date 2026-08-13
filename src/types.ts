@@ -423,6 +423,10 @@ export interface AppSettings {
   quickSearchShortcut: string;
   mouseQuickSearchButton: MouseShortcutButton;
   mouseQuickSearchHoldMs: number;
+  magnifierEnabled: boolean;
+  magnifierModifiers: string;
+  magnifierWidth: number;
+  magnifierHeight: number;
   indexRoots: string[];
   excludedPaths: string[];
   ai: {
@@ -550,6 +554,15 @@ export interface MouseShortcutStatus {
   message: string;
 }
 
+export interface MagnifierStatus {
+  available: boolean;
+  enabled: boolean;
+  modifiers: string;
+  width: number;
+  height: number;
+  message: string;
+}
+
 export type ShortcutTarget = "main" | "quick-search";
 
 export type SettingsModuleId = "update" | "appearance" | "system" | "ai";
@@ -643,6 +656,8 @@ export interface CDriveShiftApi {
   testGlobalShortcut(target: ShortcutTarget): Promise<boolean>;
   getMouseShortcutStatus(): Promise<MouseShortcutStatus>;
   testMouseShortcut(): Promise<boolean>;
+  getMagnifierStatus(): Promise<MagnifierStatus>;
+  setMagnifierCapture(active: boolean): Promise<boolean>;
   listAiModels(input: AiConnectionInput): Promise<AiModelListResult>;
   testAiConnection(input: AiConnectionInput): Promise<AiTestResult>;
   saveAiDraft(input: AiDraftSaveInput): Promise<AppSettings>;
@@ -715,6 +730,7 @@ export interface CDriveShiftApi {
   onMigrationProgress(listener: (event: MigrationProgressEvent) => void): () => void;
   onAppNavigation(listener: (event: AppNavigationEvent) => void): () => void;
   onSettingsChanged(listener: (settings: AppSettings) => void): () => void;
+  onTextScalePreview(listener: (scale: number) => void): () => void;
   onUpdateStatus(listener: (status: AppUpdateInfo) => void): () => void;
 }
 

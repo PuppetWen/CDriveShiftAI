@@ -70,6 +70,10 @@ const mockSettings: AppSettings = {
   quickSearchShortcut: "CommandOrControl+Alt+F",
   mouseQuickSearchButton: "back",
   mouseQuickSearchHoldMs: 3_000,
+  magnifierEnabled: false,
+  magnifierModifiers: "Ctrl",
+  magnifierWidth: 480,
+  magnifierHeight: 300,
   indexRoots: ["*"],
   excludedPaths: ["C:\\Windows\\WinSxS", "C:\\System Volume Information"],
   ai: {
@@ -330,6 +334,19 @@ const browserFallback: CDriveShiftApi = {
   },
   async testMouseShortcut() {
     return true;
+  },
+  async getMagnifierStatus() {
+    return {
+      available: false,
+      enabled: mockSettings.magnifierEnabled,
+      modifiers: mockSettings.magnifierModifiers,
+      width: mockSettings.magnifierWidth,
+      height: mockSettings.magnifierHeight,
+      message: "浏览器预览不提供 Windows 全局局部放大镜"
+    };
+  },
+  async setMagnifierCapture(active) {
+    return active;
   },
   async listAiModels(input) {
     const prefix =
@@ -769,6 +786,7 @@ const browserFallback: CDriveShiftApi = {
   },
   onAppNavigation: () => () => undefined,
   onSettingsChanged: () => () => undefined,
+  onTextScalePreview: () => () => undefined,
   onUpdateStatus: () => () => undefined
 };
 

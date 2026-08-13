@@ -35,6 +35,10 @@ const defaults: StoreShape = {
     quickSearchShortcut: "CommandOrControl+Alt+F",
     mouseQuickSearchButton: "back",
     mouseQuickSearchHoldMs: 3_000,
+    magnifierEnabled: false,
+    magnifierModifiers: "Ctrl",
+    magnifierWidth: 480,
+    magnifierHeight: 300,
     indexRoots: ["*"],
     excludedPaths: [
       "C:\\Windows\\WinSxS",
@@ -501,6 +505,22 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
   )
     ? aiInput!.protocol!
     : defaults.settings.ai.protocol;
+  const magnifierModifierParts =
+    typeof input?.magnifierModifiers === "string"
+      ? input.magnifierModifiers
+          .split("+")
+          .map((part) => part.trim().toLocaleLowerCase())
+      : [];
+  const magnifierModifiers = [
+    magnifierModifierParts.includes("ctrl") || magnifierModifierParts.includes("control")
+      ? "Ctrl"
+      : undefined,
+    magnifierModifierParts.includes("alt") ? "Alt" : undefined,
+    magnifierModifierParts.includes("shift") ? "Shift" : undefined,
+    magnifierModifierParts.includes("win") || magnifierModifierParts.includes("meta")
+      ? "Win"
+      : undefined
+  ].filter((part): part is string => Boolean(part));
   return {
     ...defaults.settings,
     ...input,
@@ -547,6 +567,10 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
       input?.mouseQuickSearchHoldMs,
       defaults.settings.mouseQuickSearchHoldMs
     ),
+    magnifierEnabled: Boolean(input?.magnifierEnabled),
+    magnifierModifiers: magnifierModifiers.join("+") || defaults.settings.magnifierModifiers,
+    magnifierWidth: Math.round(Math.min(1200, Math.max(160, Number(input?.magnifierWidth) || 480)) / 10) * 10,
+    magnifierHeight: Math.round(Math.min(900, Math.max(120, Number(input?.magnifierHeight) || 300)) / 10) * 10,
     indexRoots: Array.isArray(input?.indexRoots) ? input.indexRoots : defaults.settings.indexRoots,
     excludedPaths: Array.isArray(input?.excludedPaths)
       ? input.excludedPaths

@@ -341,6 +341,10 @@ export interface AppSettings {
   quickSearchShortcut: string;
   mouseQuickSearchButton: MouseShortcutButton;
   mouseQuickSearchHoldMs: number;
+  magnifierEnabled: boolean;
+  magnifierModifiers: string;
+  magnifierWidth: number;
+  magnifierHeight: number;
   indexRoots: string[];
   excludedPaths: string[];
   ai: {
@@ -523,6 +527,15 @@ export interface StoreShape {
   uiLayout: UiLayoutState;
   analyses: AnalysisResult[];
   ownershipMaps: OwnershipMapResult[];
+}
+
+export interface MagnifierStatus {
+  available: boolean;
+  enabled: boolean;
+  modifiers: string;
+  width: number;
+  height: number;
+  message: string;
 }
 
 export type DirectoryDialogPurpose =

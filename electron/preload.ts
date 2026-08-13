@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
     ipcRenderer.invoke("shortcut:test", target),
   getMouseShortcutStatus: () => ipcRenderer.invoke("shortcut:mouse-status"),
   testMouseShortcut: () => ipcRenderer.invoke("shortcut:mouse-test"),
+  getMagnifierStatus: () => ipcRenderer.invoke("shortcut:magnifier-status"),
+  setMagnifierCapture: (active: boolean) =>
+    ipcRenderer.invoke("shortcut:magnifier-capture", active),
   listAiModels: (input: unknown) => ipcRenderer.invoke("ai:list-models", input),
   testAiConnection: (input: unknown) => ipcRenderer.invoke("ai:test", input),
   saveAiDraft: (input: unknown) => ipcRenderer.invoke("ai:save-draft", input),
@@ -181,6 +184,11 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
       listener(settings);
     ipcRenderer.on("settings:changed", handler);
     return () => ipcRenderer.removeListener("settings:changed", handler);
+  },
+  onTextScalePreview: (listener: (scale: number) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, scale: number) => listener(scale);
+    ipcRenderer.on("settings:text-scale-preview", handler);
+    return () => ipcRenderer.removeListener("settings:text-scale-preview", handler);
   },
   onUpdateStatus: (listener: (status: AppUpdateInfo) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, status: AppUpdateInfo) =>

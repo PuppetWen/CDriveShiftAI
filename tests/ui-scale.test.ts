@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeUiScale, uiScaleProgress } from "../src/lib/uiScale";
+import {
+  normalizeUiScale,
+  uiScaleFromLockedDrag,
+  uiScaleProgress
+} from "../src/lib/uiScale";
 
 describe("continuous interface scale", () => {
   it("uses standard size as 100% and clamps between 50% and 300%", () => {
@@ -18,5 +22,12 @@ describe("continuous interface scale", () => {
     expect(uiScaleProgress(0.5)).toBe(0);
     expect(uiScaleProgress(1.8)).toBe(52);
     expect(uiScaleProgress(3)).toBe(100);
+  });
+
+  it("keeps drag values tied to the track width captured before live zoom", () => {
+    expect(uiScaleFromLockedDrag(1, 40, 500)).toBe(1.2);
+    expect(uiScaleFromLockedDrag(1, 80, 500)).toBe(1.4);
+    expect(uiScaleFromLockedDrag(1, -80, 500)).toBe(0.6);
+    expect(uiScaleFromLockedDrag(1, 80, 0)).toBe(1);
   });
 });
