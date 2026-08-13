@@ -4640,53 +4640,100 @@ input:checked + .toggle::after { transform: translateX(13px); }
   font-size: 9px;
   font-weight: 700;
 }
-.ui-scale-options {
+.ui-scale-control {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 9px;
-}
-.ui-scale-options button {
-  position: relative;
-  display: grid;
-  min-height: 82px;
-  grid-template-columns: 42px minmax(0, 1fr) auto;
-  grid-template-rows: auto auto;
+  grid-template-columns: minmax(180px, .42fr) minmax(320px, 1fr);
   align-items: center;
-  gap: 2px 10px;
+  gap: 12px;
+}
+.ui-scale-preview {
+  display: grid;
+  min-height: 66px;
+  grid-template-columns: 45px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
   border: 1px solid var(--border);
   border-radius: 11px;
-  padding: 11px 12px;
+  padding: 9px 11px;
   color: var(--text);
   background: color-mix(in srgb, var(--bg) 22%, transparent);
-  cursor: pointer;
-  text-align: left;
-  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
 }
-.ui-scale-options button:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-hover);
-  transform: translateY(-1px);
-}
-.ui-scale-options button.active {
-  border-color: color-mix(in srgb, var(--mint) 48%, var(--border));
-  background: color-mix(in srgb, var(--mint) 8%, var(--surface));
-}
-.ui-scale-options button > span {
+.ui-scale-preview > span:first-child {
   display: grid;
-  width: 42px;
-  height: 42px;
-  grid-row: 1 / 3;
+  width: 45px;
+  height: 45px;
   place-items: center;
   border-radius: 9px;
   color: var(--mint-bright);
   background: color-mix(in srgb, var(--mint) 9%, transparent);
+  font-size: 15px;
   font-weight: 700;
 }
-.ui-scale-options button strong { align-self: end; font-size: 10px; }
-.ui-scale-options button small { align-self: start; color: var(--muted); font-size: 8px; }
-.ui-scale-options .radio-mark { grid-column: 3; grid-row: 1 / 3; }
-.ui-scale-options button.active .radio-mark { border: 4px solid var(--mint); }
-:root[data-effect="aurora"] :is(.ui-scale-options button, .ui-scale-options button > span, .ui-scale-value) {
+.ui-scale-preview > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.ui-scale-preview strong { font-size: 9px; }
+.ui-scale-preview small { color: var(--muted); font-size: 7px; line-height: 1.45; }
+.ui-scale-slider {
+  min-height: 66px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface-solid) 74%, transparent);
+  padding: 18px 14px 8px;
+}
+.ui-scale-slider:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mint) 6%, transparent);
+}
+.ui-scale-slider input {
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  border: 0;
+  outline: 0;
+  background: linear-gradient(
+    90deg,
+    var(--mint) 0 var(--ui-scale-progress),
+    color-mix(in srgb, var(--border-strong) 70%, transparent) var(--ui-scale-progress) 100%
+  ) center / 100% 5px no-repeat;
+  cursor: pointer;
+}
+.ui-scale-slider input::-webkit-slider-thumb {
+  appearance: none;
+  width: 17px;
+  height: 17px;
+  border: 3px solid var(--surface-solid);
+  border-radius: 50%;
+  background: var(--mint);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--mint) 50%, var(--border)), 0 0 9px color-mix(in srgb, var(--mint) 30%, transparent);
+}
+.ui-scale-scale {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  color: var(--dim);
+  font: 7px "Cascadia Code", monospace;
+}
+.ui-scale-standard-mark {
+  position: absolute;
+  left: 20%;
+  color: var(--mint-bright);
+  transform: translateX(-50%);
+}
+.ui-scale-standard-mark::before {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  width: 1px;
+  height: 6px;
+  background: color-mix(in srgb, var(--mint) 66%, transparent);
+  content: "";
+}
+:root[data-effect="aurora"] :is(.ui-scale-preview, .ui-scale-preview > span:first-child, .ui-scale-slider, .ui-scale-value) {
   border-radius: 2px;
 }
 .language-settings-card {
@@ -7627,7 +7674,7 @@ input:checked + .toggle::after { transform: translateX(13px); }
   .update-release-body { grid-template-columns: minmax(150px, .55fr) minmax(0, 2fr); }
   .update-release-items { grid-template-columns: 1fr; }
   .settings-module-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .ui-scale-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ui-scale-control { grid-template-columns: 1fr; }
   .index-settings-controls { grid-template-columns: 1fr auto; }
   .index-settings-controls .setting-note { grid-column: 1 / -1; }
   .behavior-setting-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

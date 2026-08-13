@@ -56,6 +56,13 @@ import {
   bundledReleaseHistoryEnglish
 } from "../lib/releaseHistory";
 import {
+  UI_SCALE_MAX,
+  UI_SCALE_MIN,
+  UI_SCALE_STEP,
+  normalizeUiScale,
+  uiScaleProgress
+} from "../lib/uiScale";
+import {
   languageName,
   resolvedLanguage,
   setAppLanguage,
@@ -75,8 +82,7 @@ import type {
   MouseShortcutStatus,
   SettingsModuleId,
   ShortcutCheckResult,
-  ShortcutTarget,
-  UiScale
+  ShortcutTarget
 } from "../types";
 import { AiProviderPicker } from "../components/AiProviderPicker";
 import { AiModelPicker } from "../components/AiModelPicker";
@@ -503,23 +509,31 @@ export function SettingsView({
     }
   };
 
-  const chooseUiScale = async (uiScale: UiScale) => {
-    if (uiScale === draft.uiScale) return;
+  const commitUiScale = async (value: number, notifySuccess = false) => {
+    const uiScale = normalizeUiScale(value);
+    const previous = persistedSettingsRef.current.uiScale;
+    if (uiScale === previous) {
+      setDraft((current) => ({ ...current, uiScale }));
+      return;
+    }
     const request = ++uiScaleRequest.current;
-    const previous = draft.uiScale;
     setDraft((current) => ({ ...current, uiScale }));
     try {
       const updated = await api.updateSettings({ uiScale });
       if (request !== uiScaleRequest.current) return;
+      persistedSettingsRef.current = updated;
       onSettings(updated);
       setDraft((current) => ({ ...current, uiScale: updated.uiScale }));
-      notify(
-        "success",
-        ui("字体与界面大小已应用", "Text and interface size applied")
-      );
+      if (notifySuccess) {
+        notify(
+          "success",
+          ui("字体与界面大小已应用", "Text and interface size applied")
+        );
+      }
     } catch (error) {
       if (request !== uiScaleRequest.current) return;
       setDraft((current) => ({ ...current, uiScale: previous }));
+      void api.previewUiScale(previous).catch(() => undefined);
       notify("error", error instanceof Error ? error.message : String(error));
     }
   };
@@ -1401,33 +1415,54 @@ export function SettingsView({
             <h2>{ui("字体与界面大小", "Text and interface size")}</h2>
             <p>
               {ui(
-                "同步调整文字、按钮、间距和图标；选择后立即生效并自动保存。",
-                "Scale text, controls, spacing, and icons together. Changes apply and save immediately."
+                "同步调整文字、按钮、间距和图标；拖动时实时缩放，松开后自动保存。",
+                "Scale text, controls, spacing, and icons together. Drag for a live preview and release to save."
               )}
             </p>
           </div>
           <span className="ui-scale-value">{Math.round(draft.uiScale * 100)}%</span>
         </div>
-        <div className="ui-scale-options">
-          {([
-            { value: 0.9, zh: "小", en: "Small", sample: "Aa" },
-            { value: 1, zh: "标准", en: "Standard", sample: "Aa" },
-            { value: 1.1, zh: "大", en: "Large", sample: "Aa" },
-            { value: 1.2, zh: "特大", en: "Extra large", sample: "Aa" }
-          ] as const).map((option) => (
-            <button
-              type="button"
-              className={draft.uiScale === option.value ? "active" : ""}
-              aria-pressed={draft.uiScale === option.value}
-              onClick={() => void chooseUiScale(option.value)}
-              key={option.value}
-            >
-              <span style={{ fontSize: `${option.value}em` }}>{option.sample}</span>
-              <strong>{ui(option.zh, option.en)}</strong>
-              <small>{Math.round(option.value * 100)}%</small>
-              <i className="radio-mark" />
-            </button>
-          ))}
+        <div className="ui-scale-control">
+          <div className="ui-scale-preview" aria-hidden="true">
+            <span>Aa</span>
+            <span>
+              <strong>{ui("标准字体为 100%", "Standard text is 100%")}</strong>
+              <small>{ui("拖动滑杆调整字体与整个界面的比例", "Drag to scale text and the whole interface")}</small>
+            </span>
+          </div>
+          <div
+            className="ui-scale-slider"
+            style={
+              {
+                "--ui-scale-progress": `${uiScaleProgress(draft.uiScale)}%`
+              } as CSSProperties
+            }
+          >
+            <input
+              type="range"
+              min={UI_SCALE_MIN}
+              max={UI_SCALE_MAX}
+              step={UI_SCALE_STEP}
+              value={draft.uiScale}
+              aria-label={ui("字体与界面缩放百分比", "Text and interface scale percentage")}
+              aria-valuetext={`${Math.round(draft.uiScale * 100)}%`}
+              onChange={(event) => {
+                const uiScale = normalizeUiScale(event.currentTarget.valueAsNumber);
+                setDraft((current) => ({ ...current, uiScale }));
+                void api.previewUiScale(uiScale).catch((error) =>
+                  notify("error", error instanceof Error ? error.message : String(error))
+                );
+              }}
+              onPointerUp={(event) => void commitUiScale(event.currentTarget.valueAsNumber, true)}
+              onKeyUp={(event) => void commitUiScale(event.currentTarget.valueAsNumber, true)}
+              onBlur={() => void commitUiScale(draft.uiScale)}
+            />
+            <div className="ui-scale-scale" aria-hidden="true">
+              <span>50%</span>
+              <span className="ui-scale-standard-mark">{ui("标准 100%", "Standard 100%")}</span>
+              <span>300%</span>
+            </div>
+          </div>
         </div>
       </section>
       <section className="settings-section glass-card">
@@ -1764,10 +1799,10 @@ export function SettingsView({
                       }
                     />
                     <div className="mouse-hold-scale" aria-hidden="true">
-                      <span>500 ms</span>
+                      <span>0 ms</span>
+                      <span>1 s</span>
+                      <span>2 s</span>
                       <span>3 s</span>
-                      <span>5 s</span>
-                      <span>10 s</span>
                     </div>
                   </div>
                 </div>

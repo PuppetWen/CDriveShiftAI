@@ -42,6 +42,7 @@ import {
 } from "./logger";
 import { MigrationService } from "./migration";
 import { SearchService } from "./search";
+import { normalizeStoredUiScale } from "./settings-normalization";
 import { AppStore } from "./store";
 import { createTrayMenuIcon, type TrayIconKind } from "./tray-icons";
 import {
@@ -1401,6 +1402,25 @@ function registerIpc(): void {
     if (!selectedPath) return null;
     await store.saveDirectoryDialogPath(safePurpose, selectedPath);
     return selectedPath;
+  });
+  ipcMain.handle("settings:preview-ui-scale", (event, rawScale: unknown) => {
+    if (typeof rawScale !== "number" || !Number.isFinite(rawScale)) {
+      throw new Error("界面缩放比例无效");
+    }
+    const scale = normalizeStoredUiScale(rawScale);
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (sourceWindow) applyUiScale(sourceWindow, scale);
+    if (quickSearchWindow && !quickSearchWindow.isDestroyed() && quickSearchWindow !== sourceWindow) {
+      applyUiScale(quickSearchWindow, scale);
+    }
+    if (
+      uninstallRestoreWindow &&
+      !uninstallRestoreWindow.isDestroyed() &&
+      uninstallRestoreWindow !== sourceWindow
+    ) {
+      applyUiScale(uninstallRestoreWindow, scale);
+    }
+    return scale;
   });
 
   ipcMain.handle("shell:reveal", async (_event, targetPath: unknown) => {

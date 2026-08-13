@@ -273,6 +273,10 @@ const browserFallback: CDriveShiftApi = {
     Object.assign(mockSettings, patch);
     return mockSettings;
   },
+  async previewUiScale(scale) {
+    mockSettings.uiScale = scale;
+    return scale;
+  },
   async checkGlobalShortcut(shortcut, target) {
     const value = shortcut.trim();
     const current =

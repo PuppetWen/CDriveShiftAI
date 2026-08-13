@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
   exportDiagnosticReport: () => ipcRenderer.invoke("diagnostics:export"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateSettings: (patch: unknown) => ipcRenderer.invoke("settings:update", patch),
+  previewUiScale: (scale: number) => ipcRenderer.invoke("settings:preview-ui-scale", scale),
   checkGlobalShortcut: (shortcut: string, target: string) =>
     ipcRenderer.invoke("shortcut:check", shortcut, target),
   testGlobalShortcut: (target: string) =>

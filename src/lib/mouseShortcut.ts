@@ -5,8 +5,8 @@ export type RecordableMouseShortcutButton = Exclude<
   "disabled"
 >;
 
-export const MOUSE_HOLD_MIN_MS = 500;
-export const MOUSE_HOLD_MAX_MS = 10_000;
+export const MOUSE_HOLD_MIN_MS = 0;
+export const MOUSE_HOLD_MAX_MS = 3_000;
 export const MOUSE_HOLD_STEP_MS = 100;
 
 export function mouseShortcutButtonFromEventCode(

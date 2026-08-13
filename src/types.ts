@@ -437,7 +437,7 @@ export interface AppSettings {
   };
 }
 
-export type UiScale = 0.9 | 1 | 1.1 | 1.2;
+export type UiScale = number;
 
 export type DirectoryDialogPurpose =
   | "migration-source"
@@ -635,6 +635,7 @@ export interface CDriveShiftApi {
   exportDiagnosticReport(): Promise<DiagnosticExportResult>;
   getSettings(): Promise<AppSettings>;
   updateSettings(patch: Partial<Omit<AppSettings, "ai">>): Promise<AppSettings>;
+  previewUiScale(scale: number): Promise<number>;
   checkGlobalShortcut(
     shortcut: string,
     target: ShortcutTarget

@@ -10,6 +10,47 @@ const previousReleases: Array<{
   en: Omit<BundledReleaseNote, "version">;
 }> = [
   {
+    version: "0.0.12",
+    zh: {
+      summary: "支持直接录入鼠标侧键和中键，以毫秒滑杆设置长按时间，并加入逐条折叠的离线更新历史。",
+      sections: [
+        {
+          title: "鼠标快捷操作",
+          items: [
+            "点击录入区域后可直接按鼠标后退侧键、前进侧键或中键，设置会同步到全局监听器。",
+            "长按时间使用 500–10000 毫秒滑杆，显示精确毫秒数并支持键盘调节。"
+          ]
+        },
+        {
+          title: "历史更新",
+          items: [
+            "更新与诊断内置从 0.0.1 开始的离线更新内容，每个版本可以独立展开或收起。",
+            "历史列表较长时提供独立滚动条，并保留对应 GitHub Release 入口。"
+          ]
+        }
+      ]
+    },
+    en: {
+      summary: "Recorded mouse side and middle buttons directly, added a millisecond hold slider, and bundled independently collapsible offline release history.",
+      sections: [
+        {
+          title: "Mouse shortcuts",
+          items: [
+            "The recorder captures back, forward, or middle mouse buttons and synchronizes the choice with the global listener.",
+            "Hold time uses a 500–10000 millisecond slider with exact output and keyboard adjustment."
+          ]
+        },
+        {
+          title: "Release history",
+          items: [
+            "Update & diagnostics bundles offline notes back to 0.0.1 with independent expand and collapse state.",
+            "Long history lists have their own scrollbar and retain links to each GitHub Release."
+          ]
+        }
+      ]
+    }
+  },
+  {
     version: "0.0.11",
     zh: {
       summary: "降低 Windows 临时目录占用造成的偶发迁移失败，记住浏览路径，并新增四档界面大小。",

@@ -295,6 +295,10 @@ fn mouse_button_name(button: u64) -> &'static str {
     }
 }
 
+fn normalize_mouse_hold_ms(hold_ms: u64) -> u64 {
+    hold_ms.min(3_000)
+}
+
 #[cfg(windows)]
 fn configure_mouse_shortcut(button: &str, hold_ms: u64) {
     let Some(state) = MOUSE_SHORTCUT_STATE.get() else {
@@ -307,7 +311,7 @@ fn configure_mouse_shortcut(button: &str, hold_ms: u64) {
         .store(mouse_button_code(button), Ordering::SeqCst);
     state
         .hold_ms
-        .store(hold_ms.clamp(500, 10_000), Ordering::SeqCst);
+        .store(normalize_mouse_hold_ms(hold_ms), Ordering::SeqCst);
 }
 
 #[cfg(not(windows))]
@@ -327,6 +331,15 @@ fn begin_mouse_shortcut_hold(button: u64) {
     let sequence = state.sequence.fetch_add(1, Ordering::SeqCst) + 1;
     let hold_ms = state.hold_ms.load(Ordering::SeqCst);
     let output = state.output.clone();
+    if hold_ms == 0 {
+        output.send(&json!({
+            "event": "mouseShortcutHold",
+            "button": mouse_button_name(button),
+            "holdMs": 0
+        }));
+        state.pressed.store(false, Ordering::SeqCst);
+        return;
+    }
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(hold_ms));
         let Some(current) = MOUSE_SHORTCUT_STATE.get() else {
@@ -3775,7 +3788,7 @@ fn run_server() -> io::Result<()> {
             }
             "setMouseShortcut" => {
                 let button = request.mouse_button.as_deref().unwrap_or("disabled");
-                let hold_ms = request.mouse_hold_ms.unwrap_or(3_000).clamp(500, 10_000);
+                let hold_ms = normalize_mouse_hold_ms(request.mouse_hold_ms.unwrap_or(3_000));
                 configure_mouse_shortcut(button, hold_ms);
                 output.send(&json!({
                     "id": request.id,
@@ -4011,13 +4024,21 @@ fn main() {
 mod tests {
     use super::{
         contains_whole_word, fuzzy_subsequence_score, lowercase_name_signature, name_signature,
-        load_cache_index, normalized_path_hash, save_cache, system_drive_root,
-        validate_global_entry_count, Entry, SearchIndex, MINIMUM_SYSTEM_DRIVE_ENTRIES,
+        load_cache_index, normalize_mouse_hold_ms, normalized_path_hash, save_cache,
+        system_drive_root, validate_global_entry_count, Entry, SearchIndex,
+        MINIMUM_SYSTEM_DRIVE_ENTRIES,
     };
     use std::env;
     use std::fs;
     use std::sync::atomic::AtomicBool;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn mouse_hold_duration_supports_instant_activation_and_caps_at_three_seconds() {
+        assert_eq!(normalize_mouse_hold_ms(0), 0);
+        assert_eq!(normalize_mouse_hold_ms(1_500), 1_500);
+        assert_eq!(normalize_mouse_hold_ms(10_000), 3_000);
+    }
 
     #[test]
     fn streaming_name_signature_preserves_case_folded_matches() {

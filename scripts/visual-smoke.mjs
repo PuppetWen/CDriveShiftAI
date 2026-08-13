@@ -408,6 +408,28 @@ try {
       return true;
     })()`);
     await waitFor('document.querySelector(".language-picker-trigger") !== null');
+    const scaleSlider = await evaluate(`(() => {
+      const input = document.querySelector(".ui-scale-slider input");
+      const scroll = document.querySelector(".view-scroll");
+      if (!(input instanceof HTMLInputElement) || !(scroll instanceof HTMLElement)) return null;
+      return {
+        min: input.min,
+        max: input.max,
+        step: input.step,
+        value: input.value,
+        pageCanScroll: scroll.scrollHeight > scroll.clientHeight
+      };
+    })()`);
+    if (
+      !scaleSlider ||
+      scaleSlider.min !== "0.5" ||
+      scaleSlider.max !== "3" ||
+      scaleSlider.step !== "0.1" ||
+      !scaleSlider.pageCanScroll
+    ) {
+      throw new Error(`Continuous scale slider regression: ${JSON.stringify(scaleSlider)}`);
+    }
+    await capture("cdriveshiftai-settings-scale-slider.png");
     await evaluate('document.querySelector(".language-picker-trigger")?.click()');
     await evaluate(`(() => {
       const option = [...document.querySelectorAll(".language-picker-list button")]
@@ -425,6 +447,19 @@ try {
       return true;
     })()`);
     await waitFor('document.querySelector(".settings-system-stack") !== null');
+    const mouseHoldSlider = await evaluate(`(() => {
+      const input = document.querySelector(".mouse-hold-slider input");
+      if (!(input instanceof HTMLInputElement)) return null;
+      return { min: input.min, max: input.max, step: input.step };
+    })()`);
+    if (
+      !mouseHoldSlider ||
+      mouseHoldSlider.min !== "0" ||
+      mouseHoldSlider.max !== "3000" ||
+      mouseHoldSlider.step !== "100"
+    ) {
+      throw new Error(`Mouse hold slider regression: ${JSON.stringify(mouseHoldSlider)}`);
+    }
     await wait(160);
     await capture("cdriveshiftai-settings-system.png");
   }

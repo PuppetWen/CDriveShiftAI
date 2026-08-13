@@ -2,6 +2,10 @@ import { app, safeStorage } from "electron";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { sanitizeDirectoryDialogPaths } from "./directory-dialog";
+import {
+  normalizeStoredMouseHoldMs,
+  normalizeStoredUiScale
+} from "./settings-normalization";
 import type {
   AnalysisResult,
   AppSettings,
@@ -525,9 +529,7 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
     ].includes(input?.language ?? "")
       ? input!.language!
       : defaults.settings.language,
-    uiScale: [0.9, 1, 1.1, 1.2].includes(input?.uiScale ?? 0)
-      ? input!.uiScale!
-      : defaults.settings.uiScale,
+    uiScale: normalizeStoredUiScale(input?.uiScale, defaults.settings.uiScale),
     globalShortcut:
       typeof input?.globalShortcut === "string"
         ? input.globalShortcut.trim().slice(0, 128)
@@ -541,11 +543,10 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
     )
       ? input!.mouseQuickSearchButton!
       : defaults.settings.mouseQuickSearchButton,
-    mouseQuickSearchHoldMs:
-      typeof input?.mouseQuickSearchHoldMs === "number" &&
-      Number.isFinite(input.mouseQuickSearchHoldMs)
-        ? Math.round(Math.min(10_000, Math.max(500, input.mouseQuickSearchHoldMs)))
-        : defaults.settings.mouseQuickSearchHoldMs,
+    mouseQuickSearchHoldMs: normalizeStoredMouseHoldMs(
+      input?.mouseQuickSearchHoldMs,
+      defaults.settings.mouseQuickSearchHoldMs
+    ),
     indexRoots: Array.isArray(input?.indexRoots) ? input.indexRoots : defaults.settings.indexRoots,
     excludedPaths: Array.isArray(input?.excludedPaths)
       ? input.excludedPaths

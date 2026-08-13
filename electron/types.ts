@@ -355,7 +355,7 @@ export interface AppSettings {
   };
 }
 
-export type UiScale = 0.9 | 1 | 1.1 | 1.2;
+export type UiScale = number;
 
 export type AppLanguage =
   | "system"
