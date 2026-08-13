@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   migrationRobocopyArguments,
   normalizeReparseTarget,
+  renameWithRetry,
   runRobocopy
 } from "../electron/migration";
 
@@ -15,6 +16,46 @@ describe("migration copy options", () => {
     expect(argumentsList).toContain("/SJ");
     expect(argumentsList).toContain("/SL");
     expect(argumentsList).not.toContain("/XJ");
+  });
+
+  it("retries a transient Windows rename error and then succeeds", async () => {
+    const attempts: string[] = [];
+    const waits: number[] = [];
+    await renameWithRetry("C:\\source", "D:\\destination", {
+      retryDelaysMs: [10, 20],
+      renameEntry: async () => {
+        attempts.push("rename");
+        if (attempts.length < 3) {
+          const error = new Error("temporarily busy") as NodeJS.ErrnoException;
+          error.code = "EPERM";
+          throw error;
+        }
+      },
+      destinationExists: async () => false,
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+      }
+    });
+
+    expect(attempts).toHaveLength(3);
+    expect(waits).toEqual([10, 20]);
+  });
+
+  it("does not retry when another process creates the destination", async () => {
+    const error = new Error("destination conflict") as NodeJS.ErrnoException;
+    error.code = "EPERM";
+
+    await expect(
+      renameWithRetry("C:\\source", "D:\\destination", {
+        operation: "发布目标目录",
+        retryDelaysMs: [10],
+        renameEntry: async () => {
+          throw error;
+        },
+        destinationExists: async () => true,
+        wait: async () => undefined
+      })
+    ).rejects.toThrow("目标路径在迁移期间已被其他程序创建");
   });
 
   const windowsIt = process.platform === "win32" ? it : it.skip;

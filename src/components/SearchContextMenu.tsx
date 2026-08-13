@@ -286,7 +286,10 @@ export function SearchContextMenu({
   };
 
   const copyTo = async () => {
-    const destination = await api.chooseDirectory(ui("选择复制目标目录", "Choose destination folder"));
+    const destination = await api.chooseDirectory(
+      ui("选择复制目标目录", "Choose destination folder"),
+      "copy-destination"
+    );
     if (!destination) return;
     await run(
       "copy-to",

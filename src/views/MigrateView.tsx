@@ -63,7 +63,8 @@ export function MigrateView({
     const selected = await api.chooseDirectory(
       kind === "source"
         ? ui("选择任意磁盘的源目录", "Choose a source directory on any drive")
-        : ui("选择目标磁盘目录", "Choose a destination directory")
+        : ui("选择目标磁盘目录", "Choose a destination directory"),
+      kind === "source" ? "migration-source" : "migration-destination"
     );
     if (!selected) return;
     if (kind === "source") setSource(selected);

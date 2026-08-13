@@ -415,6 +415,7 @@ export interface MigrationRecord {
 export interface AppSettings {
   effectMode: EffectMode;
   language: AppLanguage;
+  uiScale: UiScale;
   launchAtLogin: boolean;
   launchMinimized: boolean;
   minimizeToTray: boolean;
@@ -435,6 +436,17 @@ export interface AppSettings {
     verifiedAt?: string;
   };
 }
+
+export type UiScale = 0.9 | 1 | 1.1 | 1.2;
+
+export type DirectoryDialogPurpose =
+  | "migration-source"
+  | "migration-destination"
+  | "analysis"
+  | "search-scope"
+  | "content-index"
+  | "copy-destination"
+  | "general";
 
 export type AppLanguage =
   | "system"
@@ -634,7 +646,10 @@ export interface CDriveShiftApi {
   testAiConnection(input: AiConnectionInput): Promise<AiTestResult>;
   saveAiDraft(input: AiDraftSaveInput): Promise<AppSettings>;
   saveAiSettings(input: AiSaveInput): Promise<AppSettings>;
-  chooseDirectory(title?: string): Promise<string | null>;
+  chooseDirectory(
+    title?: string,
+    purpose?: DirectoryDialogPurpose
+  ): Promise<string | null>;
   revealPath(path: string): Promise<void>;
   openPath(path: string): Promise<void>;
   openWith(path: string): Promise<void>;

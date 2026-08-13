@@ -333,6 +333,7 @@ export interface OwnershipMapResult {
 export interface AppSettings {
   effectMode: "aurora" | "matrix" | "calm" | "ember" | "ivory";
   language: AppLanguage;
+  uiScale: UiScale;
   launchAtLogin: boolean;
   launchMinimized: boolean;
   minimizeToTray: boolean;
@@ -353,6 +354,8 @@ export interface AppSettings {
     verifiedAt?: string;
   };
 }
+
+export type UiScale = 0.9 | 1 | 1.1 | 1.2;
 
 export type AppLanguage =
   | "system"
@@ -513,6 +516,7 @@ export interface InstalledApplication {
 export interface StoreShape {
   settings: AppSettings;
   migrations: MigrationRecord[];
+  directoryDialogPaths: Partial<Record<DirectoryDialogPurpose, string>>;
   searchWorkspace?: SearchWorkspaceState;
   searchBookmarks: SearchBookmark[];
   searchBookmarkFolders: SearchBookmarkFolder[];
@@ -520,6 +524,15 @@ export interface StoreShape {
   analyses: AnalysisResult[];
   ownershipMaps: OwnershipMapResult[];
 }
+
+export type DirectoryDialogPurpose =
+  | "migration-source"
+  | "migration-destination"
+  | "analysis"
+  | "search-scope"
+  | "content-index"
+  | "copy-destination"
+  | "general";
 
 export interface NativeResponse {
   id?: number;

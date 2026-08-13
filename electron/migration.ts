@@ -27,12 +27,66 @@ import {
 
 type ProgressHandler = (record: MigrationRecord, message: string) => void;
 
+const TRANSIENT_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY", "ENOTEMPTY"]);
+const RENAME_RETRY_DELAYS_MS = [150, 300, 600, 1_000, 1_500, 2_000] as const;
+
 async function exists(candidate: string): Promise<boolean> {
   try {
     await access(candidate);
     return true;
   } catch {
     return false;
+  }
+}
+
+async function entryExists(candidate: string): Promise<boolean> {
+  try {
+    await lstat(candidate);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export async function renameWithRetry(
+  source: string,
+  destination: string,
+  options: {
+    operation?: string;
+    retryDelaysMs?: readonly number[];
+    renameEntry?: typeof rename;
+    destinationExists?: (candidate: string) => Promise<boolean>;
+    wait?: (milliseconds: number) => Promise<void>;
+  } = {}
+): Promise<void> {
+  const operation = options.operation ?? "目录切换";
+  const retryDelaysMs = options.retryDelaysMs ?? RENAME_RETRY_DELAYS_MS;
+  const renameEntry = options.renameEntry ?? rename;
+  const destinationExists = options.destinationExists ?? entryExists;
+  const wait = options.wait ?? ((milliseconds) => new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  }));
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await renameEntry(source, destination);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+      if (!TRANSIENT_RENAME_CODES.has(code)) throw error;
+      if (await destinationExists(destination)) {
+        throw new Error(`${operation}失败：目标路径在迁移期间已被其他程序创建：${destination}`);
+      }
+      const delay = retryDelaysMs[attempt];
+      if (delay === undefined) {
+        throw new Error(
+          `${operation}失败：Windows 持续拒绝重命名（${code}）。` +
+          "请关闭关联程序、资源管理器窗口、同步工具或实时防护后重试。"
+        );
+      }
+      await wait(delay);
+    }
   }
 }
 
@@ -442,8 +496,12 @@ export class MigrationService {
 
       record.stage = "switching";
       await this.persist(record, "副本校验通过，正在执行原子切换");
-      await rename(preflight.source, backupPath);
-      await rename(stagingPath, preflight.finalDestination);
+      await renameWithRetry(preflight.source, backupPath, {
+        operation: "切换源目录"
+      });
+      await renameWithRetry(stagingPath, preflight.finalDestination, {
+        operation: "发布目标目录"
+      });
 
       let linkType: MigrationRecord["linkType"] = "symbolic-link";
       try {
@@ -521,7 +579,9 @@ export class MigrationService {
       await runRobocopy(record.destination, restorePath);
       await verifyCopy(record.destination, restorePath);
       await unlink(record.source);
-      await rename(restorePath, record.source);
+      await renameWithRetry(restorePath, record.source, {
+        operation: "恢复源目录"
+      });
       sourceRestored = true;
     } catch (error) {
       if (!sourceRestored) {
@@ -596,12 +656,16 @@ export class MigrationService {
     const sourceExists = await exists(record.source);
     const backupExists = record.backupPath ? await exists(record.backupPath) : false;
     if (!sourceExists && backupExists && record.backupPath) {
-      await rename(record.backupPath, record.source);
+      await renameWithRetry(record.backupPath, record.source, {
+        operation: "恢复迁移备份"
+      });
     } else if (sourceExists && backupExists && record.backupPath) {
       const sourceStat = await lstat(record.source);
       if (sourceStat.isSymbolicLink()) {
         await unlink(record.source);
-        await rename(record.backupPath, record.source);
+        await renameWithRetry(record.backupPath, record.source, {
+          operation: "恢复迁移备份"
+        });
       }
     }
     if (record.stagingPath && (await exists(record.stagingPath))) {

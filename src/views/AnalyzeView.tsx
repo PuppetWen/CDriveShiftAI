@@ -183,7 +183,10 @@ export function AnalyzeView({
   ]);
 
   const choose = async () => {
-    const selected = await api.chooseDirectory(ui("选择需要识别归属的目录", "Choose a directory to analyze"));
+    const selected = await api.chooseDirectory(
+      ui("选择需要识别归属的目录", "Choose a directory to analyze"),
+      "analysis"
+    );
     if (!selected) return;
     setTargetPath(selected);
     onPathChange(selected);

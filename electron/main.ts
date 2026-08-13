@@ -12,7 +12,8 @@ import {
   screen,
   shell,
   Tray,
-  type MenuItemConstructorOptions
+  type MenuItemConstructorOptions,
+  type OpenDialogOptions
 } from "electron";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -30,6 +31,7 @@ import {
 } from "./ai-client";
 import { configureApplicationDataPaths } from "./data-root";
 import { createDiagnosticReport } from "./diagnostics";
+import { normalizeDirectoryDialogPurpose } from "./directory-dialog";
 import { ForceDeleteService } from "./force-delete";
 import { nativeStrings } from "./i18n";
 import {
@@ -354,6 +356,17 @@ function showAsSoonAsRenderable(window: BrowserWindow, maximized = false): void 
   window.once("closed", () => clearTimeout(fallback));
 }
 
+function applyUiScale(window: BrowserWindow, scale: AppSettings["uiScale"]): void {
+  if (!window.isDestroyed()) window.webContents.setZoomFactor(scale);
+}
+
+function initializeUiScale(window: BrowserWindow, scale: AppSettings["uiScale"]): void {
+  applyUiScale(window, scale);
+  window.webContents.on("did-finish-load", () => {
+    applyUiScale(window, store.getSettings().uiScale);
+  });
+}
+
 function createWindow(): BrowserWindow {
   const settings = store.getSettings();
   const effect = settings.effectMode;
@@ -391,6 +404,7 @@ function createWindow(): BrowserWindow {
     }
   });
 
+  initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
   trackWindowActivity(window);
   window.on("restore", () => triggerVisibleUpdateCheck("main-window-restored"));
@@ -437,6 +451,7 @@ function emitSettingsChanged(settings: AppSettings): void {
     if (window && !window.isDestroyed()) {
       window.webContents.send("settings:changed", settings);
       applyNativeEffect(settings.effectMode, window);
+      applyUiScale(window, settings.uiScale);
     }
   }
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -447,6 +462,7 @@ function emitSettingsChanged(settings: AppSettings): void {
   }
   if (uninstallRestoreWindow && !uninstallRestoreWindow.isDestroyed()) {
     uninstallRestoreWindow.setTitle(strings.uninstallWindow);
+    applyUiScale(uninstallRestoreWindow, settings.uiScale);
   }
 }
 
@@ -575,6 +591,7 @@ function createQuickSearchWindow(): BrowserWindow {
     }
   });
   quickSearchWindow = window;
+  initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
   trackWindowActivity(window);
   trackWindowBounds(window, "quickSearchWindowBounds");
@@ -620,6 +637,7 @@ function createUninstallRestoreWindow(): BrowserWindow {
     }
   });
   uninstallRestoreWindow = window;
+  initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
   window.once("ready-to-show", () => window.show());
   window.on("closed", () => {
@@ -1361,12 +1379,28 @@ function registerIpc(): void {
     return updated;
   });
 
-  ipcMain.handle("dialog:directory", async (_event, title?: unknown) => {
-    const result = await dialog.showOpenDialog(mainWindow!, {
+  ipcMain.handle("dialog:directory", async (event, title?: unknown, purpose?: unknown) => {
+    const safePurpose = normalizeDirectoryDialogPurpose(purpose);
+    const rememberedPath = store.getDirectoryDialogPath(safePurpose);
+    const defaultPath = rememberedPath
+      ? await stat(rememberedPath).then(
+          (details) => (details.isDirectory() ? rememberedPath : undefined),
+          () => undefined
+        )
+      : undefined;
+    const parentWindow = BrowserWindow.fromWebContents(event.sender);
+    const options: OpenDialogOptions = {
       title: typeof title === "string" ? title.slice(0, 120) : "选择目录",
+      ...(defaultPath ? { defaultPath } : {}),
       properties: ["openDirectory", "createDirectory", "dontAddToRecent"]
-    });
-    return result.canceled ? null : result.filePaths[0] ?? null;
+    };
+    const result = parentWindow && !parentWindow.isDestroyed()
+      ? await dialog.showOpenDialog(parentWindow, options)
+      : await dialog.showOpenDialog(options);
+    const selectedPath = result.canceled ? undefined : result.filePaths[0];
+    if (!selectedPath) return null;
+    await store.saveDirectoryDialogPath(safePurpose, selectedPath);
+    return selectedPath;
   });
 
   ipcMain.handle("shell:reveal", async (_event, targetPath: unknown) => {

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   ContentIndexerStatus,
+  DirectoryDialogPurpose,
   IndexerStatus,
   MigrationRecord,
   SearchIndexChangedEvent
@@ -28,7 +29,8 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
   testAiConnection: (input: unknown) => ipcRenderer.invoke("ai:test", input),
   saveAiDraft: (input: unknown) => ipcRenderer.invoke("ai:save-draft", input),
   saveAiSettings: (input: unknown) => ipcRenderer.invoke("ai:save", input),
-  chooseDirectory: (title?: string) => ipcRenderer.invoke("dialog:directory", title),
+  chooseDirectory: (title?: string, purpose?: DirectoryDialogPurpose) =>
+    ipcRenderer.invoke("dialog:directory", title, purpose),
   revealPath: (targetPath: string) => ipcRenderer.invoke("shell:reveal", targetPath),
   openPath: (targetPath: string) => ipcRenderer.invoke("shell:open", targetPath),
   openWith: (targetPath: string) => ipcRenderer.invoke("shell:open-with", targetPath),

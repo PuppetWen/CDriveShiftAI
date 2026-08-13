@@ -15,11 +15,10 @@ const testDirectory = path.join(
 );
 const executable = path.join(testDirectory, "CDriveShiftAI-x64-portable.exe");
 const expectedDataDirectory = path.join(testDirectory, ".cdriveshiftai-data");
-const debugPort = 9245;
 const wait = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function removeTestDirectory(attempts = 40) {
+async function removeTestDirectory(attempts = 80) {
   let lastError;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -33,24 +32,18 @@ async function removeTestDirectory(attempts = 40) {
   throw lastError;
 }
 
-async function fetchPage(attempts = 240) {
+async function waitForPortableData(attempts = 160) {
   let lastError;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetch(
-        `http://127.0.0.1:${debugPort}/json/list`
-      );
-      if (response.ok) {
-        const pages = await response.json();
-        const page = pages.find((candidate) => candidate.type === "page");
-        if (page?.webSocketDebuggerUrl) return page;
-      }
+      await access(expectedDataDirectory);
+      return;
     } catch (error) {
       lastError = error;
     }
     await wait(125);
   }
-  throw lastError ?? new Error("Portable Electron page target was unavailable");
+  throw lastError ?? new Error("Portable application data directory was unavailable");
 }
 
 await removeTestDirectory();
@@ -59,42 +52,20 @@ await copyFile(sourceExecutable, executable);
 
 const child = spawn(
   executable,
-  [`--remote-debugging-port=${debugPort}`, "--no-first-run"],
+  ["--no-first-run"],
   {
     cwd: testDirectory,
-    env: process.env,
+    env: {
+      ...process.env,
+      CDRIVESHIFTAI_SMOKE_QUIT_AFTER_READY_MS: "1800"
+    },
     stdio: "ignore",
     windowsHide: true
   }
 );
 
-let socket;
 try {
-  const page = await fetchPage();
-  socket = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    socket.addEventListener("open", resolve, { once: true });
-    socket.addEventListener("error", reject, { once: true });
-  });
-
-  let nextId = 0;
-  const pending = new Map();
-  socket.addEventListener("message", (event) => {
-    const message = JSON.parse(event.data);
-    const callback = pending.get(message.id);
-    if (!callback) return;
-    pending.delete(message.id);
-    if (message.error) callback.reject(new Error(message.error.message));
-    else callback.resolve(message.result);
-  });
-  const send = (method, params = {}) =>
-    new Promise((resolve, reject) => {
-      const id = ++nextId;
-      pending.set(id, { resolve, reject });
-      socket.send(JSON.stringify({ id, method, params }));
-    });
-
-  await access(expectedDataDirectory);
+  await waitForPortableData();
   console.log(
     JSON.stringify(
       {
@@ -107,10 +78,8 @@ try {
       2
     )
   );
-  void send("Browser.close").catch(() => undefined);
-  await wait(350);
+  await wait(3_000);
 } finally {
-  socket?.close();
   if (child.exitCode == null) {
     const exited = once(child, "exit");
     child.kill();

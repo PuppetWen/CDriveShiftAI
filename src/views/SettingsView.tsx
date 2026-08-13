@@ -55,7 +55,8 @@ import type {
   MouseShortcutStatus,
   SettingsModuleId,
   ShortcutCheckResult,
-  ShortcutTarget
+  ShortcutTarget,
+  UiScale
 } from "../types";
 import { AiProviderPicker } from "../components/AiProviderPicker";
 import { AiModelPicker } from "../components/AiModelPicker";
@@ -327,6 +328,7 @@ export function SettingsView({
   const [showApiKey, setShowApiKey] = useState(false);
   const [aiTest, setAiTest] = useState<AiTestResult>();
   const effectRequest = useRef(0);
+  const uiScaleRequest = useRef(0);
   const behaviorRequests = useRef({
     launchAtLogin: 0,
     launchMinimized: 0,
@@ -376,7 +378,8 @@ export function SettingsView({
       const next = {
         ...current,
         effectMode: settings.effectMode,
-        language: settings.language
+        language: settings.language,
+        uiScale: settings.uiScale
       };
       if (previous.launchAtLogin !== settings.launchAtLogin) {
         next.launchAtLogin = settings.launchAtLogin;
@@ -468,6 +471,27 @@ export function SettingsView({
     } catch (error) {
       setDraft((current) => ({ ...current, language: previous }));
       setAppLanguage(previous);
+      notify("error", error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const chooseUiScale = async (uiScale: UiScale) => {
+    if (uiScale === draft.uiScale) return;
+    const request = ++uiScaleRequest.current;
+    const previous = draft.uiScale;
+    setDraft((current) => ({ ...current, uiScale }));
+    try {
+      const updated = await api.updateSettings({ uiScale });
+      if (request !== uiScaleRequest.current) return;
+      onSettings(updated);
+      setDraft((current) => ({ ...current, uiScale: updated.uiScale }));
+      notify(
+        "success",
+        ui("字体与界面大小已应用", "Text and interface size applied")
+      );
+    } catch (error) {
+      if (request !== uiScaleRequest.current) return;
+      setDraft((current) => ({ ...current, uiScale: previous }));
       notify("error", error instanceof Error ? error.message : String(error));
     }
   };
@@ -1231,6 +1255,44 @@ export function SettingsView({
             </span>
             <span>{t("settings.languageFallback")}</span>
           </div>
+        </div>
+      </section>
+      <section className="settings-section glass-card ui-scale-settings-card">
+        <div className="settings-section-head">
+          <div className="settings-icon cyan">
+            <Eye size={20} />
+          </div>
+          <div>
+            <h2>{ui("字体与界面大小", "Text and interface size")}</h2>
+            <p>
+              {ui(
+                "同步调整文字、按钮、间距和图标；选择后立即生效并自动保存。",
+                "Scale text, controls, spacing, and icons together. Changes apply and save immediately."
+              )}
+            </p>
+          </div>
+          <span className="ui-scale-value">{Math.round(draft.uiScale * 100)}%</span>
+        </div>
+        <div className="ui-scale-options">
+          {([
+            { value: 0.9, zh: "小", en: "Small", sample: "Aa" },
+            { value: 1, zh: "标准", en: "Standard", sample: "Aa" },
+            { value: 1.1, zh: "大", en: "Large", sample: "Aa" },
+            { value: 1.2, zh: "特大", en: "Extra large", sample: "Aa" }
+          ] as const).map((option) => (
+            <button
+              type="button"
+              className={draft.uiScale === option.value ? "active" : ""}
+              aria-pressed={draft.uiScale === option.value}
+              onClick={() => void chooseUiScale(option.value)}
+              key={option.value}
+            >
+              <span style={{ fontSize: `${option.value}em` }}>{option.sample}</span>
+              <strong>{ui(option.zh, option.en)}</strong>
+              <small>{Math.round(option.value * 100)}%</small>
+              <i className="radio-mark" />
+            </button>
+          ))}
         </div>
       </section>
       <section className="settings-section glass-card">

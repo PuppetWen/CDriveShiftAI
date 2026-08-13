@@ -5,63 +5,63 @@ export const bundledReleaseNotes: {
   summary: string;
   sections: AppUpdateReleaseSection[];
 } = {
-  version: "0.0.10",
-  summary: "本版修复含 Junction 或符号链接的目录无法安全迁移的问题，并将链接纳入完整性校验。",
+  version: "0.0.11",
+  summary: "本版降低 Windows 临时目录占用造成的偶发迁移失败，记住浏览路径，并新增四档界面大小。",
   sections: [
     {
-      title: "链接安全迁移",
+      title: "迁移可靠性",
       items: [
-        "Junction、目录符号链接和文件符号链接不再被误报为无法读取的条目。",
-        "迁移会复制链接本身而不展开目标，避免循环、重复数据或链接丢失。",
-        "预检计划新增链接数量，并继续阻止真实权限错误或不完整扫描。"
+        "Windows 临时拒绝目录重命名时会进行有限退避重试，不再因瞬时文件句柄直接失败。",
+        "目标路径被其他程序创建时立即停止，持续占用时显示可操作的关闭程序提示。",
+        "源目录切换、目标发布、失败恢复和迁移回滚使用相同的受控重命名流程。"
       ]
     },
     {
-      title: "完整性校验",
+      title: "路径记忆",
       items: [
-        "复制后同时核对文件数、目录数、总字节数和重解析点数量。",
-        "每个链接的相对路径与目标都会逐项比较，缺失或变化时不会执行切换。",
-        "校验以复制完成后的当前源目录为准，可发现复制期间发生的大多数变化。"
+        "目录浏览器会回到用户上次选择的位置。",
+        "迁移源、迁移目标、分析、搜索、内容索引和复制目标分别保存历史路径。",
+        "已失效的历史目录会被忽略，浏览器安全回退到系统默认位置。"
       ]
     },
     {
-      title: "使用要求与验证",
+      title: "界面可读性",
       items: [
-        "迁移前仍必须完全退出关联应用；Windows 无法可靠枚举所有打开文件。",
-        "新增真实 Robocopy Junction 复制和目录汇总回归测试。",
-        "49 项单元测试、类型检查和生产构建全部通过。"
+        "设置新增小、标准、大、特大四档字体与界面大小，并自动保存。",
+        "文字、控件、图标和间距整体缩放，主窗口与快速搜索窗口同步生效。",
+        "大屏内容宽度扩展至 1540px，更充分利用最大化窗口空间。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: typeof bundledReleaseNotes = {
-  version: "0.0.10",
+  version: "0.0.11",
   summary:
-    "This release enables safe migration of directories containing junctions or symbolic links and verifies every preserved link.",
+    "This release reduces intermittent Windows migration failures, remembers browse locations, and adds four interface-size options.",
   sections: [
     {
-      title: "Link-safe migration",
+      title: "Migration reliability",
       items: [
-        "Junctions, directory symlinks, and file symlinks are no longer reported as unreadable entries.",
-        "Migration copies links themselves instead of expanding their targets, preventing loops, duplication, or missing links.",
-        "The preflight plan reports link counts while continuing to block genuine permission and incomplete-scan errors."
+        "Transient Windows directory rename failures now use a finite backoff retry instead of failing immediately.",
+        "Migration stops if another process creates the destination and explains persistent file-handle conflicts.",
+        "Source switching, destination publishing, failure recovery, and rollback share the guarded rename flow."
       ]
     },
     {
-      title: "Integrity verification",
+      title: "Browse history",
       items: [
-        "Post-copy verification compares file counts, directory counts, total bytes, and reparse-point counts.",
-        "Every link's relative path and target are compared before the source path is switched.",
-        "Verification rescans the current source after copying to detect most changes made during the copy."
+        "Directory pickers reopen at the location the user selected last time.",
+        "Migration source, destination, analysis, search, content indexing, and copy destinations keep separate histories.",
+        "Missing remembered directories are ignored and safely fall back to the system default."
       ]
     },
     {
-      title: "Requirements and validation",
+      title: "Interface readability",
       items: [
-        "Related applications must still be fully closed because Windows cannot reliably enumerate every open file.",
-        "Regression coverage now performs a real Robocopy junction-preservation test.",
-        "All 49 unit tests, type checks, and production builds passed."
+        "Settings now offers Small, Standard, Large, and Extra large interface sizes with persistence.",
+        "Text, controls, icons, and spacing scale together across the main and quick-search windows.",
+        "The large-screen content width expands to 1540px to use maximized windows more effectively."
       ]
     }
   ]

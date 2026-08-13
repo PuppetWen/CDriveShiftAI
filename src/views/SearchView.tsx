@@ -947,7 +947,8 @@ export function SearchView({
     const selected = await api.chooseDirectory(
       mode === "content"
         ? ui("选择要建立内容索引的目录", "Choose a directory to index")
-        : ui("选择搜索范围", "Choose a search scope")
+        : ui("选择搜索范围", "Choose a search scope"),
+      mode === "content" ? "content-index" : "search-scope"
     );
     if (!selected) return;
     if (mode === "content") {

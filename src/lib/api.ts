@@ -62,6 +62,7 @@ const mockOverview: SystemOverview = {
 const mockSettings: AppSettings = {
   effectMode: "aurora",
   language: "zh-CN",
+  uiScale: 1,
   launchAtLogin: false,
   launchMinimized: false,
   minimizeToTray: true,

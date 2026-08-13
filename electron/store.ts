@@ -1,11 +1,13 @@
 import { app, safeStorage } from "electron";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { sanitizeDirectoryDialogPaths } from "./directory-dialog";
 import type {
   AnalysisResult,
   AppSettings,
   ContentSearchResult,
   DirectorySizeResult,
+  DirectoryDialogPurpose,
   MigrationRecord,
   SearchFilters,
   SearchBookmark,
@@ -21,6 +23,7 @@ const defaults: StoreShape = {
   settings: {
     effectMode: "aurora",
     language: "zh-CN",
+    uiScale: 1,
     launchAtLogin: false,
     launchMinimized: false,
     minimizeToTray: true,
@@ -45,6 +48,7 @@ const defaults: StoreShape = {
     }
   },
   migrations: [],
+  directoryDialogPaths: {},
   searchBookmarks: [],
   searchBookmarkFolders: [],
   uiLayout: {},
@@ -521,6 +525,9 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
     ].includes(input?.language ?? "")
       ? input!.language!
       : defaults.settings.language,
+    uiScale: [0.9, 1, 1.1, 1.2].includes(input?.uiScale ?? 0)
+      ? input!.uiScale!
+      : defaults.settings.uiScale,
     globalShortcut:
       typeof input?.globalShortcut === "string"
         ? input.globalShortcut.trim().slice(0, 128)
@@ -578,6 +585,7 @@ export class AppStore {
           .map(sanitizeMigration)
           .filter((item): item is MigrationRecord => Boolean(item))
           .slice(-2_000),
+        directoryDialogPaths: sanitizeDirectoryDialogPaths(parsed.directoryDialogPaths),
         searchWorkspace: sanitizeSearchWorkspace(parsed.searchWorkspace),
         searchBookmarks: (
           Array.isArray(parsed.searchBookmarks) ? parsed.searchBookmarks : []
@@ -612,6 +620,18 @@ export class AppStore {
 
   getSettings(): AppSettings {
     return structuredClone(this.data.settings);
+  }
+
+  getDirectoryDialogPath(purpose: DirectoryDialogPurpose): string | undefined {
+    return this.data.directoryDialogPaths[purpose];
+  }
+
+  async saveDirectoryDialogPath(
+    purpose: DirectoryDialogPurpose,
+    selectedPath: string
+  ): Promise<void> {
+    this.data.directoryDialogPaths[purpose] = selectedPath.slice(0, 32_768);
+    await this.flush();
   }
 
   async updateSettings(
