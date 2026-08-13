@@ -1,7 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties
+} from "react";
 import {
   AlertCircle,
   Bot,
+  ChevronDown,
   CheckCircle2,
   Cloud,
   Database,
@@ -11,6 +18,7 @@ import {
   ExternalLink,
   FileJson,
   FolderOpen,
+  History,
   KeyRound,
   Keyboard,
   Languages,
@@ -32,9 +40,21 @@ import { api } from "../lib/api";
 import { effectDefinitions } from "../lib/effects";
 import { getAiProvider } from "../lib/aiProviders";
 import {
+  MOUSE_HOLD_MAX_MS,
+  MOUSE_HOLD_MIN_MS,
+  MOUSE_HOLD_STEP_MS,
+  mouseHoldProgress,
+  mouseShortcutButtonFromEventCode,
+  normalizeMouseHoldMs
+} from "../lib/mouseShortcut";
+import {
   bundledReleaseNotes,
   bundledReleaseNotesEnglish
 } from "../lib/releaseNotes";
+import {
+  bundledReleaseHistory,
+  bundledReleaseHistoryEnglish
+} from "../lib/releaseHistory";
 import {
   languageName,
   resolvedLanguage,
@@ -322,6 +342,8 @@ export function SettingsView({
   >("idle");
   const [testingShortcut, setTestingShortcut] = useState<ShortcutTarget>();
   const [testingMouseShortcut, setTestingMouseShortcut] = useState(false);
+  const [mouseButtonRecording, setMouseButtonRecording] = useState(false);
+  const [mouseRecorderHint, setMouseRecorderHint] = useState("");
   const [activeReleaseModule, setActiveReleaseModule] = useState<string>();
   const [mouseShortcutStatus, setMouseShortcutStatus] =
     useState<MouseShortcutStatus>();
@@ -339,6 +361,7 @@ export function SettingsView({
     "quick-search": 0
   });
   const mouseShortcutRequest = useRef(0);
+  const mouseCaptureBlockUntil = useRef(0);
   const aiDraftRequest = useRef(0);
   const apiKeyDirty = useRef(false);
   const persistedSettingsRef = useRef(settings);
@@ -352,6 +375,11 @@ export function SettingsView({
       updateInfo.currentVersion === bundledReleaseNotes.version);
   const localizedBundledReleaseNotes =
     locale === "zh-CN" ? bundledReleaseNotes : bundledReleaseNotesEnglish;
+  const historicalReleases = (
+    locale === "zh-CN" ? bundledReleaseHistory : bundledReleaseHistoryEnglish
+  ).filter(
+    (release) => release.version !== localizedBundledReleaseNotes.version
+  );
   const releaseSections = bundledNotesMatch
     ? localizedBundledReleaseNotes.sections
     : updateInfo?.releaseSections?.length
@@ -580,12 +608,17 @@ export function SettingsView({
       Pick<AppSettings, "mouseQuickSearchButton" | "mouseQuickSearchHoldMs">
     >
   ) => {
-    const request = ++mouseShortcutRequest.current;
     const previous = persistedSettingsRef.current;
+    const changed = Object.entries(patch).some(
+      ([field, value]) => previous[field as keyof AppSettings] !== value
+    );
+    if (!changed) return;
+    const request = ++mouseShortcutRequest.current;
     setDraft((current) => ({ ...current, ...patch }));
     try {
       const updated = await api.updateSettings(patch);
       if (request !== mouseShortcutRequest.current) return;
+      persistedSettingsRef.current = updated;
       onSettings(updated);
       setDraft((current) => ({
         ...current,
@@ -603,6 +636,42 @@ export function SettingsView({
       }));
       notify("error", error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const mouseButtonLabel = (button: MouseShortcutButton) => {
+    switch (button) {
+      case "back":
+        return ui("后退侧键", "Back side button");
+      case "forward":
+        return ui("前进侧键", "Forward side button");
+      case "middle":
+        return ui("中键", "Middle button");
+      default:
+        return ui("尚未启用", "Not enabled");
+    }
+  };
+
+  const captureMouseButton = (
+    event: React.MouseEvent<HTMLButtonElement>
+  ) => {
+    if (!mouseButtonRecording) return;
+    event.preventDefault();
+    event.stopPropagation();
+    mouseCaptureBlockUntil.current = performance.now() + 600;
+    const button = mouseShortcutButtonFromEventCode(event.button);
+    if (!button) {
+      setMouseRecorderHint(
+        event.button === 2
+          ? ui("右键会打开菜单，不能作为此快捷操作", "Right click opens menus and cannot be used here")
+          : ui("请按鼠标后退侧键、前进侧键或中键", "Press the back, forward, or middle mouse button")
+      );
+      return;
+    }
+    setMouseButtonRecording(false);
+    setMouseRecorderHint(
+      ui(`已录入：${mouseButtonLabel(button)}`, `Captured: ${mouseButtonLabel(button)}`)
+    );
+    void commitMouseShortcut({ mouseQuickSearchButton: button });
   };
 
   const testMouseShortcut = async () => {
@@ -1229,6 +1298,72 @@ export function SettingsView({
               : t("settings.exportDiagnostics")}
           </button>
         </div>
+        <section className="release-history-panel" aria-label={ui("历史版本更新", "Release history")}>
+          <div className="release-history-head">
+            <span>
+              <History size={16} />
+              <span>
+                <strong>{ui("历史版本更新", "Release history")}</strong>
+                <small>
+                  {ui(
+                    "每个版本可独立展开或收起，离线也能查看完整历史。",
+                    "Expand or collapse each version independently; the history remains available offline."
+                  )}
+                </small>
+              </span>
+            </span>
+            <em>
+              {historicalReleases.length} {ui("个版本", "versions")}
+            </em>
+          </div>
+          <div
+            className="release-history-list"
+            role="region"
+            tabIndex={0}
+            aria-label={ui("可滚动的历史版本列表", "Scrollable release history")}
+          >
+            {historicalReleases.map((release) => (
+              <details className="release-history-item" key={release.version}>
+                <summary>
+                  <span className="release-history-version">v{release.version}</span>
+                  <span>
+                    <strong>{release.summary}</strong>
+                    <small>
+                      {release.sections.length} {ui("个更新模块", "update sections")}
+                    </small>
+                  </span>
+                  <ChevronDown size={15} />
+                </summary>
+                <div className="release-history-content">
+                  {release.sections.map((section) => (
+                    <article key={`${release.version}-${section.title}`}>
+                      <h3>{section.title}</h3>
+                      <ul>
+                        {section.items.map((item, index) => (
+                          <li key={`${release.version}-${section.title}-${index}`}>
+                            {item}
+                          </li>
+                        ))}
+                      </ul>
+                    </article>
+                  ))}
+                  <button
+                    type="button"
+                    className="release-history-link"
+                    onClick={() =>
+                      void api.openExternal(
+                        `https://github.com/PuppetWen/CDriveShiftAI/releases/tag/v${release.version}`
+                      )
+                    }
+                  >
+                    {ui("查看该版本的 GitHub Release", "View this GitHub release")}
+                    <ExternalLink size={12} />
+                  </button>
+                </div>
+              </details>
+            ))}
+          </div>
+        </section>
       </section>
       )}
 
@@ -1473,7 +1608,7 @@ export function SettingsView({
                   <MousePointer2 size={15} />
                   <span>
                     <strong>{ui("鼠标快捷操作", "Mouse shortcut")}</strong>
-                    <small>{ui("选择鼠标按键和长按时长，达到阈值后唤起极速搜索", "Choose a mouse button and hold duration to open fast search")}</small>
+                    <small>{ui("直接按下鼠标按键进行录入，再用滑块设置长按毫秒数", "Press a mouse button to record it, then use the slider to set the hold time")}</small>
                   </span>
                 </span>
                 <em
@@ -1493,52 +1628,149 @@ export function SettingsView({
                 </em>
               </header>
               <div className="mouse-shortcut-controls">
-                <label>
+                <div className="mouse-button-setting">
                   <span>{ui("触发按键", "Trigger button")}</span>
-                  <select
-                    value={draft.mouseQuickSearchButton}
-                    onChange={(event) =>
-                      void commitMouseShortcut({
-                        mouseQuickSearchButton: event.target
-                          .value as MouseShortcutButton
-                      })
+                  <div className="mouse-button-recorder-row">
+                    <button
+                      type="button"
+                      className={
+                        mouseButtonRecording
+                          ? "mouse-button-recorder recording"
+                          : "mouse-button-recorder"
+                      }
+                      aria-pressed={mouseButtonRecording}
+                      onClick={() => {
+                        if (mouseButtonRecording) return;
+                        setMouseButtonRecording(true);
+                        setMouseRecorderHint(
+                          ui("请按下后退侧键、前进侧键或中键…", "Press the back, forward, or middle mouse button…")
+                        );
+                      }}
+                      onMouseDown={captureMouseButton}
+                      onMouseUp={(event) => {
+                        if (performance.now() < mouseCaptureBlockUntil.current) {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }
+                      }}
+                      onAuxClick={(event) => {
+                        if (
+                          mouseButtonRecording ||
+                          performance.now() < mouseCaptureBlockUntil.current
+                        ) {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }
+                      }}
+                      onContextMenu={(event) => {
+                        if (mouseButtonRecording) event.preventDefault();
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          setMouseButtonRecording(false);
+                          setMouseRecorderHint(ui("已取消录入", "Recording cancelled"));
+                        }
+                      }}
+                    >
+                      <span className="mouse-button-recorder-icon">
+                        <MousePointer2 size={16} />
+                        <i />
+                      </span>
+                      <span>
+                        <strong>
+                          {mouseButtonRecording
+                            ? ui("等待按下鼠标按键…", "Waiting for a mouse button…")
+                            : mouseButtonLabel(draft.mouseQuickSearchButton)}
+                        </strong>
+                        <small>
+                          {mouseRecorderHint ||
+                            ui("点击此处开始录入", "Click here to start recording")}
+                        </small>
+                      </span>
+                      <kbd>{mouseButtonRecording ? "REC" : ui("录入", "Record")}</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      className={
+                        draft.mouseQuickSearchButton === "disabled"
+                          ? "mouse-shortcut-disable active"
+                          : "mouse-shortcut-disable"
+                      }
+                      onClick={() => {
+                        setMouseButtonRecording(false);
+                        setMouseRecorderHint(ui("鼠标触发已关闭", "Mouse trigger disabled"));
+                        void commitMouseShortcut({ mouseQuickSearchButton: "disabled" });
+                      }}
+                    >
+                      {ui("关闭", "Disable")}
+                    </button>
+                  </div>
+                </div>
+                <div className="mouse-hold-setting">
+                  <div className="mouse-hold-heading">
+                    <span>{ui("长按时长", "Hold duration")}</span>
+                    <output>
+                      <strong>{draft.mouseQuickSearchHoldMs} ms</strong>
+                      <small>{(draft.mouseQuickSearchHoldMs / 1_000).toFixed(1)} s</small>
+                    </output>
+                  </div>
+                  <div
+                    className="mouse-hold-slider"
+                    style={
+                      {
+                        "--mouse-hold-progress": `${mouseHoldProgress(
+                          draft.mouseQuickSearchHoldMs
+                        )}%`
+                      } as CSSProperties
                     }
                   >
-                    <option value="disabled">{ui("关闭鼠标触发", "Disable mouse trigger")}</option>
-                    <option value="back">{ui("后退侧键", "Back side button")}</option>
-                    <option value="forward">{ui("前进侧键", "Forward side button")}</option>
-                    <option value="middle">{ui("中键", "Middle button")}</option>
-                  </select>
-                </label>
-                <label>
-                  <span>{ui("长按时长", "Hold duration")}</span>
-                  <div className="mouse-hold-input">
                     <input
-                      type="number"
-                      min="0.5"
-                      max="10"
-                      step="0.5"
-                      value={(draft.mouseQuickSearchHoldMs / 1_000).toFixed(1)}
+                      type="range"
+                      min={MOUSE_HOLD_MIN_MS}
+                      max={MOUSE_HOLD_MAX_MS}
+                      step={MOUSE_HOLD_STEP_MS}
+                      value={draft.mouseQuickSearchHoldMs}
                       disabled={draft.mouseQuickSearchButton === "disabled"}
+                      aria-label={ui("鼠标长按毫秒数", "Mouse hold duration in milliseconds")}
+                      aria-valuetext={`${draft.mouseQuickSearchHoldMs} ms`}
                       onChange={(event) => {
-                        const seconds = event.target.valueAsNumber;
-                        if (!Number.isFinite(seconds)) return;
+                        const milliseconds = normalizeMouseHoldMs(
+                          event.currentTarget.valueAsNumber
+                        );
                         setDraft((current) => ({
                           ...current,
-                          mouseQuickSearchHoldMs: Math.round(
-                            Math.min(10, Math.max(0.5, seconds)) * 1_000
-                          )
+                          mouseQuickSearchHoldMs: milliseconds
                         }));
                       }}
+                      onPointerUp={(event) =>
+                        void commitMouseShortcut({
+                          mouseQuickSearchHoldMs: normalizeMouseHoldMs(
+                            event.currentTarget.valueAsNumber
+                          )
+                        })
+                      }
+                      onKeyUp={(event) =>
+                        void commitMouseShortcut({
+                          mouseQuickSearchHoldMs: normalizeMouseHoldMs(
+                            event.currentTarget.valueAsNumber
+                          )
+                        })
+                      }
                       onBlur={() =>
                         void commitMouseShortcut({
                           mouseQuickSearchHoldMs: draft.mouseQuickSearchHoldMs
                         })
                       }
                     />
-                    <span>{ui("秒", "seconds")}</span>
+                    <div className="mouse-hold-scale" aria-hidden="true">
+                      <span>500 ms</span>
+                      <span>3 s</span>
+                      <span>5 s</span>
+                      <span>10 s</span>
+                    </div>
                   </div>
-                </label>
+                </div>
                 <button
                   type="button"
                   className="secondary-button"
@@ -1567,7 +1799,7 @@ export function SettingsView({
                   {runtimeText(mouseShortcutStatus?.message) ||
                     ui("正在检查 Windows Raw Input 全局监听", "Checking the Windows Raw Input global listener")}
                 </span>
-                <small>{ui("被动监听不会拦截短按，原有前进、后退或中键功能保持不变。", "Passive listening does not block short clicks; the original forward, back, or middle-button behavior remains unchanged.")}</small>
+                <small>{ui("先点击录入框，再按后退侧键、前进侧键或中键；短按原功能保持不变。", "Click the recorder, then press back, forward, or middle; normal short-click behavior remains unchanged.")}</small>
               </footer>
             </article>
             <p>{ui("点击录入框后直接按下组合键；离开输入框时自动检查、保存并注册。Backspace 或右侧清除按钮可禁用。", "Click a recorder and press the key combination. Leaving the field checks, saves, and registers it automatically. Press Backspace or use the clear button to disable it.")}</p>

@@ -1,67 +1,69 @@
 import type { AppUpdateReleaseSection } from "../types";
 
-export const bundledReleaseNotes: {
+export interface BundledReleaseNote {
   version: string;
   summary: string;
   sections: AppUpdateReleaseSection[];
-} = {
-  version: "0.0.11",
-  summary: "本版降低 Windows 临时目录占用造成的偶发迁移失败，记住浏览路径，并新增四档界面大小。",
+}
+
+export const bundledReleaseNotes: BundledReleaseNote = {
+  version: "0.0.12",
+  summary: "本版支持直接按下鼠标按键进行快捷操作录入，以滑杆设置长按毫秒数，并可离线查看逐条折叠的历史更新。",
   sections: [
     {
-      title: "迁移可靠性",
+      title: "鼠标快捷操作",
       items: [
-        "Windows 临时拒绝目录重命名时会进行有限退避重试，不再因瞬时文件句柄直接失败。",
-        "目标路径被其他程序创建时立即停止，持续占用时显示可操作的关闭程序提示。",
-        "源目录切换、目标发布、失败恢复和迁移回滚使用相同的受控重命名流程。"
+        "触发按键不再使用下拉框，点击录入区域后直接按鼠标后退侧键、前进侧键或中键即可保存。",
+        "不支持的左键和右键不会误覆盖已有设置，界面会继续等待有效按键并给出提示。",
+        "录入结果会立即持久化并同步到底层全局鼠标监听器，仍可一键关闭鼠标触发。"
       ]
     },
     {
-      title: "路径记忆",
+      title: "长按时长",
       items: [
-        "目录浏览器会回到用户上次选择的位置。",
-        "迁移源、迁移目标、分析、搜索、内容索引和复制目标分别保存历史路径。",
-        "已失效的历史目录会被忽略，浏览器安全回退到系统默认位置。"
+        "长按时长改为可拖动滑杆，范围为 500–10000 毫秒，步进 100 毫秒。",
+        "滑杆旁同时显示精确毫秒数和秒数，并保留键盘方向键的无障碍调节能力。",
+        "拖动结束、键盘调整结束或滑杆失焦时自动保存，无需手动输入数值。"
       ]
     },
     {
-      title: "界面可读性",
+      title: "历史更新",
       items: [
-        "设置新增小、标准、大、特大四档字体与界面大小，并自动保存。",
-        "文字、控件、图标和间距整体缩放，主窗口与快速搜索窗口同步生效。",
-        "大屏内容宽度扩展至 1540px，更充分利用最大化窗口空间。"
+        "更新与诊断界面内置从 0.0.1 开始的历史更新内容，无网络时仍可查看。",
+        "每个历史版本都能独立展开或收起，默认保持收起，展开一个版本不会改变其他版本。",
+        "历史列表内容较多时显示独立纵向滚动条；每条记录保留 GitHub Release 入口，并针对窄屏切换为单列。"
       ]
     }
   ]
 };
 
-export const bundledReleaseNotesEnglish: typeof bundledReleaseNotes = {
-  version: "0.0.11",
+export const bundledReleaseNotesEnglish: BundledReleaseNote = {
+  version: "0.0.12",
   summary:
-    "This release reduces intermittent Windows migration failures, remembers browse locations, and adds four interface-size options.",
+    "This release records mouse shortcuts from a physical button press, sets hold time with a millisecond slider, and adds an offline collapsible release history.",
   sections: [
     {
-      title: "Migration reliability",
+      title: "Mouse shortcuts",
       items: [
-        "Transient Windows directory rename failures now use a finite backoff retry instead of failing immediately.",
-        "Migration stops if another process creates the destination and explains persistent file-handle conflicts.",
-        "Source switching, destination publishing, failure recovery, and rollback share the guarded rename flow."
+        "The trigger is no longer a dropdown: arm the recorder and press the mouse back, forward, or middle button to save it.",
+        "Unsupported left and right clicks do not overwrite the existing setting; the recorder stays armed and explains what to press.",
+        "Captured settings persist immediately and are synchronized with the native global mouse listener; the trigger can still be disabled in one click."
       ]
     },
     {
-      title: "Browse history",
+      title: "Hold duration",
       items: [
-        "Directory pickers reopen at the location the user selected last time.",
-        "Migration source, destination, analysis, search, content indexing, and copy destinations keep separate histories.",
-        "Missing remembered directories are ignored and safely fall back to the system default."
+        "Hold duration now uses a draggable slider from 500 to 10000 milliseconds in 100 millisecond steps.",
+        "The control shows exact milliseconds and seconds together and remains adjustable with keyboard arrow keys.",
+        "The value saves when dragging or keyboard adjustment ends, or when the slider loses focus."
       ]
     },
     {
-      title: "Interface readability",
+      title: "Release history",
       items: [
-        "Settings now offers Small, Standard, Large, and Extra large interface sizes with persistence.",
-        "Text, controls, icons, and spacing scale together across the main and quick-search windows.",
-        "The large-screen content width expands to 1540px to use maximized windows more effectively."
+        "Update & diagnostics now includes release content back to 0.0.1 and remains available offline.",
+        "Every historical version expands and collapses independently and is collapsed by default.",
+        "Long histories use their own vertical scrollbar; every entry links to GitHub Release and switches to one column on narrow screens."
       ]
     }
   ]
