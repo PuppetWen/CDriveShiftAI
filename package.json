@@ -1,6 +1,6 @@
 {
   "name": "cdriveshiftai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "CDriveShiftAI - AI-assisted Windows disk organizer and safe cross-drive directory migration tool",
   "main": "dist-electron/main.js",
@@ -39,6 +39,9 @@
     "test:search-state": "node scripts/smoke-packaged-search-state.mjs",
     "test:visual": "node scripts/visual-smoke.mjs",
     "test:settings-sliders": "node scripts/smoke-settings-sliders.mjs",
+    "test:magnifier-native": "node scripts/smoke-native-magnifier.mjs",
+    "test:listener-exclusivity": "node scripts/smoke-native-listener-exclusivity.mjs",
+    "test:magnifier-drag": "node scripts/smoke-magnifier-slider-drag.mjs",
     "test:watch": "vitest",
     "lint": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },

@@ -105,6 +105,7 @@ let isQuitting = false;
 let shutdownComplete = false;
 let shutdownPromise: Promise<void> | undefined;
 let visibleUpdateCheckTimer: NodeJS.Timeout | undefined;
+let mainWindowRecoveryTimer: NodeJS.Timeout | undefined;
 let lastVisibleUpdateCheckAt = 0;
 const store = new AppStore();
 let migrationService: MigrationService;
@@ -126,7 +127,7 @@ function syncSearchBackgroundMode(): void {
   searchService?.setBackgroundMode(!hasVisibleWindow);
 }
 
-function trackWindowActivity(window: BrowserWindow): void {
+function trackWindowActivity(window: BrowserWindow, role: "main" | "quick"): void {
   const sync = () => setImmediate(syncSearchBackgroundMode);
   window.on("show", sync);
   window.on("hide", sync);
@@ -145,6 +146,22 @@ function trackWindowActivity(window: BrowserWindow): void {
       reason: details.reason,
       exitCode: details.exitCode
     });
+    if (
+      role === "main" &&
+      !isQuitting &&
+      window.isVisible() &&
+      details.reason !== "clean-exit"
+    ) {
+      if (mainWindowRecoveryTimer) clearTimeout(mainWindowRecoveryTimer);
+      mainWindowRecoveryTimer = setTimeout(() => {
+        mainWindowRecoveryTimer = undefined;
+        if (isQuitting || mainWindow !== window) return;
+        logger.warn("renderer.recovering", { reason: details.reason });
+        if (!window.isDestroyed()) window.destroy();
+        mainWindow = createWindow();
+      }, 250);
+      mainWindowRecoveryTimer.unref();
+    }
   });
 }
 
@@ -407,7 +424,7 @@ function createWindow(): BrowserWindow {
 
   initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
-  trackWindowActivity(window);
+  trackWindowActivity(window, "main");
   window.on("restore", () => triggerVisibleUpdateCheck("main-window-restored"));
   trackWindowBounds(window, "mainWindowBounds");
   window.on("close", (event) => {
@@ -594,7 +611,7 @@ function createQuickSearchWindow(): BrowserWindow {
   quickSearchWindow = window;
   initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
-  trackWindowActivity(window);
+  trackWindowActivity(window, "quick");
   trackWindowBounds(window, "quickSearchWindowBounds");
   window.once("ready-to-show", () => {
     if (restored?.maximized) window.maximize();
@@ -1225,9 +1242,9 @@ function registerIpc(): void {
       message: "Windows 局部放大镜尚未启动"
     }
   );
-  ipcMain.handle("shortcut:magnifier-capture", (_event, active: unknown) =>
-    searchService?.setMagnifierCapture(active === true) ?? false
-  );
+  ipcMain.handle("shortcut:magnifier-capture", async (_event, active: unknown) => {
+    return (await searchService?.setMagnifierCapture(active === true)) ?? false;
+  });
 
   ipcMain.handle("app:navigate", (_event, raw: unknown) => {
     if (!raw || typeof raw !== "object") throw new Error("导航请求无效");

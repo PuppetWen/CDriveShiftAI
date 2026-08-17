@@ -7,83 +7,79 @@ export interface BundledReleaseNote {
 }
 
 export const bundledReleaseNotes: BundledReleaseNote = {
-  version: "0.1.0",
-  summary: "本版将鼠标触发时长调整为 0–3000 毫秒，加入全应用字体滑杆与跨程序的 Windows 局部放大镜。",
+  version: "0.1.1",
+  summary: "本版重点修复局部放大镜在调节尺寸与滚轮缩放时的白屏、灰帧和抖动，并加强常驻稳定性与后台效率。",
   sections: [
     {
-      title: "鼠标触发时长",
+      title: "局部放大镜显示",
       items: [
-        "长按滑杆范围由 500–10000 毫秒调整为更实用的 0–3000 毫秒，继续采用 100 毫秒步进。",
-        "0 毫秒表示按下鼠标后退侧键、前进侧键或中键时立即触发，不再等待定时器。",
-        "前端、设置存储与 Rust 原生监听器统一使用新范围；旧的超长配置会安全收敛到 3000 毫秒。"
+        "放大镜改为双缓冲画面交换：新画面准备完成后再显示，避免滚轮缩放期间闪成灰色或空白。",
+        "滚轮以鼠标所在位置为中心平滑调整倍率，采用短帧间隔插值，减少内容上下跳动后回位。",
+        "放大区域继续显示清晰边框、隐藏放大的鼠标图标，并可在截图、录屏或远程画面中正常看到。"
       ]
     },
     {
-      title: "全应用字体缩放",
+      title: "尺寸滑杆稳定性",
       items: [
-        "原来的四档按钮改为 50%–300% 连续滑杆，以当前标准字体为 100%，每次变化 10%。",
-        "主窗口、极速搜索、搜索结果和辅助窗口内的全部文字同步变化；卡片、按钮、间距和图标保持原尺寸。",
-        "移除整页缩放及其横向滚动容器，避免高倍比例下吸顶卡片相互覆盖或页面被整体挤压。",
-        "100% 标记与滑块圆点使用相同的有效轨道坐标；拖动时实时预览，松开后保存最终值。"
+        "宽度和高度滑杆在事件回调内立即读取数值，修复拖动后 React 事件失效导致的整页白屏。",
+        "拖动滑杆只更新并保存配置，不再误创建或显示放大镜窗口。",
+        "松开滑杆后再把最终尺寸同步给原生监听器；实际使用放大镜时严格采用用户保存的宽高。"
       ]
     },
     {
-      title: "全局局部放大镜",
+      title: "常驻与快捷键",
       items: [
-        "新增跨程序、跨显示器的 Windows 局部放大镜，按住自定义组合键时在鼠标附近显示。",
-        "快捷方式通过实际按住 Ctrl、Alt、Shift 或 Win 组合并滚动一次进行录入，不使用下拉框。",
-        "只有组合键与滚轮同时触发后才显示，单独按 Ctrl 不会放大；录入时暂停全局钩子，避免抢走滚轮事件。",
-        "滚轮调整局部倍率，宽度与高度分别通过滑杆配置；区域带边框并以鼠标为中心采样，放大画面不显示鼠标图标。"
+        "全局监听器增加单实例互斥，避免同时运行旧版、便携版或安装版时争抢同一组按键与滚轮。",
+        "单独按修饰键不会显示放大镜；录入快捷键期间暂停全局监听，确保组合键和滚轮能够被设置页接收。",
+        "窗口渲染进程异常时自动恢复一次，降低极端情况下主界面停留在空白页的概率。"
       ]
     },
     {
-      title: "设置兼容与验证",
+      title: "资源与验证",
       items: [
-        "设置读取层会验证、取整并限制缩放比例与鼠标毫秒数，异常或损坏值不会传入窗口和原生监听器。",
-        "新增连续缩放、持久化兼容、0 毫秒即时触发范围和原生上限的回归测试。",
-        "更新与诊断继续内置逐条折叠的离线历史，并将 0.0.12 收录为上一版本。"
+        "索引器在后台运行时降低进程优先级并收缩可回收工作集，减少静默常驻时的 CPU 与内存压力。",
+        "新增原生放大镜画面、尺寸滑杆拖动和多实例监听冲突的自动化回归测试。",
+        "更新与诊断继续提供逐条折叠并可滚动的离线历史，本版将 0.1.0 收录为上一版本。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: BundledReleaseNote = {
-  version: "0.1.0",
+  version: "0.1.1",
   summary:
-    "This release limits mouse activation time to 0–3000 milliseconds, adds app-wide text sizing, and introduces a Windows desktop lens.",
+    "This release fixes blank, gray, and jumping frames while resizing or zooming the desktop lens, and improves resident stability and efficiency.",
   sections: [
     {
-      title: "Mouse activation time",
+      title: "Desktop lens rendering",
       items: [
-        "The hold slider now covers a practical 0–3000 milliseconds instead of 500–10000, retaining 100 millisecond steps.",
-        "Zero milliseconds triggers immediately when the configured back, forward, or middle mouse button is pressed, without starting a delay timer.",
-        "The renderer, persisted settings, and Rust listener share the new limits; older long values safely converge to 3000 milliseconds."
+        "The lens now swaps between two buffered surfaces only after a complete frame is ready, preventing blank or gray flashes during wheel zoom.",
+        "Magnification eases at short frame intervals around the pointer, reducing the jump-and-return effect.",
+        "The bordered lens still omits the magnified cursor and remains visible in screenshots, recordings, and remote sessions."
       ]
     },
     {
-      title: "App-wide text scaling",
+      title: "Size slider stability",
       items: [
-        "The old presets are replaced by a 50%–300% slider, with the current standard text size defined as 100% and ten-percent steps.",
-        "All text in the main window, fast search, search results, and utility windows scales while cards, controls, spacing, and icons keep their original dimensions.",
-        "Whole-page zoom and its horizontal overflow wrapper were removed to prevent sticky cards from overlapping at high values.",
-        "The 100% marker uses the same effective track coordinates as the thumb; dragging previews live and saves on release."
+        "Width and height values are captured synchronously inside React callbacks, fixing the full-page blank screen caused by an expired event during dragging.",
+        "Dragging only previews and persists configuration; it no longer creates or shows a lens window.",
+        "The final size is sent to the native listener after release and is used exactly when the lens is activated."
       ]
     },
     {
-      title: "Global desktop lens",
+      title: "Resident mode and shortcuts",
       items: [
-        "A Windows desktop lens now follows the pointer across applications and displays.",
-        "Record the shortcut by physically holding Ctrl, Alt, Shift, or Win modifiers and scrolling once instead of selecting from a dropdown.",
-        "The lens appears only after a modifier-plus-wheel gesture; pressing Ctrl alone does nothing, and capture mode pauses the global hook so recording receives the wheel event.",
-        "The wheel changes magnification, width and height use separate sliders, and the bordered source region is centered on the pointer without showing a magnified cursor icon."
+        "A named single-instance guard prevents installed, portable, or older builds from competing for the same global keyboard and wheel hook.",
+        "Modifier keys alone do not open the lens, and global listening pauses during shortcut recording.",
+        "The main window attempts one renderer recovery after an unexpected render-process failure."
       ]
     },
     {
-      title: "Compatibility and verification",
+      title: "Efficiency and verification",
       items: [
-        "Persisted values are validated, rounded, and clamped before reaching any window or native listener.",
-        "Regression coverage now includes continuous scaling, legacy settings, zero-delay activation, and the native three-second cap.",
-        "Update & diagnostics keeps its independently collapsible offline history and now includes 0.0.12."
+        "The background indexer lowers its process priority and trims reclaimable working-set pages to reduce idle CPU and memory pressure.",
+        "Automated regression coverage now includes native lens frames, slider dragging, and multi-instance listener conflicts.",
+        "Update & diagnostics retains independently collapsible, scrollable offline history and now includes 0.1.0."
       ]
     }
   ]

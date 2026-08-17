@@ -13,7 +13,7 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -310,12 +310,78 @@ struct MagnifierState {
     width: AtomicU64,
     height: AtomicU64,
     factor_tenths: AtomicU64,
+    displayed_factor_milli: AtomicU64,
+    rendered_width: AtomicU64,
+    rendered_height: AtomicU64,
+    rendered_lens_x: AtomicI32,
+    rendered_lens_y: AtomicI32,
     host_window: AtomicUsize,
-    control_window: AtomicUsize,
+    control_window_a: AtomicUsize,
+    control_window_b: AtomicUsize,
+    front_control: AtomicU64,
 }
 
 #[cfg(windows)]
 static MAGNIFIER_STATE: OnceLock<MagnifierState> = OnceLock::new();
+static INDEXER_BACKGROUNDED: AtomicBool = AtomicBool::new(false);
+static GLOBAL_INPUT_LISTENER_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static GLOBAL_INPUT_LISTENER_CONFLICT: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static GLOBAL_INPUT_LISTENER_MUTEX: AtomicUsize = AtomicUsize::new(0);
+#[cfg(windows)]
+const WM_CSHIFT_MAGNIFIER_HIDE: u32 = 0x8000 + 0x51;
+
+#[cfg(windows)]
+fn next_magnifier_factor(displayed: u64, target: u64) -> u64 {
+    if displayed == target {
+        return target;
+    }
+    // Ease toward the requested zoom instead of presenting two unrelated
+    // captures at either side of a wheel notch. The 0.02x minimum keeps the
+    // final few frames moving and converges in roughly 80-120 ms.
+    let difference = target.abs_diff(displayed);
+    let step = (difference / 4).max(20);
+    if displayed < target {
+        displayed.saturating_add(step).min(target)
+    } else {
+        displayed.saturating_sub(step).max(target)
+    }
+}
+
+#[cfg(windows)]
+fn input_listener_identity() -> String {
+    env::var("CDRIVESHIFTAI_INPUT_LISTENER_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "CDriveShiftAI.MouseBackListener".to_string())
+}
+
+#[cfg(windows)]
+unsafe fn claim_global_input_listener(class_name: &[u16], identity: &str) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowExW, HWND_MESSAGE};
+
+    // Releases prior to the named lock already expose this message-only
+    // window. Checking it keeps a new portable build from competing with an
+    // older installed build that is still resident in the tray.
+    if FindWindowExW(HWND_MESSAGE, 0, class_name.as_ptr(), std::ptr::null()) != 0 {
+        return false;
+    }
+    let mutex_name: Vec<u16> = format!("Local\\{identity}.GlobalInputListener\0")
+        .encode_utf16()
+        .collect();
+    let mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+    if mutex == 0 {
+        return false;
+    }
+    if GetLastError() == ERROR_ALREADY_EXISTS {
+        CloseHandle(mutex);
+        return false;
+    }
+    GLOBAL_INPUT_LISTENER_MUTEX.store(mutex as usize, Ordering::SeqCst);
+    true
+}
 
 #[cfg(windows)]
 fn magnifier_available() -> bool {
@@ -331,12 +397,14 @@ fn magnifier_available() -> bool {
 
 #[cfg(windows)]
 fn magnifier_modifier_mask(value: &str) -> u64 {
-    value.split('+').fold(0, |mask, part| match part.trim().to_ascii_lowercase().as_str() {
-        "ctrl" | "control" => mask | 1,
-        "alt" => mask | 2,
-        "shift" => mask | 4,
-        "win" | "meta" => mask | 8,
-        _ => mask,
+    value.split('+').fold(0, |mask, part| {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mask | 1,
+            "alt" => mask | 2,
+            "shift" => mask | 4,
+            "win" | "meta" => mask | 8,
+            _ => mask,
+        }
     })
 }
 
@@ -346,21 +414,34 @@ fn magnifier_size(value: u64, min: u64, max: u64) -> u64 {
 
 #[cfg(windows)]
 fn configure_magnifier(enabled: bool, modifiers: &str, width: u64, height: u64) {
-    let Some(state) = MAGNIFIER_STATE.get() else { return; };
+    let Some(state) = MAGNIFIER_STATE.get() else {
+        return;
+    };
     let modifier_mask = magnifier_modifier_mask(modifiers);
-    state.enabled.store(enabled, Ordering::SeqCst);
-    if !enabled {
+    let was_enabled = state.enabled.swap(enabled, Ordering::SeqCst);
+    state.modifiers.store(
+        if modifier_mask == 0 { 1 } else { modifier_mask },
+        Ordering::SeqCst,
+    );
+    state
+        .width
+        .store(magnifier_size(width, 160, 1200), Ordering::SeqCst);
+    state
+        .height
+        .store(magnifier_size(height, 120, 900), Ordering::SeqCst);
+
+    // Width, height and modifier changes are configuration only. In
+    // particular, moving a settings slider must not touch the native layered
+    // window at all; the stored dimensions are applied on the next real
+    // modifier+wheel gesture. Only turning the feature off needs to dismiss an
+    // already-visible lens immediately.
+    if was_enabled && !enabled {
         state.lens_active.store(false, Ordering::SeqCst);
-    }
-    state.modifiers.store(if modifier_mask == 0 { 1 } else { modifier_mask }, Ordering::SeqCst);
-    state.width.store(magnifier_size(width, 160, 1200), Ordering::SeqCst);
-    state.height.store(magnifier_size(height, 120, 900), Ordering::SeqCst);
-    if !enabled {
         unsafe {
-            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+            use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
             let host = state.host_window.load(Ordering::SeqCst) as isize;
             if host != 0 {
-                ShowWindow(host, SW_HIDE);
+                SendMessageW(host, WM_CSHIFT_MAGNIFIER_HIDE, 0, 0);
             }
         }
     }
@@ -368,12 +449,18 @@ fn configure_magnifier(enabled: bool, modifiers: &str, width: u64, height: u64) 
 
 #[cfg(windows)]
 fn configure_magnifier_capture(active: bool) {
-    let Some(state) = MAGNIFIER_STATE.get() else { return; };
+    let Some(state) = MAGNIFIER_STATE.get() else {
+        return;
+    };
     state.capture_active.store(active, Ordering::SeqCst);
     if active {
         state.lens_active.store(false, Ordering::SeqCst);
         unsafe {
-            update_magnifier_lens(false);
+            use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+            let host = state.host_window.load(Ordering::SeqCst) as isize;
+            if host != 0 {
+                SendMessageW(host, WM_CSHIFT_MAGNIFIER_HIDE, 0, 0);
+            }
         }
     }
 }
@@ -471,14 +558,15 @@ unsafe extern "system" fn mouse_shortcut_window_proc(
         GetRawInputData, RAWINPUT, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
-        RI_MOUSE_BUTTON_5_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, WM_INPUT,
-        WM_TIMER,
+        DefWindowProcW, KillTimer, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP,
+        RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN,
+        RI_MOUSE_MIDDLE_BUTTON_UP, WM_INPUT, WM_TIMER,
     };
 
     if message == WM_TIMER {
         if let Some(state) = MAGNIFIER_STATE.get() {
-            let modifiers_pressed = magnifier_modifiers_pressed(state.modifiers.load(Ordering::SeqCst));
+            let modifiers_pressed =
+                magnifier_modifiers_pressed(state.modifiers.load(Ordering::SeqCst));
             if !modifiers_pressed {
                 state.lens_active.store(false, Ordering::SeqCst);
             }
@@ -487,8 +575,30 @@ unsafe extern "system" fn mouse_shortcut_window_proc(
                 && !state.capture_active.load(Ordering::SeqCst)
                 && state.lens_active.load(Ordering::SeqCst)
                 && modifiers_pressed;
+            if active {
+                let target = state.factor_tenths.load(Ordering::SeqCst) * 100;
+                let displayed = state.displayed_factor_milli.load(Ordering::SeqCst);
+                let next = next_magnifier_factor(displayed, target);
+                state.displayed_factor_milli.store(next, Ordering::SeqCst);
+            }
             update_magnifier_lens(active);
+            if !active {
+                // No idle polling: the hook starts this timer only after a
+                // real modifier+wheel gesture, and modifier release stops it.
+                KillTimer(window, 1);
+            }
         }
+        return 0;
+    }
+    if message == WM_CSHIFT_MAGNIFIER_HIDE {
+        if let Some(state) = MAGNIFIER_STATE.get() {
+            state.lens_active.store(false, Ordering::SeqCst);
+        }
+        KillTimer(window, 1);
+        windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
+            window,
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE,
+        );
         return 0;
     }
     if message == windows_sys::Win32::UI::WindowsAndMessaging::WM_NCHITTEST {
@@ -543,9 +653,9 @@ fn start_mouse_shortcut_listener(output: Output) {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, SetLayeredWindowAttributes,
-        SetTimer, SetWindowsHookExW, TranslateMessage, HWND_MESSAGE, LWA_ALPHA, MSG, WH_MOUSE_LL,
-        WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
+        SetWindowsHookExW, TranslateMessage, HWND_MESSAGE, LWA_ALPHA, MSG, WH_MOUSE_LL, WNDCLASSW,
+        WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
     };
 
     let listener_output = output.clone();
@@ -570,13 +680,44 @@ fn start_mouse_shortcut_listener(output: Output) {
         width: AtomicU64::new(480),
         height: AtomicU64::new(300),
         factor_tenths: AtomicU64::new(20),
+        displayed_factor_milli: AtomicU64::new(2_000),
+        rendered_width: AtomicU64::new(0),
+        rendered_height: AtomicU64::new(0),
+        rendered_lens_x: AtomicI32::new(i32::MIN),
+        rendered_lens_y: AtomicI32::new(i32::MIN),
         host_window: AtomicUsize::new(0),
-        control_window: AtomicUsize::new(0),
+        control_window_a: AtomicUsize::new(0),
+        control_window_b: AtomicUsize::new(0),
+        front_control: AtomicU64::new(0),
     });
 
     thread::spawn(move || unsafe {
+        use windows_sys::Win32::UI::HiDpi::{
+            SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        // Magnification source rectangles and popup coordinates are physical
+        // pixels. Without per-monitor awareness, Windows virtualizes the host
+        // size (for example 1200x900 becomes about 1800x1350 at 150%) while the
+        // capture source remains in another coordinate space, producing a
+        // nearly full-screen blank lens.
+        let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let module = GetModuleHandleW(std::ptr::null());
-        let class_name: Vec<u16> = "CDriveShiftAI.MouseBackListener\0".encode_utf16().collect();
+        let identity = input_listener_identity();
+        let class_name: Vec<u16> = format!("{identity}\0").encode_utf16().collect();
+        if !claim_global_input_listener(&class_name, &identity) {
+            GLOBAL_INPUT_LISTENER_CONFLICT.store(true, Ordering::SeqCst);
+            listener_output.send(&json!({
+                "event": "mouseShortcutStatus",
+                "available": false,
+                "conflict": true
+            }));
+            listener_output.send(&json!({
+                "event": "magnifierStatus",
+                "available": false,
+                "conflict": true
+            }));
+            return;
+        }
         let window_class = WNDCLASSW {
             style: 0,
             lpfnWndProc: Some(mouse_shortcut_window_proc),
@@ -636,9 +777,14 @@ fn start_mouse_shortcut_listener(output: Output) {
             return;
         }
 
-        if MagInitialize() != 0 {
-            let host = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        let magnification_initialized = MagInitialize() != 0;
+        let host = if magnification_initialized {
+            CreateWindowExW(
+                WS_EX_TOPMOST
+                    | WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TOOLWINDOW,
                 class_name.as_ptr(),
                 class_name.as_ptr(),
                 WS_POPUP | WS_CLIPCHILDREN,
@@ -650,65 +796,68 @@ fn start_mouse_shortcut_listener(output: Output) {
                 0,
                 module,
                 std::ptr::null(),
-            );
-            if host != 0 {
-                SetLayeredWindowAttributes(host, 0, 255, LWA_ALPHA);
-                let control = CreateWindowExW(
-                    0,
-                    WC_MAGNIFIER,
-                    class_name.as_ptr(),
-                    WS_CHILD | WS_VISIBLE,
-                    3,
-                    3,
-                    474,
-                    294,
-                    host,
-                    0,
-                    module,
-                    std::ptr::null(),
-                );
-                if let Some(state) = MAGNIFIER_STATE.get() {
-                    state.host_window.store(host as usize, Ordering::SeqCst);
-                    state.control_window.store(control as usize, Ordering::SeqCst);
-                }
-                if control != 0 {
-                    let mut excluded_window = host;
-                    MagSetWindowFilterList(
-                        control,
-                        MW_FILTERMODE_EXCLUDE,
-                        1,
-                        &mut excluded_window,
-                    );
-                }
-                SetTimer(host, 1, 50, None);
-                let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(magnifier_mouse_hook), module, 0);
-                if control == 0 || hook == 0 {
-                    listener_output.send(&json!({
-                        "event": "magnifierStatus",
-                        "available": false,
-                        "errorCode": GetLastError()
-                    }));
-                } else {
-                    if let Some(state) = MAGNIFIER_STATE.get() {
-                        state.available.store(true, Ordering::SeqCst);
-                    }
-                    listener_output.send(&json!({
-                        "event": "magnifierStatus",
-                        "available": true
-                    }));
-                }
-            } else {
-                listener_output.send(&json!({
-                    "event": "magnifierStatus",
-                    "available": false,
-                    "errorCode": GetLastError()
-                }));
-            }
+            )
         } else {
+            0
+        };
+        if host != 0 {
+            SetLayeredWindowAttributes(host, 0, 255, LWA_ALPHA);
+        }
+        let create_control = || {
+            if host == 0 {
+                return 0;
+            }
+            CreateWindowExW(
+                0,
+                WC_MAGNIFIER,
+                class_name.as_ptr(),
+                WS_CHILD | WS_VISIBLE,
+                3,
+                3,
+                474,
+                294,
+                host,
+                0,
+                module,
+                std::ptr::null(),
+            )
+        };
+        let control_a = create_control();
+        let control_b = create_control();
+        if let Some(state) = MAGNIFIER_STATE.get() {
+            state.host_window.store(host as usize, Ordering::SeqCst);
+            state
+                .control_window_a
+                .store(control_a as usize, Ordering::SeqCst);
+            state
+                .control_window_b
+                .store(control_b as usize, Ordering::SeqCst);
+        }
+        if control_a != 0 && control_b != 0 {
+            let mut excluded_window = host;
+            MagSetWindowFilterList(control_a, MW_FILTERMODE_EXCLUDE, 1, &mut excluded_window);
+            MagSetWindowFilterList(control_b, MW_FILTERMODE_EXCLUDE, 1, &mut excluded_window);
+        }
+        let hook = if host != 0 && control_a != 0 && control_b != 0 {
+            SetWindowsHookExW(WH_MOUSE_LL, Some(magnifier_mouse_hook), module, 0)
+        } else {
+            0
+        };
+        if !magnification_initialized || host == 0 || control_a == 0 || control_b == 0 || hook == 0
+        {
             listener_output.send(&json!({
                 "event": "magnifierStatus",
                 "available": false,
                 "errorCode": GetLastError()
+            }));
+        } else {
+            if let Some(state) = MAGNIFIER_STATE.get() {
+                state.available.store(true, Ordering::SeqCst);
+            }
+            GLOBAL_INPUT_LISTENER_AVAILABLE.store(true, Ordering::SeqCst);
+            listener_output.send(&json!({
+                "event": "magnifierStatus",
+                "available": true
             }));
         }
 
@@ -775,8 +924,8 @@ fn normalized_path_hash(value: &str) -> u64 {
 #[cfg(windows)]
 unsafe fn magnifier_modifiers_pressed(mask: u64) -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RMENU,
-        VK_RSHIFT, VK_RWIN, VK_SHIFT,
+        GetAsyncKeyState, VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RMENU, VK_RSHIFT,
+        VK_RWIN, VK_SHIFT,
     };
     let down = |key: u16| GetAsyncKeyState(key as i32) < 0;
     (mask & 1 == 0 || down(VK_CONTROL))
@@ -788,39 +937,54 @@ unsafe fn magnifier_modifiers_pressed(mask: u64) -> bool {
 #[cfg(windows)]
 unsafe fn update_magnifier_lens(show: bool) {
     use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::Graphics::Dwm::DwmFlush;
+    use windows_sys::Win32::Graphics::Gdi::{
+        RedrawWindow, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW,
+    };
     use windows_sys::Win32::UI::Magnification::{
         MagSetWindowSource, MagSetWindowTransform, MAGTRANSFORM,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXVIRTUALSCREEN,
-        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SW_HIDE,
+        GetCursorPos, GetSystemMetrics, IsWindowVisible, SetWindowPos, ShowWindow, HWND_TOP,
+        HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
     };
-    let Some(state) = MAGNIFIER_STATE.get() else { return; };
+    let Some(state) = MAGNIFIER_STATE.get() else {
+        return;
+    };
     let host = state.host_window.load(Ordering::SeqCst) as isize;
-    let control = state.control_window.load(Ordering::SeqCst) as isize;
-    if host == 0 || control == 0 { return; }
+    let control_a = state.control_window_a.load(Ordering::SeqCst) as isize;
+    let control_b = state.control_window_b.load(Ordering::SeqCst) as isize;
+    if host == 0 || control_a == 0 || control_b == 0 {
+        return;
+    }
     if !show || !state.enabled.load(Ordering::SeqCst) {
         ShowWindow(host, SW_HIDE);
         return;
     }
     let mut cursor = POINT { x: 0, y: 0 };
-    if GetCursorPos(&mut cursor) == 0 { return; }
+    if GetCursorPos(&mut cursor) == 0 {
+        return;
+    }
     let width = state.width.load(Ordering::SeqCst) as i32;
     let height = state.height.load(Ordering::SeqCst) as i32;
     let content_width = (width - 6).max(1);
     let content_height = (height - 6).max(1);
-    let factor = state.factor_tenths.load(Ordering::SeqCst) as f32 / 10.0;
+    let factor = state.displayed_factor_milli.load(Ordering::SeqCst) as f32 / 1_000.0;
     let source_width = (content_width as f32 / factor).round().max(1.0) as i32;
     let source_height = (content_height as f32 / factor).round().max(1.0) as i32;
     let virtual_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     let virtual_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
     let virtual_right = virtual_left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
     let virtual_bottom = virtual_top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    let source_left = (cursor.x - source_width / 2)
-        .clamp(virtual_left, (virtual_right - source_width).max(virtual_left));
-    let source_top = (cursor.y - source_height / 2)
-        .clamp(virtual_top, (virtual_bottom - source_height).max(virtual_top));
+    let source_left = (cursor.x - source_width / 2).clamp(
+        virtual_left,
+        (virtual_right - source_width).max(virtual_left),
+    );
+    let source_top = (cursor.y - source_height / 2).clamp(
+        virtual_top,
+        (virtual_bottom - source_height).max(virtual_top),
+    );
     let source = RECT {
         left: source_left,
         top: source_top,
@@ -831,28 +995,86 @@ unsafe fn update_magnifier_lens(show: bool) {
     transform.v[0] = factor;
     transform.v[4] = factor;
     transform.v[8] = 1.0;
-    MagSetWindowTransform(control, &mut transform);
-    MagSetWindowSource(control, source);
-    SetWindowPos(
-        control,
+    let lens_x =
+        (cursor.x - width / 2).clamp(virtual_left, (virtual_right - width).max(virtual_left));
+    let lens_y =
+        (cursor.y - height / 2).clamp(virtual_top, (virtual_bottom - height).max(virtual_top));
+
+    let previous_width = state.rendered_width.swap(width as u64, Ordering::SeqCst);
+    let previous_height = state.rendered_height.swap(height as u64, Ordering::SeqCst);
+    let size_changed = previous_width != width as u64 || previous_height != height as u64;
+    if size_changed {
+        for control in [control_a, control_b] {
+            SetWindowPos(
+                control,
+                0,
+                3,
+                3,
+                content_width,
+                content_height,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+    }
+
+    let front_index = state.front_control.load(Ordering::SeqCst);
+    let back_control = if front_index == 0 {
+        control_b
+    } else {
+        control_a
+    };
+    // The currently-front control keeps showing the last complete frame while
+    // the other control receives the matching source rectangle and scale.
+    // Any intermediate repaint therefore remains fully covered.
+    MagSetWindowSource(back_control, source);
+    MagSetWindowTransform(back_control, &mut transform);
+    RedrawWindow(
+        back_control,
+        std::ptr::null(),
         0,
+        RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+    );
+    // Wait until the back control's surface is committed before swapping the
+    // child z-order. The user always sees a complete frame, never the host's
+    // background or a half-updated scale/source pair.
+    DwmFlush();
+    SetWindowPos(
+        back_control,
+        HWND_TOP,
         3,
         3,
         content_width,
         content_height,
-        SWP_NOACTIVATE | SWP_NOZORDER,
-    );
-    let lens_x = (cursor.x - width / 2).clamp(virtual_left, (virtual_right - width).max(virtual_left));
-    let lens_y = (cursor.y - height / 2).clamp(virtual_top, (virtual_bottom - height).max(virtual_top));
-    SetWindowPos(
-        host,
-        HWND_TOPMOST,
-        lens_x,
-        lens_y,
-        width,
-        height,
         SWP_NOACTIVATE | SWP_SHOWWINDOW,
     );
+    state
+        .front_control
+        .store(if front_index == 0 { 1 } else { 0 }, Ordering::SeqCst);
+
+    let x_changed = state.rendered_lens_x.swap(lens_x, Ordering::SeqCst) != lens_x;
+    let y_changed = state.rendered_lens_y.swap(lens_y, Ordering::SeqCst) != lens_y;
+    let visible = IsWindowVisible(host) != 0;
+    if !visible {
+        SetWindowPos(
+            host,
+            HWND_TOPMOST,
+            lens_x,
+            lens_y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    } else if x_changed || y_changed || size_changed {
+        SetWindowPos(
+            host,
+            0,
+            lens_x,
+            lens_y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -862,7 +1084,7 @@ unsafe extern "system" fn magnifier_mouse_hook(
     lparam: windows_sys::Win32::Foundation::LPARAM,
 ) -> windows_sys::Win32::Foundation::LRESULT {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, MSLLHOOKSTRUCT, WM_MOUSEWHEEL,
+        CallNextHookEx, SetTimer, MSLLHOOKSTRUCT, WM_MOUSEWHEEL,
     };
     if code >= 0 {
         let Some(state) = MAGNIFIER_STATE.get() else {
@@ -876,10 +1098,29 @@ unsafe extern "system" fn magnifier_mouse_hook(
             let event = &*(lparam as *const MSLLHOOKSTRUCT);
             let delta = (event.mouseData >> 16) as i16;
             let current = state.factor_tenths.load(Ordering::SeqCst);
-            let next = if delta > 0 { current.saturating_add(5) } else { current.saturating_sub(5) };
-            state.factor_tenths.store(next.clamp(15, 80), Ordering::SeqCst);
-            state.lens_active.store(true, Ordering::SeqCst);
-            update_magnifier_lens(true);
+            let next = if delta > 0 {
+                current.saturating_add(2)
+            } else {
+                current.saturating_sub(2)
+            };
+            state
+                .factor_tenths
+                .store(next.clamp(15, 80), Ordering::SeqCst);
+            let was_active = state.lens_active.swap(true, Ordering::SeqCst);
+            if !was_active {
+                // Start the first frame at the current target. Subsequent
+                // wheel ticks are animated by the window-thread timer.
+                state
+                    .displayed_factor_milli
+                    .store(current * 100, Ordering::SeqCst);
+            }
+            let host = state.host_window.load(Ordering::SeqCst) as isize;
+            if host != 0 && !was_active {
+                // Poll only while the lens is active so modifier release can
+                // hide it. Do not reset this timer on every wheel tick: rapid
+                // scrolling must keep producing animation frames continuously.
+                SetTimer(host, 1, 16, None);
+            }
             return 1;
         }
     }
@@ -1061,12 +1302,15 @@ fn trim_process_tree_working_sets(root_pid: u32) {
 fn trim_process_tree_working_sets(_root_pid: u32) {}
 
 #[cfg(windows)]
-fn set_indexing_priority(active: bool) {
+fn set_indexer_priority(active: bool, background: bool) {
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+        GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, IDLE_PRIORITY_CLASS,
+        NORMAL_PRIORITY_CLASS,
     };
     unsafe {
-        let priority = if active {
+        let priority = if background {
+            IDLE_PRIORITY_CLASS
+        } else if active {
             BELOW_NORMAL_PRIORITY_CLASS
         } else {
             NORMAL_PRIORITY_CLASS
@@ -1076,7 +1320,11 @@ fn set_indexing_priority(active: bool) {
 }
 
 #[cfg(not(windows))]
-fn set_indexing_priority(_active: bool) {}
+fn set_indexer_priority(_active: bool, _background: bool) {}
+
+fn set_indexing_priority(active: bool) {
+    set_indexer_priority(active, INDEXER_BACKGROUNDED.load(Ordering::Relaxed));
+}
 
 fn file_name(value: &str) -> &str {
     value
@@ -4085,6 +4333,10 @@ fn run_server() -> io::Result<()> {
                     let background = request.background.unwrap_or(false);
                     let process_id = request.process_id.unwrap_or(0);
                     shared.backgrounded.store(background, Ordering::SeqCst);
+                    INDEXER_BACKGROUNDED.store(background, Ordering::SeqCst);
+                    // Background watchers remain accurate, but any incidental
+                    // cache/watcher work yields to foreground applications.
+                    set_indexer_priority(false, background);
                     if background {
                         trim_process_working_set();
                     }
@@ -4115,7 +4367,8 @@ fn run_server() -> io::Result<()> {
                 output.send(&json!({
                     "id": request.id,
                     "ok": true,
-                    "available": cfg!(windows),
+                    "available": cfg!(windows) && GLOBAL_INPUT_LISTENER_AVAILABLE.load(Ordering::SeqCst),
+                    "conflict": GLOBAL_INPUT_LISTENER_CONFLICT.load(Ordering::SeqCst),
                     "button": button,
                     "holdMs": hold_ms
                 }));
@@ -4130,6 +4383,7 @@ fn run_server() -> io::Result<()> {
                     "id": request.id,
                     "ok": true,
                     "available": magnifier_available(),
+                    "conflict": GLOBAL_INPUT_LISTENER_CONFLICT.load(Ordering::SeqCst),
                     "enabled": enabled,
                     "modifiers": modifiers,
                     "width": width,
@@ -4369,9 +4623,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::next_magnifier_factor;
     use super::{
-        contains_whole_word, fuzzy_subsequence_score, lowercase_name_signature, name_signature,
-        load_cache_index, normalize_mouse_hold_ms, normalized_path_hash, save_cache,
+        contains_whole_word, fuzzy_subsequence_score, load_cache_index, lowercase_name_signature,
+        name_signature, normalize_mouse_hold_ms, normalized_path_hash, save_cache,
         system_drive_root, validate_global_entry_count, Entry, SearchIndex,
         MINIMUM_SYSTEM_DRIVE_ENTRIES,
     };
@@ -4385,6 +4641,27 @@ mod tests {
         assert_eq!(normalize_mouse_hold_ms(0), 0);
         assert_eq!(normalize_mouse_hold_ms(1_500), 1_500);
         assert_eq!(normalize_mouse_hold_ms(10_000), 3_000);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn magnifier_factor_animation_is_monotonic_and_converges() {
+        let mut rising = 2_000;
+        for _ in 0..32 {
+            let next = next_magnifier_factor(rising, 2_500);
+            assert!(next >= rising && next <= 2_500);
+            rising = next;
+        }
+        assert_eq!(rising, 2_500);
+
+        let mut falling = 2_500;
+        for _ in 0..32 {
+            let next = next_magnifier_factor(falling, 1_500);
+            assert!(next <= falling && next >= 1_500);
+            falling = next;
+        }
+        assert_eq!(falling, 1_500);
+        assert_eq!(next_magnifier_factor(2_000, 2_000), 2_000);
     }
 
     #[test]

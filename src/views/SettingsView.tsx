@@ -390,6 +390,7 @@ export function SettingsView({
   });
   const mouseShortcutRequest = useRef(0);
   const magnifierRequest = useRef(0);
+  const magnifierSizeDragging = useRef(false);
   const mouseCaptureBlockUntil = useRef(0);
   const aiDraftRequest = useRef(0);
   const apiKeyDirty = useRef(false);
@@ -840,6 +841,15 @@ export function SettingsView({
       }));
       notify("error", error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const beginMagnifierSizeDrag = () => {
+    magnifierSizeDragging.current = true;
+  };
+
+  const finishMagnifierSizeDrag = async (patch: Pick<AppSettings, "magnifierWidth"> | Pick<AppSettings, "magnifierHeight">) => {
+    magnifierSizeDragging.current = false;
+    await commitMagnifier(patch);
   };
 
   const provider = getAiProvider(draft.ai.provider);
@@ -2124,10 +2134,20 @@ export function SettingsView({
                     step={20}
                     value={draft.magnifierWidth}
                     aria-label={ui("局部放大镜宽度", "Desktop lens width")}
-                    onChange={(event) => setDraft((current) => ({ ...current, magnifierWidth: event.currentTarget.valueAsNumber }))}
-                    onPointerUp={(event) => void commitMagnifier({ magnifierWidth: event.currentTarget.valueAsNumber })}
+                    onChange={(event) => {
+                      const magnifierWidth = event.currentTarget.valueAsNumber;
+                      setDraft((current) => ({ ...current, magnifierWidth }));
+                    }}
+                    onPointerDown={beginMagnifierSizeDrag}
+                    onPointerUp={(event) => void finishMagnifierSizeDrag({ magnifierWidth: event.currentTarget.valueAsNumber })}
+                    onPointerCancel={() => {
+                      magnifierSizeDragging.current = false;
+                    }}
                     onKeyUp={(event) => void commitMagnifier({ magnifierWidth: event.currentTarget.valueAsNumber })}
-                    onBlur={() => void commitMagnifier({ magnifierWidth: draft.magnifierWidth })}
+                    onBlur={() => {
+                      if (magnifierSizeDragging.current) void finishMagnifierSizeDrag({ magnifierWidth: draft.magnifierWidth });
+                      else void commitMagnifier({ magnifierWidth: draft.magnifierWidth });
+                    }}
                   />
                   <div className="magnifier-size-scale"><span>160 px</span><span>1200 px</span></div>
                 </div>
@@ -2143,10 +2163,20 @@ export function SettingsView({
                     step={20}
                     value={draft.magnifierHeight}
                     aria-label={ui("局部放大镜高度", "Desktop lens height")}
-                    onChange={(event) => setDraft((current) => ({ ...current, magnifierHeight: event.currentTarget.valueAsNumber }))}
-                    onPointerUp={(event) => void commitMagnifier({ magnifierHeight: event.currentTarget.valueAsNumber })}
+                    onChange={(event) => {
+                      const magnifierHeight = event.currentTarget.valueAsNumber;
+                      setDraft((current) => ({ ...current, magnifierHeight }));
+                    }}
+                    onPointerDown={beginMagnifierSizeDrag}
+                    onPointerUp={(event) => void finishMagnifierSizeDrag({ magnifierHeight: event.currentTarget.valueAsNumber })}
+                    onPointerCancel={() => {
+                      magnifierSizeDragging.current = false;
+                    }}
                     onKeyUp={(event) => void commitMagnifier({ magnifierHeight: event.currentTarget.valueAsNumber })}
-                    onBlur={() => void commitMagnifier({ magnifierHeight: draft.magnifierHeight })}
+                    onBlur={() => {
+                      if (magnifierSizeDragging.current) void finishMagnifierSizeDrag({ magnifierHeight: draft.magnifierHeight });
+                      else void commitMagnifier({ magnifierHeight: draft.magnifierHeight });
+                    }}
                   />
                   <div className="magnifier-size-scale"><span>120 px</span><span>900 px</span></div>
                 </div>

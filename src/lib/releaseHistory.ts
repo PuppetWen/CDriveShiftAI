@@ -10,6 +10,47 @@ const previousReleases: Array<{
   en: Omit<BundledReleaseNote, "version">;
 }> = [
   {
+    version: "0.1.0",
+    zh: {
+      summary: "加入 0–3000 毫秒鼠标触发滑杆、全应用字体缩放与跨程序的 Windows 局部放大镜。",
+      sections: [
+        {
+          title: "鼠标与字体设置",
+          items: [
+            "鼠标触发时长调整为 0–3000 毫秒，0 毫秒可即时触发。",
+            "全应用文字可在 50%–300% 范围内按 10% 步进调整，控件和布局保持原尺寸。"
+          ]
+        },
+        {
+          title: "全局局部放大镜",
+          items: [
+            "支持录入修饰键加滚轮的组合，在所有程序和显示器上以鼠标为中心放大。",
+            "宽度和高度可独立设置，区域带边框并隐藏放大的鼠标图标。"
+          ]
+        }
+      ]
+    },
+    en: {
+      summary: "Added a 0–3000 ms mouse trigger slider, app-wide text sizing, and a cross-application Windows desktop lens.",
+      sections: [
+        {
+          title: "Mouse and text settings",
+          items: [
+            "Mouse activation now spans 0–3000 milliseconds, including immediate activation at zero.",
+            "App text scales from 50% to 300% in ten-percent steps without resizing controls or layout."
+          ]
+        },
+        {
+          title: "Global desktop lens",
+          items: [
+            "A recorded modifier-plus-wheel gesture magnifies around the pointer across applications and displays.",
+            "Width and height are configurable independently, with a border and no magnified cursor icon."
+          ]
+        }
+      ]
+    }
+  },
+  {
     version: "0.0.12",
     zh: {
       summary: "支持直接录入鼠标侧键和中键，以毫秒滑杆设置长按时间，并加入逐条折叠的离线更新历史。",
