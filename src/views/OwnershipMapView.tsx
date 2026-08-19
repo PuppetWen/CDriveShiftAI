@@ -63,6 +63,8 @@ function zoneLabel(zone: OwnershipMapEntry["zone"], ui: UiText): string {
   return {
     "drive-root": ui("盘符根目录", "Drive root"),
     "program-files": ui("程序安装区", "Program installation area"),
+    "application-library": ui("应用库目录", "Application library"),
+    "application-data": ui("应用内部数据", "Application data"),
     "program-data": ui("全局应用数据", "Shared application data"),
     "app-data": ui("当前用户应用数据", "Current-user application data"),
     "user-profile": ui("当前用户目录", "Current-user profile")
@@ -336,6 +338,10 @@ export function OwnershipMapView({
                   {formatNumber(result.installedApplications)} {ui("条应用记录", "application records")} ·{" "}
                   {formatNumber(result.portableExecutables)} {ui("个全盘程序", "portable executables")}
                 </span>
+                <span>
+                  {formatNumber(result.scannedDirectories)} {ui("个目录已检查", "directories inspected")}
+                  {result.scanTruncated ? ui(" · 已达到扫描上限", " · scan limit reached") : ""}
+                </span>
               </>
             )}
           </div>
@@ -345,7 +351,7 @@ export function OwnershipMapView({
           <div className="ownership-loading">
             <span className="spinner" />
             <strong>{ui("正在建立", "Building")} {drive.slice(0, 2)} {ui("目录归属图谱", "directory ownership map")}</strong>
-            <p>{ui("快速扫描只读取目录元数据和卸载注册表，不递归读取文件正文。", "The fast scan reads directory metadata and uninstall registry entries without recursively reading file contents.")}</p>
+            <p>{ui("快速扫描读取目录元数据、应用库和卸载注册表，不递归读取文件正文。", "The fast scan reads directory metadata, application libraries, and uninstall registry entries without recursively reading file contents.")}</p>
           </div>
         ) : filtered.length > 0 ? (
           <div className="ownership-list">
@@ -461,7 +467,7 @@ export function OwnershipMapView({
         {result && result.scanErrors.length > 0 && (
           <div className="ownership-errors">
             <AlertTriangle size={14} />
-            {formatNumber(result.scanErrors.length)} {ui("个受权限限制的目录未能展开；系统保护区仍会保留在地图中。", "permission-restricted directories could not be expanded; protected system areas remain visible on the map.")}
+            {formatNumber(result.scanErrors.length)} {ui("个目录因权限或读取错误未能展开；系统保护区仍会保留在地图中。", "directories could not be expanded because of permissions or read errors; protected system areas remain visible on the map.")}
           </div>
         )}
       </section>

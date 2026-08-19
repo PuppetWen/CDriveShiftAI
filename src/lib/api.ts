@@ -701,9 +701,12 @@ const browserFallback: CDriveShiftApi = {
       }
     ];
     const result: OwnershipMapResult = {
+      schemaVersion: 3,
       drive,
       scannedAt: new Date().toISOString(),
       durationMs: 182,
+      scannedDirectories: 1_862,
+      scanTruncated: false,
       installedApplications: 286,
       portableExecutables: 1_462,
       entries,

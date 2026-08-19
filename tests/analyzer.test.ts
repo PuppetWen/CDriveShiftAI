@@ -2,7 +2,12 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { portableCandidateScores, summarizeDirectory } from "../electron/analyzer";
+import {
+  isDirectOwnershipApplicationLibrary,
+  ownershipCandidatePathFromExecutable,
+  portableCandidateScores,
+  summarizeDirectory
+} from "../electron/analyzer";
 import { inferKnownDirectory } from "../electron/directory-knowledge";
 import { hasSignificantAnalysisChange } from "../electron/analysis-freshness";
 import { normalizeReparseTarget } from "../electron/migration";
@@ -56,6 +61,36 @@ describe("directory ownership evidence", () => {
     );
 
     expect(candidates).toEqual([]);
+  });
+
+  it("discovers application roots inside non-system-drive libraries", () => {
+    expect(isDirectOwnershipApplicationLibrary("Game")).toBe(true);
+    expect(isDirectOwnershipApplicationLibrary("Development Tools")).toBe(true);
+    expect(isDirectOwnershipApplicationLibrary("PersonalData")).toBe(false);
+    expect(
+      ownershipCandidatePathFromExecutable(
+        "F:\\SteamLibrary\\steamapps\\common\\Baldurs Gate 3\\bin\\bg3.exe",
+        "F:\\"
+      )
+    ).toBe("F:\\SteamLibrary\\steamapps\\common\\Baldurs Gate 3");
+    expect(
+      ownershipCandidatePathFromExecutable(
+        "E:\\DevelopmentTools\\Microsoft Visual Studio\\2022\\Common7\\IDE\\devenv.exe",
+        "E:\\"
+      )
+    ).toBe("E:\\DevelopmentTools\\Microsoft Visual Studio");
+    expect(
+      ownershipCandidatePathFromExecutable(
+        "F:\\AiOperator\\Portable Canvas\\bin\\canvas.exe",
+        "F:\\"
+      )
+    ).toBe("F:\\AiOperator\\Portable Canvas");
+    expect(
+      ownershipCandidatePathFromExecutable(
+        "C:\\Program Files\\Example\\example.exe",
+        "F:\\"
+      )
+    ).toBeUndefined();
   });
 
   it("treats a standard directory signature as evidence rather than an unknown folder", () => {

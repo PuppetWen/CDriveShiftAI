@@ -473,9 +473,12 @@ function sanitizeOwnershipMap(value: unknown): OwnershipMapResult | undefined {
   if (!value || typeof value !== "object") return undefined;
   const input = value as Partial<OwnershipMapResult>;
   if (
+    input.schemaVersion !== 3 ||
     typeof input.drive !== "string" ||
     typeof input.scannedAt !== "string" ||
     typeof input.durationMs !== "number" ||
+    typeof input.scannedDirectories !== "number" ||
+    typeof input.scanTruncated !== "boolean" ||
     typeof input.installedApplications !== "number" ||
     typeof input.portableExecutables !== "number" ||
     !Array.isArray(input.entries) ||

@@ -7,79 +7,79 @@ export interface BundledReleaseNote {
 }
 
 export const bundledReleaseNotes: BundledReleaseNote = {
-  version: "0.1.1",
-  summary: "本版重点修复局部放大镜在调节尺寸与滚轮缩放时的白屏、灰帧和抖动，并加强常驻稳定性与后台效率。",
+  version: "0.1.2",
+  summary: "本版重做非系统盘归属扫描，深入识别普通安装应用、绿色便携应用和应用数据，同时修正受限目录统计。",
   sections: [
     {
-      title: "局部放大镜显示",
+      title: "深层目录扫描",
       items: [
-        "放大镜改为双缓冲画面交换：新画面准备完成后再显示，避免滚轮缩放期间闪成灰色或空白。",
-        "滚轮以鼠标所在位置为中心平滑调整倍率，采用短帧间隔插值，减少内容上下跳动后回位。",
-        "放大区域继续显示清晰边框、隐藏放大的鼠标图标，并可在截图、录屏或远程画面中正常看到。"
+        "非系统盘不再只查看根目录一两层，而是在时间和数量保护范围内递归扫描最多 8 层、60000 个目录。",
+        "结果页显示实际扫描目录数；达到时间或数量上限时会明确标记结果可能不完整。",
+        "自动跳过 node_modules、缓存、虚拟环境和系统噪声目录，兼顾覆盖率与后台资源占用。"
       ]
     },
     {
-      title: "尺寸滑杆稳定性",
+      title: "应用与绿色版识别",
       items: [
-        "宽度和高度滑杆在事件回调内立即读取数值，修复拖动后 React 事件失效导致的整页白屏。",
-        "拖动滑杆只更新并保存配置，不再误创建或显示放大镜窗口。",
-        "松开滑杆后再把最终尺寸同步给原生监听器；实际使用放大镜时严格采用用户保存的宽高。"
+        "根据深层可执行文件、卸载标记、app.asar、portable.ini 等证据识别无安装记录的绿色便携应用。",
+        "将 bin、resources、runtime、Binaries 等内部目录归并到应用根目录，减少一个应用被拆成多条记录。",
+        "解析 Steam appmanifest 文件，补充 Steam 游戏的正式名称与实际安装目录。"
       ]
     },
     {
-      title: "常驻与快捷键",
+      title: "应用数据归属",
       items: [
-        "全局监听器增加单实例互斥，避免同时运行旧版、便携版或安装版时争抢同一组按键与滚轮。",
-        "单独按修饰键不会显示放大镜；录入快捷键期间暂停全局监听，确保组合键和滚轮能够被设置页接收。",
-        "窗口渲染进程异常时自动恢复一次，降低极端情况下主界面停留在空白页的概率。"
+        "识别应用附近的 data、config、profiles、saves、logs、userdata 等数据目录并关联到对应应用。",
+        "应用库目录即使缺少注册表记录，也会依据本地文件结构给出保守的归属结果和可信度。",
+        "弱注册表名称匹配不再覆盖更可靠的目录与可执行文件证据。"
       ]
     },
     {
-      title: "资源与验证",
+      title: "受限目录与缓存",
       items: [
-        "索引器在后台运行时降低进程优先级并收缩可回收工作集，减少静默常驻时的 CPU 与内存压力。",
-        "新增原生放大镜画面、尺寸滑杆拖动和多实例监听冲突的自动化回归测试。",
-        "更新与诊断继续提供逐条折叠并可滚动的离线历史，本版将 0.1.0 收录为上一版本。"
+        "不存在的标准目录不再误报为权限受限；回收站、System Volume Information 等系统目录按系统项处理。",
+        "受限统计只记录真实读取或权限错误，并在界面中使用准确提示。",
+        "归属缓存结构升级到版本 3，旧的浅层扫描缓存会自动失效并重新扫描。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: BundledReleaseNote = {
-  version: "0.1.1",
+  version: "0.1.2",
   summary:
-    "This release fixes blank, gray, and jumping frames while resizing or zooming the desktop lens, and improves resident stability and efficiency.",
+    "This release rebuilds non-system-drive ownership discovery to find installed apps, portable apps, and application data more deeply while correcting restricted-directory reporting.",
   sections: [
     {
-      title: "Desktop lens rendering",
+      title: "Deep directory scanning",
       items: [
-        "The lens now swaps between two buffered surfaces only after a complete frame is ready, preventing blank or gray flashes during wheel zoom.",
-        "Magnification eases at short frame intervals around the pointer, reducing the jump-and-return effect.",
-        "The bordered lens still omits the magnified cursor and remains visible in screenshots, recordings, and remote sessions."
+        "Non-system drives are recursively inspected up to 8 levels and 60,000 directories instead of stopping near the root.",
+        "The result reports the actual directory count and explicitly marks scans truncated by time or quantity limits.",
+        "Dependency, cache, virtual-environment, and system-noise trees are skipped to balance coverage with background cost."
       ]
     },
     {
-      title: "Size slider stability",
+      title: "Installed and portable apps",
       items: [
-        "Width and height values are captured synchronously inside React callbacks, fixing the full-page blank screen caused by an expired event during dragging.",
-        "Dragging only previews and persists configuration; it no longer creates or shows a lens window.",
-        "The final size is sent to the native listener after release and is used exactly when the lens is activated."
+        "Deep executables, uninstall markers, app.asar, portable.ini, and similar evidence identify unpacked portable applications.",
+        "Internal bin, resources, runtime, and Binaries folders are grouped under the application root.",
+        "Steam app manifests provide official names and actual installation directories."
       ]
     },
     {
-      title: "Resident mode and shortcuts",
+      title: "Application data ownership",
       items: [
-        "A named single-instance guard prevents installed, portable, or older builds from competing for the same global keyboard and wheel hook.",
-        "Modifier keys alone do not open the lens, and global listening pauses during shortcut recording.",
-        "The main window attempts one renderer recovery after an unexpected render-process failure."
+        "Nearby data, config, profiles, saves, logs, and userdata directories are associated with their applications.",
+        "Application-library directories receive conservative local ownership evidence even without registry records.",
+        "Weak registry name matches no longer override stronger filesystem and executable evidence."
       ]
     },
     {
-      title: "Efficiency and verification",
+      title: "Restricted paths and cache",
       items: [
-        "The background indexer lowers its process priority and trims reclaimable working-set pages to reduce idle CPU and memory pressure.",
-        "Automated regression coverage now includes native lens frames, slider dragging, and multi-instance listener conflicts.",
-        "Update & diagnostics retains independently collapsible, scrollable offline history and now includes 0.1.0."
+        "Missing standard folders no longer count as access restrictions, while protected system folders are classified as system entries.",
+        "Only real read or permission failures contribute to the restricted-path warning.",
+        "Ownership cache schema version 3 invalidates stale shallow-scan results automatically."
       ]
     }
   ]

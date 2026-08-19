@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, opendir, readdir, readlink } from "node:fs/promises";
+import { lstat, opendir, readdir, readFile, readlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -19,6 +19,7 @@ import {
 import {
   getLocalDriveRoots,
   isHighRiskApplicationPath,
+  isPathWithin,
   normalizeWindowsPath,
   protectedReason,
   samePath
@@ -809,6 +810,18 @@ function classifyOwnershipDirectory(
   }
   const lower = targetPath.toLocaleLowerCase();
   const rootName = path.win32.basename(targetPath).toLocaleLowerCase();
+  if (
+    ["$recycle.bin", "config.msi", "recovery", "system volume information"].includes(
+      rootName
+    )
+  ) {
+    return {
+      category: "system",
+      risk: "blocked",
+      recommendation: "keep",
+      explanation: "Windows 在此磁盘上维护的系统保护目录，不应展开、迁移或删除。"
+    };
+  }
   if (protectedReason(targetPath)) {
     return {
       category: "system",
@@ -825,7 +838,41 @@ function classifyOwnershipDirectory(
       explanation: "缓存或临时数据，优先使用所属应用的清理与存储位置设置。"
     };
   }
-  if (zone === "program-files" || isHighRiskApplicationPath(targetPath)) {
+  if (
+    ["node_modules", ".gradle", ".cargo", ".nuget", ".cache", ".venv", "target"].includes(
+      rootName
+    ) ||
+    /^(project|repo|source|workspace)[ _.\-]/i.test(rootName) ||
+    /\\(development|projects?|repos?|source|workspace|code)(\\|$)/i.test(lower)
+  ) {
+    return {
+      category: "development",
+      risk: "low",
+      recommendation: "migrate",
+      explanation: "开发工程、依赖或工具链数据，通常适合迁移到容量更大的磁盘。"
+    };
+  }
+  if (/\\(virtualmachines?|vms?)(\\|$)/i.test(lower)) {
+    return {
+      category: "application-data",
+      risk: "medium",
+      recommendation: "review",
+      explanation: "虚拟机镜像或运行数据；迁移前应关闭虚拟机并在管理程序中更新路径。"
+    };
+  }
+  if (/\\personaldata(\\|$)/i.test(lower)) {
+    return {
+      category: "user-data",
+      risk: "low",
+      recommendation: "migrate",
+      explanation: "用户集中保存的数据目录，迁移前应确认同步软件和快捷方式。"
+    };
+  }
+  if (
+    zone === "program-files" ||
+    zone === "application-library" ||
+    isHighRiskApplicationPath(targetPath)
+  ) {
     return {
       category: "application",
       risk: "high",
@@ -833,25 +880,16 @@ function classifyOwnershipDirectory(
       explanation: "应用安装目录，可能包含程序、更新器、服务或运行库。"
     };
   }
-  if (zone === "app-data" || zone === "program-data") {
+  if (
+    zone === "app-data" ||
+    zone === "application-data" ||
+    zone === "program-data"
+  ) {
     return {
       category: "application-data",
       risk: "medium",
       recommendation: "review",
       explanation: "应用运行数据、配置或共享数据；所属应用可能安装在其他磁盘。"
-    };
-  }
-  if (
-    ["node_modules", ".gradle", ".cargo", ".nuget", ".cache", ".venv", "target"].includes(
-      rootName
-    ) ||
-    /\\(development|projects?|repos?|source|workspace)(\\|$)/i.test(lower)
-  ) {
-    return {
-      category: "development",
-      risk: "low",
-      recommendation: "migrate",
-      explanation: "开发工程、依赖或工具链数据，通常适合迁移到容量更大的磁盘。"
     };
   }
   if (/\\(documents|downloads|desktop|pictures|videos|music)(\\|$)/i.test(lower)) {
@@ -940,6 +978,106 @@ interface OwnershipPathCandidate {
   path: string;
   name: string;
   zone: OwnershipMapEntry["zone"];
+  ownerHint?: OwnershipCandidate;
+}
+
+const OWNERSHIP_MAP_SCHEMA_VERSION = 3;
+const DIRECT_APPLICATION_LIBRARY_KEYS = new Set([
+  "application",
+  "applications",
+  "app",
+  "apps",
+  "commontools",
+  "developmenttools",
+  "epicgames",
+  "game",
+  "gamelibrary",
+  "games",
+  "goggames",
+  "portableapps",
+  "programs",
+  "software",
+  "tool",
+  "tools",
+  "xboxgames"
+]);
+const STEAM_LIBRARY_KEYS = new Set(["steam", "steamlibrary"]);
+const NESTED_DATA_LIBRARY_KEYS = new Set([
+  "code",
+  "personaldata",
+  "project",
+  "projects",
+  "repo",
+  "repos",
+  "source",
+  "sources",
+  "virtualmachine",
+  "virtualmachines",
+  "vm",
+  "vms",
+  "work",
+  "workspace",
+  "workspaces"
+]);
+
+function applicationLibraryKey(value: string): string {
+  return compactIdentity(value);
+}
+
+export function isDirectOwnershipApplicationLibrary(value: string): boolean {
+  return DIRECT_APPLICATION_LIBRARY_KEYS.has(applicationLibraryKey(value));
+}
+
+export function ownershipCandidatePathFromExecutable(
+  executablePath: string,
+  inputDrive: string
+): string | undefined {
+  let normalizedExecutable: string;
+  let drive: string;
+  try {
+    normalizedExecutable = normalizeWindowsPath(executablePath);
+    drive = normalizeWindowsPath(inputDrive);
+  } catch {
+    return undefined;
+  }
+  if (!samePath(path.win32.parse(normalizedExecutable).root, drive)) return undefined;
+  const relative = path.win32.relative(drive, normalizedExecutable);
+  const parts = relative.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 2 || relative.startsWith("..")) return undefined;
+
+  const lowerParts = parts.map((part) => part.toLocaleLowerCase());
+  const steamAppsIndex = lowerParts.findIndex(
+    (part, index) => part === "steamapps" && lowerParts[index + 1] === "common"
+  );
+  if (steamAppsIndex >= 0 && parts[steamAppsIndex + 2]) {
+    return path.win32.join(drive, ...parts.slice(0, steamAppsIndex + 3));
+  }
+
+  const firstKey = applicationLibraryKey(parts[0]);
+  if (
+    (DIRECT_APPLICATION_LIBRARY_KEYS.has(firstKey) ||
+      ["programfiles", "programfilesx86"].includes(firstKey)) &&
+    parts[1]
+  ) {
+    return path.win32.join(drive, parts[0], parts[1]);
+  }
+  if (
+    parts.length >= 3 &&
+    !["recovery", "recyclebin", "systemvolumeinformation", "users", "windows"].includes(
+      firstKey
+    )
+  ) {
+    return path.win32.join(drive, parts[0], parts[1]);
+  }
+  if (parts.length === 2 && !["recovery", "users", "windows"].includes(firstKey)) {
+    return path.win32.join(drive, parts[0]);
+  }
+  return undefined;
+}
+
+function isMissingOwnershipContainer(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 async function listOwnershipChildren(
@@ -959,11 +1097,435 @@ async function listOwnershipChildren(
         zone
       }));
   } catch (error) {
-    if (scanErrors.length < 24) {
+    if (!isMissingOwnershipContainer(error) && scanErrors.length < 24) {
       scanErrors.push(`${container}: ${error instanceof Error ? error.message : String(error)}`);
     }
     return [];
   }
+}
+
+async function listSteamManifestCandidates(
+  libraryRoot: string,
+  scanErrors: string[]
+): Promise<OwnershipPathCandidate[]> {
+  const steamApps = path.join(libraryRoot, "steamapps");
+  let manifests;
+  try {
+    manifests = (await readdir(steamApps, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && /^appmanifest_\d+\.acf$/i.test(entry.name))
+      .slice(0, 2_000);
+  } catch (error) {
+    if (!isMissingOwnershipContainer(error) && scanErrors.length < 24) {
+      scanErrors.push(`${steamApps}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return [];
+  }
+
+  const candidates: OwnershipPathCandidate[] = [];
+  for (let offset = 0; offset < manifests.length; offset += 24) {
+    const parsed = await Promise.all(
+      manifests.slice(offset, offset + 24).map(async (manifest) => {
+        const manifestPath = path.join(steamApps, manifest.name);
+        try {
+          const content = await readFile(manifestPath, "utf8");
+          const name = content.match(/"name"\s+"([^"]+)"/i)?.[1]?.trim();
+          const installDirectory = content
+            .match(/"installdir"\s+"([^"]+)"/i)?.[1]
+            ?.trim();
+          if (!name || !installDirectory) return undefined;
+          const applicationPath = path.join(steamApps, "common", installDirectory);
+          return {
+            path: applicationPath,
+            name: installDirectory,
+            zone: "application-library" as const,
+            ownerHint: {
+              appName: name,
+              installLocation: applicationPath,
+              confidence: 0.99,
+              reason: "Steam 应用清单记录了正式名称和安装目录",
+              evidence: [`Steam 清单：${manifestPath}`, `安装目录：${applicationPath}`]
+            }
+          };
+        } catch {
+          return undefined;
+        }
+      })
+    );
+    candidates.push(
+      ...parsed.filter((item): item is NonNullable<typeof item> => Boolean(item))
+    );
+  }
+  return candidates;
+}
+
+const OWNERSHIP_DEEP_MAX_DIRECTORIES = 60_000;
+const OWNERSHIP_DEEP_MAX_DEPTH = 8;
+const OWNERSHIP_DEEP_MAX_CANDIDATES = 12_000;
+const OWNERSHIP_DEEP_DEADLINE_MS = 15_000;
+const OWNERSHIP_DEEP_SKIP_KEYS = new Set([
+  "git",
+  "hg",
+  "svn",
+  "cache",
+  "caches",
+  "configmsi",
+  "nodemodules",
+  "nodemodulescache",
+  "obj",
+  "recovery",
+  "recyclebin",
+  "sitepackages",
+  "systemvolumeinformation",
+  "target",
+  "temp",
+  "tmp",
+  "venv",
+  "windows",
+  "windowsold",
+  "pycache"
+]);
+const OWNERSHIP_APPLICATION_DATA_KEYS = new Set([
+  "cache",
+  "caches",
+  "config",
+  "configuration",
+  "data",
+  "database",
+  "databases",
+  "db",
+  "logs",
+  "profile",
+  "profiles",
+  "save",
+  "saved",
+  "savegames",
+  "saves",
+  "storage",
+  "userdata"
+]);
+const OWNERSHIP_PORTABLE_INTERNAL_KEYS = new Set([
+  "appasarunpacked",
+  "bin",
+  "binaries",
+  "build",
+  "cliplugins",
+  "common7",
+  "commonredist",
+  "crashreporter",
+  "data",
+  "directx",
+  "frontend",
+  "ide",
+  "jre",
+  "lib",
+  "publish",
+  "pydeps",
+  "python",
+  "redist",
+  "release",
+  "resources",
+  "runtime",
+  "script",
+  "scripts",
+  "ship",
+  "steamsettings",
+  "modelrunner",
+  "win32",
+  "win64",
+  "windows",
+  "windowsnosteam",
+  "x64",
+  "x86"
+]);
+const OWNERSHIP_STRONG_APP_MARKERS = new Set([
+  "app.asar",
+  "appxmanifest.xml",
+  "portable.ini",
+  "steam_appid.txt"
+]);
+const OWNERSHIP_GENERIC_DISCOVERED_EXECUTABLES = new Set([
+  ...GENERIC_EXECUTABLE_NAMES,
+  "7za",
+  "7zr",
+  "ffmpeg",
+  "java",
+  "javaw",
+  "node",
+  "python",
+  "pythonw"
+]);
+const OWNERSHIP_GENERIC_PORTABLE_ROOT_KEYS = new Set([
+  "emulator",
+  "modified",
+  "mygame",
+  "switch",
+  "voice",
+  "win"
+]);
+
+interface OwnershipObservedDirectory {
+  path: string;
+  name: string;
+  depth: number;
+}
+
+interface OwnershipDeepDiscovery {
+  candidates: OwnershipPathCandidate[];
+  executablePaths: string[];
+  scannedDirectories: number;
+  truncated: boolean;
+}
+
+function shouldSkipDeepOwnershipDirectory(name: string): boolean {
+  const lower = name.toLocaleLowerCase();
+  return (
+    lower === ".git" ||
+    lower === ".hg" ||
+    lower === ".svn" ||
+    lower === ".venv" ||
+    OWNERSHIP_DEEP_SKIP_KEYS.has(applicationLibraryKey(name))
+  );
+}
+
+function portableLeafRootFromExecutable(
+  executablePath: string,
+  drive: string
+): string | undefined {
+  let normalized: string;
+  try {
+    normalized = normalizeWindowsPath(executablePath);
+  } catch {
+    return undefined;
+  }
+  if (!samePath(path.win32.parse(normalized).root, drive)) return undefined;
+  const relative = path.win32.relative(drive, normalized);
+  const parts = relative.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 2 || relative.startsWith("..")) return undefined;
+  const directoryParts = parts.slice(0, -1);
+  const internalIndex = directoryParts.findIndex((part, index) => {
+    if (index === 0) return false;
+    const key = applicationLibraryKey(part);
+    return (
+      part.startsWith(".") ||
+      OWNERSHIP_PORTABLE_INTERNAL_KEYS.has(key) ||
+      /^data[_-].*(windows|x64|x86)/i.test(part)
+    );
+  });
+  if (internalIndex > 0) directoryParts.splice(internalIndex);
+  while (
+    directoryParts.length > 1 &&
+    OWNERSHIP_PORTABLE_INTERNAL_KEYS.has(applicationLibraryKey(directoryParts.at(-1) ?? ""))
+  ) {
+    directoryParts.pop();
+  }
+  while (
+    directoryParts.length > 1 &&
+    OWNERSHIP_GENERIC_PORTABLE_ROOT_KEYS.has(
+      applicationLibraryKey(directoryParts.at(-1) ?? "")
+    )
+  ) {
+    directoryParts.pop();
+  }
+  if (directoryParts.length === 0) return undefined;
+  return path.win32.join(drive, ...directoryParts);
+}
+
+function portableOwnerHint(
+  applicationRoot: string,
+  executablePaths: string[]
+): OwnershipCandidate {
+  const rootName = path.win32.basename(applicationRoot.replace(/[\\/]+$/, ""));
+  const rootCompact = compactIdentity(rootName);
+  const ranked = executablePaths
+    .map((executablePath) => {
+      const stem = path.win32.basename(executablePath, path.win32.extname(executablePath));
+      const stemCompact = compactIdentity(stem);
+      const direct = samePath(path.win32.dirname(executablePath), applicationRoot);
+      const generic = OWNERSHIP_GENERIC_DISCOVERED_EXECUTABLES.has(
+        stem.toLocaleLowerCase()
+      );
+      const nameMatch =
+        rootCompact.length >= 3 &&
+        stemCompact.length >= 3 &&
+        (rootCompact.includes(stemCompact) || stemCompact.includes(rootCompact));
+      return {
+        executablePath,
+        stem,
+        score: (generic ? -4 : 0) + (direct ? 5 : 0) + (nameMatch ? 6 : 0)
+      };
+    })
+    .sort((first, second) => second.score - first.score);
+  const primary = ranked[0];
+  const genericRoot = OWNERSHIP_GENERIC_PORTABLE_ROOT_KEYS.has(
+    applicationLibraryKey(rootName)
+  );
+  const appName =
+    rootName &&
+    !["app", "application", "program", "software"].includes(rootName.toLocaleLowerCase()) &&
+    !genericRoot
+      ? rootName
+      : rootName || primary?.stem;
+  const directExecutable = ranked.some(
+    (item) => samePath(path.win32.dirname(item.executablePath), applicationRoot)
+  );
+  const samples = ranked.slice(0, 3).map((item) => item.executablePath);
+  return {
+    appName,
+    installLocation: applicationRoot,
+    confidence: genericRoot ? 0.44 : directExecutable ? 0.86 : 0.68,
+    reason: genericRoot
+      ? "目录包含多个深层可执行程序，可能是绿色应用集合"
+      : directExecutable
+        ? "递归扫描在目录根部发现可执行程序"
+        : "递归扫描在目录内部发现可执行程序",
+    evidence: [
+      `绿色/便携程序目录：${applicationRoot}`,
+      ...samples.map((sample) => `发现可执行文件：${sample}`)
+    ]
+  };
+}
+
+async function discoverDeepOwnershipCandidates(
+  drive: string,
+  roots: OwnershipPathCandidate[],
+  scanErrors: string[]
+): Promise<OwnershipDeepDiscovery> {
+  const started = performance.now();
+  const queue = roots
+    .filter((item) => !shouldSkipDeepOwnershipDirectory(item.name))
+    .map((item) => ({ path: item.path, depth: 1 }));
+  const observed: OwnershipObservedDirectory[] = [];
+  const candidates: OwnershipPathCandidate[] = [];
+  const executablePaths = new Set<string>();
+  const markerDirectories = new Set<string>();
+  let scannedDirectories = 0;
+  let truncated = false;
+
+  while (queue.length > 0) {
+    if (
+      scannedDirectories >= OWNERSHIP_DEEP_MAX_DIRECTORIES ||
+      performance.now() - started >= OWNERSHIP_DEEP_DEADLINE_MS
+    ) {
+      truncated = true;
+      break;
+    }
+    const current = queue.shift()!;
+    let directory;
+    try {
+      directory = await opendir(current.path);
+      scannedDirectories += 1;
+    } catch (error) {
+      if (!isMissingOwnershipContainer(error) && scanErrors.length < 24) {
+        scanErrors.push(
+          `${current.path}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      continue;
+    }
+
+    for await (const entry of directory) {
+      const entryPath = path.join(current.path, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        const depth = current.depth + 1;
+        const skipped = shouldSkipDeepOwnershipDirectory(entry.name);
+        if (!skipped) {
+          observed.push({ path: entryPath, name: entry.name, depth });
+          if (depth <= 3 && candidates.length < OWNERSHIP_DEEP_MAX_CANDIDATES) {
+            candidates.push({ path: entryPath, name: entry.name, zone: "drive-root" });
+          }
+          if (depth < OWNERSHIP_DEEP_MAX_DEPTH) {
+            queue.push({ path: entryPath, depth });
+          }
+        }
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const lowerName = entry.name.toLocaleLowerCase();
+      if (lowerName.endsWith(".exe")) executablePaths.add(entryPath);
+      if (
+        OWNERSHIP_STRONG_APP_MARKERS.has(lowerName) ||
+        /^unins\d*\.dat$/i.test(lowerName)
+      ) {
+        markerDirectories.add(current.path);
+      }
+    }
+  }
+
+  const executablesByRoot = new Map<string, Set<string>>();
+  const pathByRoot = new Map<string, string>();
+  const appendExecutableRoot = (root: string | undefined, executablePath: string) => {
+    if (!root || samePath(root, drive)) return;
+    const key = root.toLocaleLowerCase();
+    pathByRoot.set(key, root);
+    const values = executablesByRoot.get(key) ?? new Set<string>();
+    values.add(executablePath);
+    executablesByRoot.set(key, values);
+  };
+  for (const executablePath of executablePaths) {
+    const stem = path.win32.basename(
+      executablePath,
+      path.win32.extname(executablePath)
+    );
+    if (!OWNERSHIP_GENERIC_DISCOVERED_EXECUTABLES.has(stem.toLocaleLowerCase())) {
+      appendExecutableRoot(
+        ownershipCandidatePathFromExecutable(executablePath, drive),
+        executablePath
+      );
+      appendExecutableRoot(
+        portableLeafRootFromExecutable(executablePath, drive),
+        executablePath
+      );
+    }
+  }
+  for (const markerDirectory of markerDirectories) {
+    const markerRoot =
+      portableLeafRootFromExecutable(path.join(markerDirectory, "application.exe"), drive) ??
+      markerDirectory;
+    const key = markerRoot.toLocaleLowerCase();
+    pathByRoot.set(key, markerRoot);
+    if (!executablesByRoot.has(key)) executablesByRoot.set(key, new Set());
+  }
+
+  const ownerByRoot = new Map<string, OwnershipCandidate>();
+  for (const [key, values] of executablesByRoot) {
+    const applicationRoot = pathByRoot.get(key) ?? key;
+    const executableValues = [...values];
+    const owner = portableOwnerHint(applicationRoot, executableValues);
+    ownerByRoot.set(key, owner);
+    const inferredZone = zoneForPath(applicationRoot);
+    candidates.push({
+      path: applicationRoot,
+      name: path.win32.basename(applicationRoot.replace(/[\\/]+$/, "")),
+      zone: inferredZone === "drive-root" ? "application-library" : inferredZone,
+      ownerHint: owner
+    });
+  }
+
+  const sortedRoots = [...ownerByRoot.keys()].sort((first, second) => second.length - first.length);
+  for (const item of observed) {
+    if (!OWNERSHIP_APPLICATION_DATA_KEYS.has(applicationLibraryKey(item.name))) continue;
+    const ownerRoot = sortedRoots.find((root) => isPathWithin(item.path, root));
+    if (!ownerRoot) continue;
+    const relativeDepth = path.win32
+      .relative(ownerRoot, item.path)
+      .split(/[\\/]+/)
+      .filter(Boolean).length;
+    if (relativeDepth > 2) continue;
+    candidates.push({
+      path: item.path,
+      name: item.name,
+      zone: "application-data",
+      ownerHint: ownerByRoot.get(ownerRoot)
+    });
+  }
+
+  return {
+    candidates: candidates.slice(0, OWNERSHIP_DEEP_MAX_CANDIDATES),
+    executablePaths: [...executablePaths],
+    scannedDirectories,
+    truncated
+  };
 }
 
 export async function scanOwnershipMap(
@@ -979,10 +1541,24 @@ export async function scanOwnershipMap(
   const scanErrors: string[] = [];
   const candidates = new Map<string, OwnershipPathCandidate>();
   const append = (items: OwnershipPathCandidate[]) => {
-    for (const item of items) candidates.set(item.path.toLocaleLowerCase(), item);
+    for (const item of items) {
+      const key = item.path.toLocaleLowerCase();
+      const existing = candidates.get(key);
+      candidates.set(
+        key,
+        existing
+          ? {
+              ...existing,
+              ...item,
+              ownerHint: item.ownerHint ?? existing.ownerHint
+            }
+          : item
+      );
+    }
   };
 
-  append(await listOwnershipChildren(drive, "drive-root", scanErrors, 800));
+  const rootCandidates = await listOwnershipChildren(drive, "drive-root", scanErrors, 800);
+  append(rootCandidates);
 
   for (const container of [
     path.join(drive, "Program Files"),
@@ -993,6 +1569,36 @@ export async function scanOwnershipMap(
   append(
     await listOwnershipChildren(path.join(drive, "ProgramData"), "program-data", scanErrors)
   );
+
+  for (const rootCandidate of rootCandidates) {
+    const key = applicationLibraryKey(rootCandidate.name);
+    if (DIRECT_APPLICATION_LIBRARY_KEYS.has(key)) {
+      append(
+        await listOwnershipChildren(
+          rootCandidate.path,
+          "application-library",
+          scanErrors,
+          2_400
+        )
+      );
+    }
+    if (STEAM_LIBRARY_KEYS.has(key)) {
+      append(
+        await listOwnershipChildren(
+          path.join(rootCandidate.path, "steamapps", "common"),
+          "application-library",
+          scanErrors,
+          2_400
+        )
+      );
+      append(await listSteamManifestCandidates(rootCandidate.path, scanErrors));
+    }
+    if (NESTED_DATA_LIBRARY_KEYS.has(key)) {
+      append(
+        await listOwnershipChildren(rootCandidate.path, "drive-root", scanErrors, 2_400)
+      );
+    }
+  }
 
   const currentProfile = normalizeWindowsPath(os.homedir());
   if (samePath(path.parse(currentProfile).root, drive)) {
@@ -1006,7 +1612,55 @@ export async function scanOwnershipMap(
     }
   }
 
+  const deepDiscovery = samePath(path.parse(currentProfile).root, drive)
+    ? {
+        candidates: [] as OwnershipPathCandidate[],
+        executablePaths: [] as string[],
+        scannedDirectories: candidates.size,
+        truncated: false
+      }
+    : await discoverDeepOwnershipCandidates(drive, rootCandidates, scanErrors);
+  append(deepDiscovery.candidates);
+  const allExecutablePaths = [
+    ...new Set([...deepDiscovery.executablePaths, ...executablePaths])
+  ].slice(0, 60_000);
+
   const applications = await listInstalledApplications();
+  for (const application of applications) {
+    if (!application.installLocation) continue;
+    try {
+      const installLocation = normalizeWindowsPath(application.installLocation);
+      if (
+        samePath(path.win32.parse(installLocation).root, drive) &&
+        !samePath(installLocation, drive)
+      ) {
+        const inferredZone = zoneForPath(installLocation);
+        append([
+          {
+            path: installLocation,
+            name:
+              path.win32.basename(installLocation.replace(/[\\/]+$/, "")) ||
+              application.name,
+            zone: inferredZone === "drive-root" ? "application-library" : inferredZone
+          }
+        ]);
+      }
+    } catch {
+      // Some uninstall records store command lines instead of directory paths.
+    }
+  }
+  for (const executablePath of allExecutablePaths) {
+    const applicationPath = ownershipCandidatePathFromExecutable(executablePath, drive);
+    if (!applicationPath) continue;
+    const inferredZone = zoneForPath(applicationPath);
+    append([
+      {
+        path: applicationPath,
+        name: path.win32.basename(applicationPath.replace(/[\\/]+$/, "")),
+        zone: inferredZone === "drive-root" ? "application-library" : inferredZone
+      }
+    ]);
+  }
   const preparedApplications = applications.map(prepareApplication);
   const candidateItems = [...candidates.values()];
   const entries: OwnershipMapEntry[] = [];
@@ -1047,10 +1701,11 @@ export async function scanOwnershipMap(
                 evidence: known.evidence
               }
             : undefined;
-        const ownershipCandidates = [
+        const ownershipCandidates: OwnershipCandidate[] = [
+          ...(item.ownerHint ? [item.ownerHint] : []),
           ...(knownCandidate ? [knownCandidate] : []),
           ...installedCandidates,
-          ...portableCandidateScores(item.path, executablePaths)
+          ...portableCandidateScores(item.path, allExecutablePaths)
         ]
           .sort((a, b) => b.confidence - a.confidence)
           .filter(
@@ -1061,8 +1716,24 @@ export async function scanOwnershipMap(
                   candidate.appName.toLocaleLowerCase()
               ) === index
           );
+        if (
+          item.zone === "application-library" &&
+          (ownershipCandidates.length === 0 ||
+            (!item.ownerHint && (ownershipCandidates[0]?.confidence ?? 0) < 0.52))
+        ) {
+          ownershipCandidates.push({
+            appName: item.name,
+            installLocation: item.path,
+            confidence: 0.52,
+            reason: "目录位于已识别的应用库中",
+            evidence: [`应用库目录：${item.path}`, "未发现注册表记录，可能是绿色或手动复制的程序。"]
+          });
+          ownershipCandidates.sort((a, b) => b.confidence - a.confidence);
+        }
         return {
-          ...item,
+          path: item.path,
+          name: item.name,
+          zone: item.zone,
           ...classification,
           owner: ownershipCandidates[0],
           candidateCount: ownershipCandidates.length,
@@ -1078,11 +1749,14 @@ export async function scanOwnershipMap(
     return riskOrder[a.risk] - riskOrder[b.risk] || a.name.localeCompare(b.name, "zh-CN");
   });
   return {
+    schemaVersion: OWNERSHIP_MAP_SCHEMA_VERSION,
     drive,
     scannedAt: new Date().toISOString(),
     durationMs: performance.now() - started,
+    scannedDirectories: Math.max(deepDiscovery.scannedDirectories, candidateItems.length),
+    scanTruncated: deepDiscovery.truncated,
     installedApplications: applications.length,
-    portableExecutables: executablePaths.length,
+    portableExecutables: allExecutablePaths.length,
     entries,
     scanErrors
   };

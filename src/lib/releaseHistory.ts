@@ -10,6 +10,47 @@ const previousReleases: Array<{
   en: Omit<BundledReleaseNote, "version">;
 }> = [
   {
+    version: "0.1.1",
+    zh: {
+      summary: "修复局部放大镜调节尺寸及滚轮缩放时的白屏、灰帧和抖动，并降低后台资源占用。",
+      sections: [
+        {
+          title: "放大镜与滑杆",
+          items: [
+            "放大镜采用双缓冲画面交换，以鼠标为中心平滑缩放并隐藏放大的鼠标图标。",
+            "尺寸滑杆只保存配置，松开后才同步最终宽高，修复拖动时整页白屏。"
+          ]
+        },
+        {
+          title: "常驻稳定性",
+          items: [
+            "全局监听增加单实例互斥，快捷键录入期间暂停监听。",
+            "后台索引器降低优先级并收缩可回收工作集。"
+          ]
+        }
+      ]
+    },
+    en: {
+      summary: "Fixed blank, gray, and jumping desktop-lens frames during resizing and wheel zoom, while reducing background resource use.",
+      sections: [
+        {
+          title: "Lens and sliders",
+          items: [
+            "Double-buffered frames zoom smoothly around the pointer and omit the magnified cursor.",
+            "Size sliders only save configuration and synchronize final dimensions on release, fixing full-page blanking."
+          ]
+        },
+        {
+          title: "Resident stability",
+          items: [
+            "Global listeners use a single-instance guard and pause during shortcut recording.",
+            "The background indexer lowers priority and trims reclaimable working-set pages."
+          ]
+        }
+      ]
+    }
+  },
+  {
     version: "0.1.0",
     zh: {
       summary: "加入 0–3000 毫秒鼠标触发滑杆、全应用字体缩放与跨程序的 Windows 局部放大镜。",

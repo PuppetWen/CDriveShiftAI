@@ -345,7 +345,14 @@ export interface AnalysisResult {
 export interface OwnershipMapEntry {
   path: string;
   name: string;
-  zone: "drive-root" | "program-files" | "program-data" | "app-data" | "user-profile";
+  zone:
+    | "drive-root"
+    | "program-files"
+    | "application-library"
+    | "application-data"
+    | "program-data"
+    | "app-data"
+    | "user-profile";
   category: AnalysisResult["category"];
   risk: AnalysisResult["risk"];
   recommendation: AnalysisResult["recommendation"];
@@ -356,9 +363,12 @@ export interface OwnershipMapEntry {
 }
 
 export interface OwnershipMapResult {
+  schemaVersion: number;
   drive: string;
   scannedAt: string;
   durationMs: number;
+  scannedDirectories: number;
+  scanTruncated: boolean;
   installedApplications: number;
   portableExecutables: number;
   entries: OwnershipMapEntry[];
