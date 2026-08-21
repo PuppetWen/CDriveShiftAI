@@ -4,6 +4,7 @@ import {
   access,
   mkdir,
   open,
+  readdir,
   readFile,
   rename,
   rm,
@@ -15,7 +16,8 @@ import path from "node:path";
 import { logger, serializeError } from "./logger";
 import {
   launchUpdaterHelper,
-  prepareUpdaterExecutable
+  prepareUpdaterExecutable,
+  updateRunnerDirectoryForExecutable
 } from "./update-launcher";
 
 const RELEASE_API =
@@ -802,17 +804,14 @@ export class UpdateService {
       throw new Error("更新助手缺失，已保留下载包但不会执行替换");
     }
     const helperPath = path.join(stagingDir, "cshift-updater.exe");
-    const runnerDirectory = path.join(
-      updateDistributionParent(),
-      "CDriveShiftAI-Update-Runner",
-      this.state.latestVersion!
-    );
+    const runnerDirectory = updateRunnerDirectoryForExecutable(targetPath);
     let fallbackHelperPath = path.join(
       runnerDirectory,
-      "CDriveShiftAI-Update.exe"
+      `CDriveShiftAI-Update-${this.state.latestVersion!}.exe`
     );
     await prepareUpdaterExecutable(helperSource, helperPath);
     try {
+      await rm(runnerDirectory, { recursive: true, force: true });
       await prepareUpdaterExecutable(helperSource, fallbackHelperPath);
     } catch (error) {
       logger.warn("update.fallback_helper_prepare_failed", {
@@ -881,16 +880,38 @@ function safeUpdateStaging(candidate: string): boolean {
 }
 
 function safeUpdateRunner(candidate: string): boolean {
-  return path
-    .resolve(candidate)
-    .split(path.sep)
-    .some(
-      (segment) =>
-        segment.toLocaleLowerCase() === "cdriveshiftai-update-runner"
-    );
+  const resolved = path.resolve(candidate);
+  const internal = path.resolve(
+    updateRunnerDirectoryForExecutable(distributionExecutable())
+  );
+  const legacyRoot = path.resolve(
+    updateDistributionParent(),
+    "CDriveShiftAI-Update-Runner"
+  );
+  return (
+    resolved.toLocaleLowerCase() === internal.toLocaleLowerCase() ||
+    resolved.toLocaleLowerCase().startsWith(
+      `${legacyRoot.toLocaleLowerCase()}${path.sep}`
+    )
+  );
+}
+
+async function removeEmptyLegacyUpdateRunner(): Promise<void> {
+  const legacyRoot = path.join(
+    updateDistributionParent(),
+    "CDriveShiftAI-Update-Runner"
+  );
+  try {
+    if ((await readdir(legacyRoot)).length === 0) {
+      await rm(legacyRoot, { recursive: true, force: true });
+    }
+  } catch {
+    // A missing, non-empty, or temporarily locked legacy directory is left alone.
+  }
 }
 
 export async function completePendingUpdate(): Promise<void> {
+  await removeEmptyLegacyUpdateRunner();
   const markerIndex = process.argv.indexOf("--update-staging");
   if (markerIndex < 0) return;
   const stagingDir = process.argv[markerIndex + 1];
@@ -921,6 +942,7 @@ export async function completePendingUpdate(): Promise<void> {
         if (plan.runnerDirectory && safeUpdateRunner(plan.runnerDirectory)) {
           await rm(plan.runnerDirectory, { recursive: true, force: true });
         }
+        await removeEmptyLegacyUpdateRunner();
       } catch {
         if (remaining > 0) {
           setTimeout(() => void cleanup(remaining - 1), 1_500);

@@ -6,11 +6,21 @@ import path from "node:path";
 import { logger, serializeError } from "./logger";
 
 const RETRY_DELAYS_MS = [0, 300, 900];
+const INTERNAL_RUNNER_DIRECTORY = ".cdriveshiftai-update-runner";
 
 type SpawnProcess = typeof spawn;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function updateRunnerDirectoryForExecutable(
+  executablePath: string
+): string {
+  return path.join(
+    path.dirname(path.resolve(executablePath)),
+    INTERNAL_RUNNER_DIRECTORY
+  );
 }
 
 async function sha512(candidate: string): Promise<string> {

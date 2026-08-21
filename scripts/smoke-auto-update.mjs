@@ -48,10 +48,12 @@ const staging = path.join(distribution, ".cdriveshiftai-update", currentVersion)
 const packagePath = path.join(staging, "CDriveShiftAI-x64-portable.exe");
 const runnerDirectory = path.join(
   distribution,
-  "CDriveShiftAI-Update-Runner",
-  currentVersion
+  ".cdriveshiftai-update-runner"
 );
-const helperPath = path.join(runnerDirectory, "CDriveShiftAI-Update.exe");
+const helperPath = path.join(
+  runnerDirectory,
+  `CDriveShiftAI-Update-${currentVersion}.exe`
+);
 const planPath = path.join(staging, "update-plan.json");
 const backupPath = path.join(staging, "previous-version.exe");
 const successMarker = path.join(staging, "update-success.json");

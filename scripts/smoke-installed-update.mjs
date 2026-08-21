@@ -37,7 +37,14 @@ const dataDirectory = path.join(installDirectory, ".cdriveshiftai-data");
 const sentinel = path.join(dataDirectory, "update-sentinel.txt");
 const staging = path.join(testRoot, ".cdriveshiftai-update", currentVersion);
 const packagePath = path.join(staging, "CDriveShiftAI-x64.exe");
-const helperPath = path.join(staging, "cshift-updater.exe");
+const runnerDirectory = path.join(
+  installDirectory,
+  ".cdriveshiftai-update-runner"
+);
+const helperPath = path.join(
+  runnerDirectory,
+  `CDriveShiftAI-Update-${currentVersion}.exe`
+);
 const planPath = path.join(staging, "update-plan.json");
 const backupPath = path.join(staging, "previous-version");
 const successMarker = path.join(staging, "update-success.json");
@@ -230,6 +237,7 @@ try {
   }
 
   await mkdir(dataDirectory, { recursive: true });
+  await mkdir(runnerDirectory, { recursive: true });
   await writeFile(sentinel, "preserve-index-settings-migrations", "utf8");
   await copyFile(newInstaller, packagePath);
   await copyFile(helperSource, helperPath);
@@ -249,7 +257,8 @@ try {
         successMarker,
         expectedVersion: currentVersion,
         expectedSha512,
-        logPath
+        logPath,
+        runnerDirectory
       },
       null,
       2
@@ -272,6 +281,13 @@ try {
     throw new Error(
       `Installed update lost its version or data: ${afterVersion}, ${sentinelValue}`
     );
+  }
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (!(await exists(runnerDirectory))) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (await exists(runnerDirectory)) {
+    throw new Error("Installed update left its internal runner directory behind");
   }
   if (
     (await exists(packagePath)) ||
@@ -301,6 +317,7 @@ try {
         afterVersion,
         silentInstallPathPreserved: true,
         applicationDataPreservedAcrossOldUninstaller: true,
+        internalRunnerDeletedAfterStart: true,
         packageAndBackupDeletedAfterStart: true,
         unexpectedDotNetInstallUtilityProcesses: 0,
         targetBytes: targetStats.size

@@ -10,6 +10,47 @@ const previousReleases: Array<{
   en: Omit<BundledReleaseNote, "version">;
 }> = [
   {
+    version: "0.1.2",
+    zh: {
+      summary: "重做非系统盘归属扫描，深入识别安装应用、绿色便携应用及其应用数据，并修正受限目录统计。",
+      sections: [
+        {
+          title: "深层扫描与识别",
+          items: [
+            "非系统盘递归扫描最多 8 层、60000 个目录，并显示扫描数量和截断状态。",
+            "根据可执行文件、便携标记和 Steam 清单识别绿色应用与游戏。"
+          ]
+        },
+        {
+          title: "应用数据与受限路径",
+          items: [
+            "识别 data、config、profiles、saves、logs、userdata 等应用数据目录。",
+            "不存在的标准目录不再误报为权限受限，旧浅层缓存自动失效。"
+          ]
+        }
+      ]
+    },
+    en: {
+      summary: "Rebuilt non-system-drive ownership discovery for installed apps, portable apps, and application data while correcting restricted-path reporting.",
+      sections: [
+        {
+          title: "Deep scanning and identification",
+          items: [
+            "Non-system drives scan up to 8 levels and 60,000 directories with count and truncation reporting.",
+            "Executables, portable markers, and Steam manifests identify unpacked applications and games."
+          ]
+        },
+        {
+          title: "Application data and restricted paths",
+          items: [
+            "Data, config, profiles, saves, logs, and userdata directories are associated with applications.",
+            "Missing standard folders no longer report false access restrictions, and stale shallow caches are invalidated."
+          ]
+        }
+      ]
+    }
+  },
+  {
     version: "0.1.1",
     zh: {
       summary: "修复局部放大镜调节尺寸及滚轮缩放时的白屏、灰帧和抖动，并降低后台资源占用。",

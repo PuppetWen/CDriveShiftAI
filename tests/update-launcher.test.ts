@@ -4,7 +4,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   launchUpdaterHelper,
-  prepareUpdaterExecutable
+  prepareUpdaterExecutable,
+  updateRunnerDirectoryForExecutable
 } from "../electron/update-launcher";
 
 const fixtureRoot = path.join(
@@ -44,6 +45,14 @@ afterEach(async () => {
 });
 
 describe("update helper launcher", () => {
+  it("keeps the fallback runner inside the application directory", () => {
+    expect(
+      updateRunnerDirectoryForExecutable(
+        "D:\\tools\\CDriveShiftAI\\CDriveShiftAI.exe"
+      )
+    ).toBe("D:\\tools\\CDriveShiftAI\\.cdriveshiftai-update-runner");
+  });
+
   it("copies the native helper and validates its bytes", async () => {
     const source = path.join(fixtureRoot, "source.exe");
     const destination = path.join(fixtureRoot, "runner", "helper.exe");
@@ -61,14 +70,17 @@ describe("update helper launcher", () => {
     }) as never;
     const result = await launchUpdaterHelper({
       primaryPath: "D:\\tools\\.cdriveshiftai-update\\helper.exe",
-      fallbackPath: "D:\\tools\\CDriveShiftAI-Update-Runner\\helper.exe",
+      fallbackPath:
+        "D:\\tools\\CDriveShiftAI\\.cdriveshiftai-update-runner\\helper.exe",
       planPath: "D:\\tools\\.cdriveshiftai-update\\plan.json",
       forcePrimaryFailure: true,
       retryDelaysMs: [0],
       spawnProcess: fakeSpawn
     });
     expect(result.strategy).toBe("fallback-direct");
-    expect(calls).toEqual(["D:\\tools\\CDriveShiftAI-Update-Runner\\helper.exe"]);
+    expect(calls).toEqual([
+      "D:\\tools\\CDriveShiftAI\\.cdriveshiftai-update-runner\\helper.exe"
+    ]);
   });
 
   it("reports a useful error after direct and PowerShell launch methods fail", async () => {

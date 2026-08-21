@@ -7,79 +7,79 @@ export interface BundledReleaseNote {
 }
 
 export const bundledReleaseNotes: BundledReleaseNote = {
-  version: "0.1.2",
-  summary: "本版重做非系统盘归属扫描，深入识别普通安装应用、绿色便携应用和应用数据，同时修正受限目录统计。",
+  version: "0.1.3",
+  summary: "本版修复更新完成后在安装目录旁遗留 CDriveShiftAI-Update-Runner 空目录的问题，并加强更新助手清理验证。",
   sections: [
     {
-      title: "深层目录扫描",
+      title: "更新目录位置",
       items: [
-        "非系统盘不再只查看根目录一两层，而是在时间和数量保护范围内递归扫描最多 8 层、60000 个目录。",
-        "结果页显示实际扫描目录数；达到时间或数量上限时会明确标记结果可能不完整。",
-        "自动跳过 node_modules、缓存、虚拟环境和系统噪声目录，兼顾覆盖率与后台资源占用。"
+        "更新助手不再创建于安装目录的相邻位置，改为安装目录内部的 .cdriveshiftai-update-runner 专用目录。",
+        "安装版和便携版使用相同的内部路径规则，不再占用用户选择目录的同级位置。",
+        "更新助手文件名包含目标版本，避免不同版本残留文件发生名称冲突。"
       ]
     },
     {
-      title: "应用与绿色版识别",
+      title: "更新后清理",
       items: [
-        "根据深层可执行文件、卸载标记、app.asar、portable.ini 等证据识别无安装记录的绿色便携应用。",
-        "将 bin、resources、runtime、Binaries 等内部目录归并到应用根目录，减少一个应用被拆成多条记录。",
-        "解析 Steam appmanifest 文件，补充 Steam 游戏的正式名称与实际安装目录。"
+        "新版本启动确认后删除整个内部 runner 目录，不再只删除版本子目录而留下空外层目录。",
+        "启动时会清理由旧版产生且确实为空的同级 CDriveShiftAI-Update-Runner；非空目录保持不动。",
+        "清理操作继续使用严格路径边界，避免删除其他同名或无关目录。"
       ]
     },
     {
-      title: "应用数据归属",
+      title: "安装安全",
       items: [
-        "识别应用附近的 data、config、profiles、saves、logs、userdata 等数据目录并关联到对应应用。",
-        "应用库目录即使缺少注册表记录，也会依据本地文件结构给出保守的归属结果和可信度。",
-        "弱注册表名称匹配不再覆盖更可靠的目录与可执行文件证据。"
+        "更新前仍保留主更新助手与内部备用助手的逐字节哈希校验。",
+        "安装更新继续保留原安装路径和 .cdriveshiftai-data 应用数据。",
+        "备用助手从安装目录内部运行时仍支持静默安装、启动确认和失败恢复。"
       ]
     },
     {
-      title: "受限目录与缓存",
+      title: "自动化验证",
       items: [
-        "不存在的标准目录不再误报为权限受限；回收站、System Volume Information 等系统目录按系统项处理。",
-        "受限统计只记录真实读取或权限错误，并在界面中使用准确提示。",
-        "归属缓存结构升级到版本 3，旧的浅层扫描缓存会自动失效并重新扫描。"
+        "新增安装目录内部 runner 路径的单元测试。",
+        "便携版完整更新测试验证更新包、备份和内部 runner 均会删除。",
+        "安装版完整更新测试从内部 runner 启动更新，并验证安装路径、应用数据和清理结果。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: BundledReleaseNote = {
-  version: "0.1.2",
+  version: "0.1.3",
   summary:
-    "This release rebuilds non-system-drive ownership discovery to find installed apps, portable apps, and application data more deeply while correcting restricted-directory reporting.",
+    "This release prevents updates from leaving an empty CDriveShiftAI-Update-Runner beside the installation directory and strengthens helper cleanup verification.",
   sections: [
     {
-      title: "Deep directory scanning",
+      title: "Update runner location",
       items: [
-        "Non-system drives are recursively inspected up to 8 levels and 60,000 directories instead of stopping near the root.",
-        "The result reports the actual directory count and explicitly marks scans truncated by time or quantity limits.",
-        "Dependency, cache, virtual-environment, and system-noise trees are skipped to balance coverage with background cost."
+        "The helper now uses .cdriveshiftai-update-runner inside the application directory instead of creating a sibling directory.",
+        "Installed and portable distributions share the same internal location rule.",
+        "Helper filenames include the target version to avoid stale-name collisions."
       ]
     },
     {
-      title: "Installed and portable apps",
+      title: "Post-update cleanup",
       items: [
-        "Deep executables, uninstall markers, app.asar, portable.ini, and similar evidence identify unpacked portable applications.",
-        "Internal bin, resources, runtime, and Binaries folders are grouped under the application root.",
-        "Steam app manifests provide official names and actual installation directories."
+        "After startup acknowledgement, the complete internal runner directory is removed rather than leaving an empty parent.",
+        "Empty legacy sibling runner directories are removed at startup, while non-empty directories are preserved.",
+        "Strict path boundaries continue to protect unrelated directories from cleanup."
       ]
     },
     {
-      title: "Application data ownership",
+      title: "Installation safety",
       items: [
-        "Nearby data, config, profiles, saves, logs, and userdata directories are associated with their applications.",
-        "Application-library directories receive conservative local ownership evidence even without registry records.",
-        "Weak registry name matches no longer override stronger filesystem and executable evidence."
+        "Both primary and internal fallback helpers retain byte-for-byte hash verification.",
+        "Installed updates preserve the selected installation path and .cdriveshiftai-data application data.",
+        "The internal fallback runner supports silent installation, startup acknowledgement, and recovery."
       ]
     },
     {
-      title: "Restricted paths and cache",
+      title: "Automated verification",
       items: [
-        "Missing standard folders no longer count as access restrictions, while protected system folders are classified as system entries.",
-        "Only real read or permission failures contribute to the restricted-path warning.",
-        "Ownership cache schema version 3 invalidates stale shallow-scan results automatically."
+        "Unit coverage verifies that the runner remains inside the application directory.",
+        "The portable update flow verifies cleanup of the package, backup, and internal runner.",
+        "The installed update flow starts from the internal runner and verifies path preservation, data preservation, and cleanup."
       ]
     }
   ]
