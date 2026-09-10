@@ -69,6 +69,7 @@ export function forceDeleteGuidance(message: string, preview: ForceDeletePreview
       title = ui("先停止后台程序重新写入", "Stop background writes first");
       steps.push(ui("暂停此目录的同步、下载、备份和自动更新任务；退出关联应用及托盘程序。文件删除后立即出现，通常需要先停掉创建它的程序。", "Pause sync, download, backup, and update jobs using this folder, then exit the owning app and its tray icon. If files immediately reappear, stop the program creating them first."));
     } else steps.push(closeApps);
+    if (category === "busy") steps.push(ui("如果 PowerShell 正停留在目标目录或其子目录，先执行 Set-Location -LiteralPath $env:USERPROFILE 切换到用户目录，再点击“重新检查”。", "If PowerShell is in this folder or a subfolder, run Set-Location -LiteralPath $env:USERPROFILE to switch to your user folder, then click “Check again”."));
     steps.push(taskManager, retry);
   }
   return {

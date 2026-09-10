@@ -34,7 +34,7 @@ import { createDiagnosticReport } from "./diagnostics";
 import { normalizeDirectoryDialogPurpose } from "./directory-dialog";
 import { openDeleteHelper } from "./delete-helper";
 import { ExplorerContextMenuService } from "./explorer-context-menu";
-import { ForceDeleteLaunchQueue, parseForceDeleteLaunch } from "./force-delete-launch";
+import { createForceDeleteLaunchData, ForceDeleteLaunchQueue, parseForceDeleteLaunch } from "./force-delete-launch";
 import { ForceDeleteService } from "./force-delete";
 import { assertNoMigrationPathMutation, assertRenameDestinationAvailable, migrationRecordDeletionReason } from "./file-operation-guard";
 import { nativeStrings } from "./i18n";
@@ -619,9 +619,9 @@ function showForceDeleteRequests(): void {
   mainWindow.webContents.send("shell:force-delete-requests-available");
 }
 
-function acceptForceDeleteLaunch(argv: readonly string[]): boolean {
+function acceptForceDeleteLaunch(argv: readonly string[], additionalData?: unknown): boolean {
   try {
-    const target = parseForceDeleteLaunch(argv);
+    const target = parseForceDeleteLaunch(argv, additionalData);
     if (!target) return false;
     forceDeleteLaunches.enqueue(target);
     showForceDeleteRequests();
@@ -2105,7 +2105,7 @@ function registerIpc(): void {
 }
 
 const uninstallRestoreMode = process.argv.includes("--uninstall-restore");
-const singleInstance = app.requestSingleInstanceLock();
+const singleInstance = app.requestSingleInstanceLock(createForceDeleteLaunchData(process.argv));
 if (!singleInstance) {
   if (uninstallRestoreMode) {
     dialog.showErrorBox("无法开始卸载恢复", "CDriveShiftAI 仍在运行。请先退出正在运行的程序，再重试卸载。");
@@ -2136,8 +2136,8 @@ if (!singleInstance) {
   }).catch(handleStartupFailure);
 } else {
   acceptForceDeleteLaunch(process.argv);
-  app.on("second-instance", (_event, argv) => {
-    if (acceptForceDeleteLaunch(argv)) return;
+  app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
+    if (acceptForceDeleteLaunch(argv, additionalData)) return;
     // The renderer is intentionally destroyed while resident in the tray.
     // Launching the executable again must therefore recreate the main window,
     // not silently return just because no BrowserWindow currently exists.

@@ -13,9 +13,10 @@ const fixture = await mkdtemp(path.join(tempRoot, "explorer-launch-"));
 const data = path.join(fixture, "data");
 await mkdir(data);
 const first = path.join(fixture, "[中文] a'$(); & first.txt");
-const second = path.join(fixture, "second.txt");
+const second = path.join(fixture, "模型动作 动作 $(); & test");
 const third = path.join(fixture, "third.txt");
-for (const file of [first, second, third]) await writeFile(file, "untouched");
+await mkdir(second);
+for (const file of [first, path.join(second, "keep.txt"), third]) await writeFile(file, "untouched");
 await writeFile(path.join(data, "cdriveshiftai-state.json"), JSON.stringify({ settings: {
   launchAtLogin: true, launchMinimized: true, language: "zh-CN", mouseQuickSearchButton: "disabled",
   magnifierEnabled: false, globalShortcut: "", quickSearchShortcut: ""
@@ -24,6 +25,8 @@ await writeFile(path.join(fixture, "package.json"), JSON.stringify({ name: "expl
 await writeFile(path.join(fixture, "main.cjs"), String.raw`
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
+const { once } = require("node:events");
 const { app, BrowserWindow, dialog, globalShortcut, ipcMain } = require("electron");
 const root = process.env.CSHIFT_SMOKE_WORKSPACE;
 const targets = JSON.parse(process.env.CSHIFT_SMOKE_TARGETS);
@@ -45,13 +48,15 @@ let executions = 0;
 ForceDeleteService.prototype.preview = async function(target) {
   assert(targets.includes(target), "The exact selected path must reach the preview");
   previews.push(target);
-  return { verificationId: String(previews.length), path: target, name: path.basename(target), isDirectory: false,
+  return { verificationId: String(previews.length), path: target, name: path.basename(target), isDirectory: target === targets[1],
     isSymbolicLink: false, highRisk: false, elevated: false, processes: [] };
 };
 ForceDeleteService.prototype.execute = async function() { executions++; throw new Error("Deletion must never run in launch smoke"); };
 const handlers = new Map();
 const originalHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (name, handler) => { handlers.set(name, handler); originalHandle(name, handler); };
+const launches = [];
+app.on("second-instance", (_event, argv, _directory, additionalData) => { launches.push({ argv, additionalData }); });
 load("main");
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(callback, description) {
@@ -70,10 +75,20 @@ async function expectTarget(target) {
   assert.equal(await evaluate('document.querySelector(".force-delete-dialog button.danger").disabled'), true);
   assert.equal(await evaluate('document.querySelectorAll(".force-delete-dialog").length'), 1);
 }
+async function launchSecond(target) {
+  const child = spawn(process.execPath, [app.getAppPath(), "--force-delete-path", target], {
+    env: { ...process.env, CSHIFT_SMOKE_SECOND_INSTANCE: "1" }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"]
+  });
+  let errors = "";
+  child.stderr.on("data", chunk => { errors += chunk; });
+  const [code] = await once(child, "exit");
+  assert.equal(code, 0, errors);
+}
 (async () => {
+  if (process.env.CSHIFT_SMOKE_SECOND_INSTANCE === "1") return;
   await expectTarget(targets[0]);
   assert.deepEqual(await handlers.get("shell:force-delete-requests")({ sender: { id: -1 } }), []);
-  app.emit("second-instance", {}, [process.execPath, "--force-delete-path", targets[1]]);
+  await launchSecond(targets[1]);
   await wait(200);
   await expectTarget(targets[0]);
   assert.deepEqual(previews, [targets[0]], "A warm launch must not replace the active confirmation");
@@ -82,10 +97,12 @@ async function expectTarget(target) {
   await evaluate('document.querySelector(".force-delete-dialog > header > button").click()');
   currentWindow().close();
   await until(() => BrowserWindow.getAllWindows().length === 0, "renderer released to tray");
-  app.emit("second-instance", {}, [process.execPath, "--force-delete-path", targets[2]]);
+  await launchSecond(targets[2]);
   await expectTarget(targets[2]);
   assert.equal(executions, 0);
   assert.deepEqual(previews, targets);
+  assert.equal(launches.length, 2, "Two real secondary processes must reach the primary instance");
+  assert.deepEqual(launches.map(item => item.additionalData?.forceDeleteArgv), targets.slice(1).map(target => ["--force-delete-path", target]));
   await evaluate('document.querySelector(".force-delete-dialog > header > button").click()');
   process.stdout.write("explorer-launch-ok\n");
   app.quit();
@@ -107,9 +124,9 @@ try {
   })]);
   assert.equal(code, 0, errors);
   assert.match(output, /explorer-launch-ok/);
-  for (const file of [first, second, third]) assert.equal(await readFile(file, "utf8"), "untouched");
+  for (const file of [first, path.join(second, "keep.txt"), third]) assert.equal(await readFile(file, "utf8"), "untouched");
   console.log(JSON.stringify({ ok: true, coldLaunch: true, warmQueue: true, trayRecreation: true,
-    exactUnicodePath: true, confirmationRequired: true, noDeletion: true, noRegistryChanges: true }, null, 2));
+    actualSecondProcesses: true, exactUnicodePath: true, confirmationRequired: true, noDeletion: true, noRegistryChanges: true }, null, 2));
 } finally {
   clearTimeout(timeout);
   if (child && child.exitCode === null) {
