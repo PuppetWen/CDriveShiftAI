@@ -1069,6 +1069,9 @@ try {
     if (!confirmed) throw new Error("Migration confirmation controls were unavailable");
     await clickButton("确认并开始安全迁移");
     await waitFor('document.querySelector(".migration-live.stage-copying") !== null');
+    if (!await evaluate('[...document.querySelectorAll(".migration-paths input")].every((input) => input.disabled)')) {
+      throw new Error("Migration paths remained editable during a transaction");
+    }
     await wait(100);
     await capture("cdriveshiftai-migration-progress-blockworld.png");
     await wait(1_150);
@@ -1085,15 +1088,30 @@ try {
     await clickButton("方块");
     await waitFor('document.documentElement.dataset.effect === "aurora"');
     await capture("cdriveshiftai-migration-complete-blockworld.png");
+    await evaluate(`(() => {
+      const input = document.querySelector(".migration-paths input");
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      setter.call(input, "C:\\\\Users\\\\You\\\\SecondProject");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    })()`);
+    await waitFor('document.querySelector(".migration-live") === null && document.querySelector(".preflight-summary") === null');
+    await clickButton("执行迁移预检");
+    await waitFor('document.querySelector(".preflight-summary")?.textContent?.includes("SecondProject") === true');
+    await evaluate('document.querySelector(".consent-row input").click()');
+    await waitFor('document.querySelector(".confirmation-card .danger-action")?.disabled === false');
+    await clickButton("确认并开始安全迁移");
+    await waitFor('document.querySelector(".migration-live.stage-linked") !== null');
     await clickButton("迁移记录");
-    await waitFor('document.querySelector(".history-card") !== null');
-    await evaluate('document.querySelector(".history-select input")?.click()');
-    await waitFor('document.querySelector(".history-card.selected") !== null');
-    await clickButton("删除所选 1");
-    await waitFor('document.querySelector(".history-delete-confirm") !== null');
-    await capture("cdriveshiftai-history-multi-delete.png");
-    await clickButton("确认删除记录");
-    await waitFor('document.querySelector(".history-card") === null');
+    await waitFor('document.querySelectorAll(".history-card").length === 2');
+    const protectedHistory = await evaluate(`(() => ({
+      selectionsDisabled: [...document.querySelectorAll(".history-select input")].every((input) => input.disabled),
+      deleteDisabled: [...document.querySelectorAll(".history-toolbar button")].find((button) => button.textContent.includes("删除所选"))?.disabled
+    }))()`);
+    if (!protectedHistory.selectionsDisabled || !protectedHistory.deleteDisabled) {
+      throw new Error("Live migration recovery records could still be deleted");
+    }
+    await wait(350);
+    await capture("cdriveshiftai-history-protected-migrations.png");
   }
 
   if (requestedView === "analyze") {

@@ -15,6 +15,7 @@ describe("Windows path safety", () => {
   it("detects containment without accepting sibling prefixes", () => {
     expect(isPathWithin("C:\\Users\\Alice\\Data", "C:\\Users\\Alice")).toBe(true);
     expect(isPathWithin("C:\\Users\\Alice2", "C:\\Users\\Alice")).toBe(false);
+    expect(isPathWithin("C:\\Users\\Alice\\..cache", "C:\\Users\\Alice")).toBe(true);
   });
 
   it("blocks drive roots and protected system paths", () => {
@@ -22,6 +23,9 @@ describe("Windows path safety", () => {
     expect(protectedReason("D:\\")).toContain("盘符根目录");
     expect(protectedReason("C:\\Windows\\Temp")).toContain("受保护");
     expect(protectedReason("C:\\Users")).toContain("受保护");
+    expect(protectedReason("C:\\Program Files\\WindowsApps\\Package")).toContain("受保护");
+    expect(protectedReason("D:\\WindowsApps\\Package")).toContain("系统管理");
+    expect(protectedReason("\\\\?\\C:\\Windows")).toContain("命名空间");
   });
 
   it("allows an ordinary user application data directory", () => {

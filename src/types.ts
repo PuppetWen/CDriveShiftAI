@@ -185,7 +185,7 @@ export interface ForceDeleteProcess {
   pid: number;
   name: string;
   executablePath?: string;
-  matchReason: "executable" | "command-line";
+  matchReason: "executable" | "command-line" | "file-handle";
   canTerminate: boolean;
 }
 
@@ -198,11 +198,13 @@ export interface ForceDeletePreview {
   highRisk: boolean;
   elevated: boolean;
   processes: ForceDeleteProcess[];
+  processWarnings?: string[];
 }
 
 export interface ForceDeleteResult {
   deleted: boolean;
   terminatedProcesses: ForceDeleteProcess[];
+  usedElevation?: boolean;
 }
 
 export interface DirectorySizeResult {
@@ -405,6 +407,7 @@ export type MigrationStage =
   | "failed";
 
 export interface MigrationRecord {
+  restorePath?: string;
   id: string;
   source: string;
   destination: string;
@@ -429,6 +432,7 @@ export interface AppSettings {
   launchAtLogin: boolean;
   launchMinimized: boolean;
   minimizeToTray: boolean;
+  forceDeleteContextMenu: boolean;
   globalShortcut: string;
   quickSearchShortcut: string;
   mouseQuickSearchButton: MouseShortcutButton;
@@ -686,6 +690,10 @@ export interface CDriveShiftApi {
   trashPath(path: string): Promise<boolean>;
   previewForceDelete(path: string): Promise<ForceDeletePreview>;
   executeForceDelete(verificationId: string): Promise<ForceDeleteResult>;
+  openDeleteHelper(target: "task-manager" | "installed-apps"): Promise<void>;
+  getForceDeleteContextMenuStatus(): Promise<{ enabled: boolean; available: boolean; reason?: string }>;
+  takeForceDeleteRequests(): Promise<string[]>;
+  onForceDeleteRequests(listener: () => void): () => void;
   directorySizes(paths: string[]): Promise<DirectorySizeResult[]>;
   getSearchWorkspace(): Promise<SearchWorkspaceState | undefined>;
   saveSearchWorkspace(state: SearchWorkspaceState): Promise<void>;

@@ -161,7 +161,7 @@ export interface ForceDeleteProcess {
   pid: number;
   name: string;
   executablePath?: string;
-  matchReason: "executable" | "command-line";
+  matchReason: "executable" | "command-line" | "file-handle";
   canTerminate: boolean;
 }
 
@@ -174,11 +174,13 @@ export interface ForceDeletePreview {
   highRisk: boolean;
   elevated: boolean;
   processes: ForceDeleteProcess[];
+  processWarnings?: string[];
 }
 
 export interface ForceDeleteResult {
   deleted: boolean;
   terminatedProcesses: ForceDeleteProcess[];
+  usedElevation?: boolean;
 }
 
 export interface DirectorySizeResult {
@@ -347,6 +349,7 @@ export interface AppSettings {
   launchAtLogin: boolean;
   launchMinimized: boolean;
   minimizeToTray: boolean;
+  forceDeleteContextMenu: boolean;
   globalShortcut: string;
   quickSearchShortcut: string;
   mouseQuickSearchButton: MouseShortcutButton;
@@ -482,6 +485,7 @@ export type MigrationStage =
   | "failed";
 
 export interface MigrationRecord {
+  restorePath?: string;
   id: string;
   source: string;
   destination: string;

@@ -40,6 +40,7 @@ import {
 import { api } from "../lib/api";
 import { effectDefinitions } from "../lib/effects";
 import { getAiProvider } from "../lib/aiProviders";
+import { mergeSettingsDraft } from "../lib/settings-draft";
 import {
   MOUSE_HOLD_MAX_MS,
   MOUSE_HOLD_MIN_MS,
@@ -366,11 +367,17 @@ export function SettingsView({
   const [mouseShortcutStatus, setMouseShortcutStatus] =
     useState<MouseShortcutStatus>();
   const [magnifierStatus, setMagnifierStatus] = useState<MagnifierStatus>();
+  const [contextMenuStatus, setContextMenuStatus] = useState<{ enabled: boolean; available: boolean; reason?: string }>();
+  const [contextMenuChecking, setContextMenuChecking] = useState(false);
+  const [contextMenuUpdating, setContextMenuUpdating] = useState(false);
+  const [contextMenuError, setContextMenuError] = useState("");
+  const contextMenuStatusRequest = useRef(0);
   const [magnifierRecording, setMagnifierRecording] = useState(false);
   const [magnifierRecorderHint, setMagnifierRecorderHint] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [aiTest, setAiTest] = useState<AiTestResult>();
   const effectRequest = useRef(0);
+  const languageRequest = useRef(0);
   const uiScaleRequest = useRef(0);
   const uiScaleDraftRef = useRef(settings.uiScale);
   const uiScaleDrag = useRef<{
@@ -382,7 +389,8 @@ export function SettingsView({
   const behaviorRequests = useRef({
     launchAtLogin: 0,
     launchMinimized: 0,
-    minimizeToTray: 0
+    minimizeToTray: 0,
+    forceDeleteContextMenu: 0
   });
   const shortcutRequests = useRef({
     main: 0,
@@ -393,6 +401,8 @@ export function SettingsView({
   const magnifierSizeDragging = useRef(false);
   const mouseCaptureBlockUntil = useRef(0);
   const aiDraftRequest = useRef(0);
+  const aiConnectionRevision = useRef(0);
+  const apiKeyProvider = useRef(settings.ai.provider);
   const apiKeyDirty = useRef(false);
   const persistedSettingsRef = useRef(settings);
   const updateBusy = ["downloading", "verifying", "ready", "installing"].includes(
@@ -430,67 +440,49 @@ export function SettingsView({
     document.querySelector(".view-scroll")?.scrollTo({ top: 0, behavior: "smooth" });
   }, [activeModule]);
 
+  const refreshContextMenuStatus = async () => {
+    const request = ++contextMenuStatusRequest.current;
+    setContextMenuChecking(true);
+    setContextMenuError("");
+    try {
+      const status = await api.getForceDeleteContextMenuStatus();
+      if (request === contextMenuStatusRequest.current) setContextMenuStatus(status);
+    } catch (error) {
+      if (request === contextMenuStatusRequest.current) {
+        setContextMenuStatus(undefined);
+        setContextMenuError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (request === contextMenuStatusRequest.current) setContextMenuChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeModule === "system") void refreshContextMenuStatus();
+    return () => { ++contextMenuStatusRequest.current; };
+  }, [activeModule]);
+
   useEffect(() => {
     const previous = persistedSettingsRef.current;
-    setDraft((current) => {
-      const next = {
-        ...current,
-        effectMode: settings.effectMode,
-        language: settings.language,
-        uiScale: settings.uiScale
-      };
-      if (previous.launchAtLogin !== settings.launchAtLogin) {
-        next.launchAtLogin = settings.launchAtLogin;
-      }
-      if (previous.launchMinimized !== settings.launchMinimized) {
-        next.launchMinimized = settings.launchMinimized;
-      }
-      if (previous.minimizeToTray !== settings.minimizeToTray) {
-        next.minimizeToTray = settings.minimizeToTray;
-      }
-      if (previous.globalShortcut !== settings.globalShortcut) {
-        next.globalShortcut = settings.globalShortcut;
-      }
-      if (previous.quickSearchShortcut !== settings.quickSearchShortcut) {
-        next.quickSearchShortcut = settings.quickSearchShortcut;
-      }
-      if (
-        previous.mouseQuickSearchButton !== settings.mouseQuickSearchButton
-      ) {
-        next.mouseQuickSearchButton = settings.mouseQuickSearchButton;
-      }
-      if (previous.mouseQuickSearchHoldMs !== settings.mouseQuickSearchHoldMs) {
-        next.mouseQuickSearchHoldMs = settings.mouseQuickSearchHoldMs;
-      }
-      if (previous.magnifierEnabled !== settings.magnifierEnabled) {
-        next.magnifierEnabled = settings.magnifierEnabled;
-      }
-      if (previous.magnifierModifiers !== settings.magnifierModifiers) {
-        next.magnifierModifiers = settings.magnifierModifiers;
-      }
-      if (previous.magnifierWidth !== settings.magnifierWidth) {
-        next.magnifierWidth = settings.magnifierWidth;
-      }
-      if (previous.magnifierHeight !== settings.magnifierHeight) {
-        next.magnifierHeight = settings.magnifierHeight;
-      }
-      if (JSON.stringify(previous.indexRoots) !== JSON.stringify(settings.indexRoots)) {
-        next.indexRoots = settings.indexRoots;
-      }
-      if (
-        JSON.stringify(previous.excludedPaths) !==
-        JSON.stringify(settings.excludedPaths)
-      ) {
-        next.excludedPaths = settings.excludedPaths;
-      }
-      if (JSON.stringify(previous.ai) !== JSON.stringify(settings.ai)) {
-        next.ai = settings.ai;
-      }
-      return next;
-    });
+    setDraft((current) => mergeSettingsDraft(current, previous, settings));
     persistedSettingsRef.current = settings;
-    uiScaleDraftRef.current = settings.uiScale;
+    if (uiScaleDraftRef.current === previous.uiScale) {
+      uiScaleDraftRef.current = settings.uiScale;
+    }
   }, [settings]);
+
+  useEffect(() => {
+    if (apiKeyProvider.current === draft.ai.provider) return;
+    // This runs only when an external provider was accepted into the draft.
+    // A dirty connection keeps its old provider and its unsaved key intact.
+    apiKeyProvider.current = draft.ai.provider;
+    setApiKey("");
+    apiKeyDirty.current = false;
+    setModels([]);
+    setAiTest(undefined);
+    setAiSaveState("idle");
+    ++aiConnectionRevision.current;
+  }, [draft.ai.provider]);
 
   useEffect(() => {
     let cancelled = false;
@@ -551,7 +543,7 @@ export function SettingsView({
       if (request === effectRequest.current) onSettings(updated);
     } catch (error) {
       if (request === effectRequest.current) {
-        setDraft(previous);
+        setDraft((current) => ({ ...current, effectMode: previous.effectMode }));
         notify("error", error instanceof Error ? error.message : String(error));
       }
     }
@@ -559,11 +551,13 @@ export function SettingsView({
 
   const chooseLanguage = async (language: AppLanguage) => {
     if (language === draft.language) return;
+    const request = ++languageRequest.current;
     const previous = draft.language;
     setDraft((current) => ({ ...current, language }));
     setAppLanguage(language);
     try {
       const updated = await api.updateSettings({ language });
+      if (request !== languageRequest.current) return;
       onSettings(updated);
       setDraft((current) => ({ ...current, language: updated.language }));
       setAppLanguage(updated.language);
@@ -576,6 +570,7 @@ export function SettingsView({
         )
       );
     } catch (error) {
+      if (request !== languageRequest.current) return;
       setDraft((current) => ({ ...current, language: previous }));
       setAppLanguage(previous);
       notify("error", error instanceof Error ? error.message : String(error));
@@ -586,10 +581,8 @@ export function SettingsView({
     const uiScale = normalizeUiScale(value);
     uiScaleDraftRef.current = uiScale;
     const previous = persistedSettingsRef.current.uiScale;
-    if (uiScale === previous) {
-      setDraft((current) => ({ ...current, uiScale }));
-      return;
-    }
+    // Commit even if this matches the last saved snapshot: an earlier save
+    // may still be in flight and would otherwise overwrite this newer choice.
     const request = ++uiScaleRequest.current;
     setDraft((current) => ({ ...current, uiScale }));
     try {
@@ -638,28 +631,56 @@ export function SettingsView({
   };
 
   const updateBehaviorSetting = async (
-    field: "launchAtLogin" | "launchMinimized" | "minimizeToTray",
+    field: "launchAtLogin" | "launchMinimized" | "minimizeToTray" | "forceDeleteContextMenu",
     value: boolean
   ) => {
     const request = ++behaviorRequests.current[field];
+    const updatingContextMenu = field === "forceDeleteContextMenu";
+    if (updatingContextMenu) {
+      ++contextMenuStatusRequest.current;
+      setContextMenuChecking(false);
+      setContextMenuUpdating(true);
+      setContextMenuError("");
+    }
     setDraft((current) => ({ ...current, [field]: value }));
     try {
       const updated = await api.updateSettings({ [field]: value });
       if (request !== behaviorRequests.current[field]) return;
       onSettings(updated);
       setDraft((current) => ({ ...current, [field]: updated[field] }));
+      if (updatingContextMenu) {
+        const status = await api.getForceDeleteContextMenuStatus();
+        if (request !== behaviorRequests.current[field]) return;
+        setContextMenuStatus(status);
+        if (status.enabled !== value || (value && status.reason)) {
+          throw new Error(status.reason || ui("右键菜单状态未按预期更新，请重新检查。", "The context menu did not update as expected. Check its status again."));
+        }
+        notify("success", value
+          ? ui("已添加资源管理器强制删除菜单", "Force delete added to Explorer")
+          : ui("已移除资源管理器强制删除菜单", "Force delete removed from Explorer"));
+      }
     } catch (error) {
       if (request === behaviorRequests.current[field]) {
         setDraft((current) => ({ ...current, [field]: settings[field] }));
         notify("error", error instanceof Error ? error.message : String(error));
+        if (updatingContextMenu) {
+          setContextMenuError(error instanceof Error ? error.message : String(error));
+          try {
+            const status = await api.getForceDeleteContextMenuStatus();
+            if (request === behaviorRequests.current[field]) setContextMenuStatus(status);
+          } catch {
+            if (request === behaviorRequests.current[field]) setContextMenuStatus(undefined);
+          }
+        }
       }
+    } finally {
+      if (updatingContextMenu && request === behaviorRequests.current[field]) setContextMenuUpdating(false);
     }
   };
 
   const commitShortcut = async (target: ShortcutTarget, value: string) => {
     const field =
       target === "main" ? "globalShortcut" : "quickSearchShortcut";
-    if (value === persistedSettingsRef.current[field]) return;
     const request = ++shortcutRequests.current[target];
     try {
       if (value.trim()) {
@@ -722,10 +743,6 @@ export function SettingsView({
     >
   ) => {
     const previous = persistedSettingsRef.current;
-    const changed = Object.entries(patch).some(
-      ([field, value]) => previous[field as keyof AppSettings] !== value
-    );
-    if (!changed) return;
     const request = ++mouseShortcutRequest.current;
     setDraft((current) => ({ ...current, ...patch }));
     try {
@@ -811,10 +828,6 @@ export function SettingsView({
     >
   ) => {
     const previous = persistedSettingsRef.current;
-    const changed = Object.entries(patch).some(
-      ([field, value]) => previous[field as keyof AppSettings] !== value
-    );
-    if (!changed) return;
     const request = ++magnifierRequest.current;
     setDraft((current) => ({ ...current, ...patch }));
     try {
@@ -883,13 +896,18 @@ export function SettingsView({
     ]
   );
 
-  const invalidateAiTest = () => setAiTest(undefined);
+  const invalidateAiTest = () => {
+    ++aiConnectionRevision.current;
+    setAiTest(undefined);
+    setAiSaveState("idle");
+  };
 
   const persistAiDraft = async (
     nextAi: AppSettings["ai"],
     options: { replaceApiKey?: boolean; apiKeyValue?: string } = {}
   ) => {
     const request = ++aiDraftRequest.current;
+    const revision = aiConnectionRevision.current;
     const replaceApiKey = options.replaceApiKey === true;
     setAiSaveState("saving");
     try {
@@ -908,7 +926,7 @@ export function SettingsView({
         privacyMode: nextAi.privacyMode,
         replaceApiKey
       });
-      if (request !== aiDraftRequest.current) return updated;
+      if (request !== aiDraftRequest.current || revision !== aiConnectionRevision.current) return updated;
       onSettings(updated);
       setDraft((current) => ({ ...current, ai: updated.ai }));
       if (replaceApiKey) {
@@ -918,7 +936,7 @@ export function SettingsView({
       setAiSaveState("saved");
       return updated;
     } catch (error) {
-      if (request === aiDraftRequest.current) {
+      if (request === aiDraftRequest.current && revision === aiConnectionRevision.current) {
         setAiSaveState("error");
         notify("error", error instanceof Error ? error.message : String(error));
       }
@@ -928,6 +946,8 @@ export function SettingsView({
 
   const chooseProvider = (providerId: AppSettings["ai"]["provider"]) => {
     const preset = getAiProvider(providerId);
+    // Local switches already clear the input and invalidate pending requests.
+    apiKeyProvider.current = preset.id;
     const nextAi: AppSettings["ai"] = {
       ...draft.ai,
       enabled: false,
@@ -950,8 +970,10 @@ export function SettingsView({
   const fetchModels = async () => {
     setFetchingModels(true);
     invalidateAiTest();
+    const revision = aiConnectionRevision.current;
     try {
       const result = await api.listAiModels(connectionInput);
+      if (revision !== aiConnectionRevision.current) return;
       setModels(result.models);
       const model = result.models.some((item) => item.id === draft.ai.model)
         ? draft.ai.model
@@ -972,6 +994,7 @@ export function SettingsView({
         )
       );
     } catch (error) {
+      if (revision !== aiConnectionRevision.current) return;
       setModels([]);
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
@@ -980,17 +1003,20 @@ export function SettingsView({
   };
 
   const testAi = async () => {
+    const revision = aiConnectionRevision.current;
     setTestingAi(true);
     setAiTest(undefined);
     try {
       const result = await api.testAiConnection(connectionInput);
-      setAiTest(result);
+      if (revision !== aiConnectionRevision.current) return;
       const updated = await api.saveAiSettings({
         ...connectionInput,
         enabled: true,
         privacyMode: draft.ai.privacyMode,
         verificationId: result.verificationId
       });
+      if (revision !== aiConnectionRevision.current) return;
+      setAiTest(result);
       onSettings(updated);
       setDraft((current) => ({ ...current, ai: updated.ai }));
       setApiKey("");
@@ -1004,6 +1030,7 @@ export function SettingsView({
         )
       );
     } catch (error) {
+      if (revision !== aiConnectionRevision.current) return;
       setDraft((current) => ({
         ...current,
         ai: { ...current.ai, enabled: settings.ai.enabled }
@@ -1053,6 +1080,7 @@ export function SettingsView({
     privacyMode: AppSettings["ai"]["privacyMode"]
   ) => {
     const nextAi = { ...draft.ai, privacyMode };
+    invalidateAiTest();
     setDraft((current) => ({ ...current, ai: nextAi }));
     void persistAiDraft(nextAi);
   };
@@ -1731,6 +1759,53 @@ export function SettingsView({
               <span>{ui("名称索引仅保存路径与基础元数据；指定目录全文索引独立存储。", "The name index stores only paths and basic metadata; selected-directory content indexes are stored separately.")}</span>
             </div>
           </div>
+        </article>
+
+        <article className="settings-section glass-card force-delete-context-menu-card">
+          <div className="settings-section-head">
+            <div className="settings-icon blue"><MousePointer2 size={20} /></div>
+            <div>
+              <h2>{ui("资源管理器右键菜单", "Explorer context menu")}</h2>
+              <p>{ui("从 Windows 文件资源管理器中选择文件或文件夹。", "Select files or folders in Windows File Explorer.")}</p>
+            </div>
+          </div>
+          <label className={`setting-row ${contextMenuChecking || contextMenuUpdating || !contextMenuStatus || (!contextMenuStatus.available && !contextMenuStatus.enabled) ? "is-disabled" : ""}`}>
+            <div>
+              <strong>{ui("添加“CDriveShiftAI 强制删除”", "Add “CDriveShiftAI Force delete”")}</strong>
+              <small>{ui("打开目标的删除预检，核对并确认后才会执行。关闭此开关可移除菜单。", "Opens the target's deletion preview; deletion starts only after you review and confirm. Turn off to remove the menu.")}</small>
+            </div>
+            <input
+              type="checkbox"
+              aria-label={ui("资源管理器强制删除菜单", "Explorer force-delete menu")}
+              checked={contextMenuStatus?.enabled ?? false}
+              disabled={contextMenuChecking || contextMenuUpdating || !contextMenuStatus || (!contextMenuStatus.available && !contextMenuStatus.enabled)}
+              onChange={(event) => void updateBehaviorSetting("forceDeleteContextMenu", event.target.checked)}
+            />
+            <span className="toggle" />
+          </label>
+          <div className="context-menu-status" aria-live="polite">
+            <span>{contextMenuUpdating
+              ? ui("正在更新右键菜单…", "Updating the context menu…")
+              : contextMenuChecking
+                ? ui("正在检查注册状态…", "Checking registration…")
+                : contextMenuError
+                  ? ui("未能确认操作成功，请处理下方原因后重新检查。", "The change could not be confirmed. Resolve the reason below, then check again.")
+                  : contextMenuStatus?.enabled
+                    ? ui("已检测到菜单注册", "Menu registration detected")
+                    : contextMenuStatus
+                      ? ui("未添加菜单", "Menu is not registered")
+                      : ui("注册状态未知", "Registration status unknown")}</span>
+            <button className="secondary-button" type="button" disabled={contextMenuChecking || contextMenuUpdating} onClick={() => void refreshContextMenuStatus()}>
+              <RefreshCw size={13} className={contextMenuChecking ? "spin" : ""} />{ui("重新检查状态", "Check status again")}
+            </button>
+          </div>
+          {(contextMenuError || contextMenuStatus?.reason) && (
+            <div className="setting-note context-menu-warning" role="alert"><AlertCircle size={15} /><span>{runtimeText(contextMenuError || contextMenuStatus?.reason)}</span></div>
+          )}
+          {contextMenuStatus?.enabled && contextMenuStatus.reason && (
+            <div className="setting-note"><RefreshCw size={15} /><span>{ui("应用位置变化或菜单注册不完整时，可先关闭再重新开启此开关，更新到当前程序位置。", "If the app has moved or registration is incomplete, turn the switch off and on again to use the current app location.")}</span></div>
+          )}
+          <div className="setting-note"><ShieldCheck size={15} /><span>{ui("Windows 11 中可能需要点击“显示更多选项”才能看到此菜单。", "On Windows 11, you may need to select “Show more options” to see this menu.")}</span></div>
         </article>
 
         <article className="settings-section glass-card behavior-settings-card">

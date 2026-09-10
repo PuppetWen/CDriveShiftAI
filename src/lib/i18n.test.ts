@@ -56,4 +56,16 @@ describe("application localization", () => {
     ].join(" ");
     expect(releaseText).not.toMatch(/[\u3400-\u9fff]/u);
   });
+
+  it.each([
+    "浏览器预览不提供 Windows 全局局部放大镜",
+    "Windows 全屏局部放大镜正在启动",
+    "Windows 局部放大镜尚未启动",
+    "按住组合键时显示局部放大镜，滚动滚轮可调倍率",
+    "全屏局部放大镜已关闭",
+    "全屏局部放大镜可用",
+    "当前 Windows 环境无法创建全局局部放大镜"
+  ])("localizes the desktop lens status: %s", (message) => {
+    expect(localizeRuntimeText(message, "en-US")).not.toMatch(/[\u3400-\u9fff]/u);
+  });
 });

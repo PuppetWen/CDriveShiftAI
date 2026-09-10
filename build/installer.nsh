@@ -41,8 +41,21 @@ Var /GLOBAL cdrivePreserveNoDesktopShortcut
   ${IfNot} ${isUpdated}
     ${IfNot} ${Silent}
       IfFileExists "$INSTDIR\CDriveShiftAI.exe" 0 restore_prompt_done
-      ExecWait '"$INSTDIR\CDriveShiftAI.exe" --uninstall-restore'
+      ExecWait '"$INSTDIR\CDriveShiftAI.exe" --uninstall-restore' $R9
+      ${If} $R9 != 0
+        Abort "CDriveShiftAI restore could not start or complete. Close the running application and retry."
+      ${EndIf}
       restore_prompt_done:
+    ${EndIf}
+    ; Each installation only removes menu entries that still point to itself.
+    ; A portable copy or a newer installation may have taken ownership since.
+    ReadRegStr $R7 HKCU "Software\Classes\*\shell\CDriveShiftAI.ForceDelete" "OwnerExecutable"
+    ${If} $R7 == "$INSTDIR\CDriveShiftAI.exe"
+      DeleteRegKey HKCU "Software\Classes\*\shell\CDriveShiftAI.ForceDelete"
+    ${EndIf}
+    ReadRegStr $R7 HKCU "Software\Classes\Directory\shell\CDriveShiftAI.ForceDelete" "OwnerExecutable"
+    ${If} $R7 == "$INSTDIR\CDriveShiftAI.exe"
+      DeleteRegKey HKCU "Software\Classes\Directory\shell\CDriveShiftAI.ForceDelete"
     ${EndIf}
   ${EndIf}
 !macroend

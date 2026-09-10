@@ -50,6 +50,15 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
     ipcRenderer.invoke("shell:force-delete-preview", targetPath),
   executeForceDelete: (verificationId: string) =>
     ipcRenderer.invoke("shell:force-delete-execute", verificationId),
+  openDeleteHelper: (target: "task-manager" | "installed-apps") =>
+    ipcRenderer.invoke("shell:delete-helper", target),
+  getForceDeleteContextMenuStatus: () => ipcRenderer.invoke("shell:force-delete-menu-status"),
+  takeForceDeleteRequests: () => ipcRenderer.invoke("shell:force-delete-requests"),
+  onForceDeleteRequests: (listener: () => void) => {
+    const handler = () => listener();
+    ipcRenderer.on("shell:force-delete-requests-available", handler);
+    return () => ipcRenderer.removeListener("shell:force-delete-requests-available", handler);
+  },
   directorySizes: (paths: string[]) => ipcRenderer.invoke("search:directory-sizes", paths),
   getSearchWorkspace: () => ipcRenderer.invoke("search:workspace-get"),
   saveSearchWorkspace: (state: unknown) => ipcRenderer.invoke("search:workspace-save", state),

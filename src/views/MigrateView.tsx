@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -45,67 +45,111 @@ export function MigrateView({
   const [consent, setConsent] = useState(false);
   const [running, setRunning] = useState(false);
   const [acceptStaleAnalysis, setAcceptStaleAnalysis] = useState(false);
+  const checkRequest = useRef(0);
+  const runningRef = useRef(false);
+  const activePlan = useRef<PreflightResult | undefined>(undefined);
+
+  const resetPlan = () => {
+    ++checkRequest.current;
+    setChecking(false);
+    setPreflight(undefined);
+    setConsent(false);
+    setAcceptStaleAnalysis(false);
+    setRecord(undefined);
+    setProgressMessage("");
+    activePlan.current = undefined;
+  };
 
   useEffect(() => {
-    if (initialPath) setSource(initialPath);
+    if (initialPath && !runningRef.current) {
+      setSource(initialPath);
+      resetPlan();
+    }
   }, [initialPath]);
+
+  useEffect(() => () => { ++checkRequest.current; }, []);
 
   useEffect(
     () =>
       api.onMigrationProgress((event) => {
+        const plan = activePlan.current;
+        if (!runningRef.current || !plan || event.record.source !== plan.source ||
+            event.record.destination !== plan.finalDestination) return;
         setRecord(event.record);
-        setProgressMessage(runtimeText(event.message));
+        setProgressMessage(event.message);
       }),
-    [runtimeText]
+    []
   );
 
   const browse = async (kind: "source" | "destination") => {
-    const selected = await api.chooseDirectory(
-      kind === "source"
-        ? ui("选择任意磁盘的源目录", "Choose a source directory on any drive")
-        : ui("选择目标磁盘目录", "Choose a destination directory"),
-      kind === "source" ? "migration-source" : "migration-destination"
-    );
-    if (!selected) return;
-    if (kind === "source") setSource(selected);
-    else setDestination(selected);
-    setPreflight(undefined);
-    setConsent(false);
-    setAcceptStaleAnalysis(false);
+    if (runningRef.current) return;
+    try {
+      const request = checkRequest.current;
+      const selected = await api.chooseDirectory(
+        kind === "source"
+          ? ui("选择任意磁盘的源目录", "Choose a source directory on any drive")
+          : ui("选择目标磁盘目录", "Choose a destination directory"),
+        kind === "source" ? "migration-source" : "migration-destination"
+      );
+      if (!selected || runningRef.current || request !== checkRequest.current) return;
+      if (kind === "source") setSource(selected);
+      else setDestination(selected);
+      resetPlan();
+    } catch (error) {
+      notify("error", error instanceof Error ? error.message : String(error));
+    }
   };
 
   const check = async () => {
+    if (runningRef.current) return;
     if (!source || !destination) {
       notify("error", ui("请先选择源目录和目标目录", "Choose both a source and a destination directory"));
       return;
     }
+    resetPlan();
+    const request = checkRequest.current;
     setChecking(true);
     try {
       const value = await api.preflightMigration(source, destination);
+      if (request !== checkRequest.current) return;
       setPreflight(value);
       setConsent(false);
       setAcceptStaleAnalysis(false);
       if (value.allowed) notify("success", ui("预检通过，可以进入安全迁移", "Preflight passed; safe migration is ready"));
       else notify("error", runtimeText(value.blockers[0]) || ui("预检未通过", "Preflight did not pass"));
     } catch (error) {
+      if (request !== checkRequest.current) return;
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
-      setChecking(false);
+      if (request === checkRequest.current) setChecking(false);
     }
   };
 
   const execute = async () => {
-    if (!preflight?.allowed || !consent) return;
+    if (runningRef.current || checking || !preflight?.allowed || !consent ||
+        (preflight.reanalysisRecommended && !acceptStaleAnalysis)) return;
+    runningRef.current = true;
+    activePlan.current = preflight;
+    setRecord(undefined);
+    setProgressMessage("");
     setRunning(true);
     try {
-      const completed = await api.executeMigration(source, destination);
+      const completed = await api.executeMigration(preflight.source, preflight.destinationBase);
       setRecord(completed);
-      notify("success", ui(`已释放 ${formatBytes(completed.totalBytes)} 原磁盘空间`, `Released ${formatBytes(completed.totalBytes)} on the source drive`));
-      await onCompleted();
+      if (completed.error) {
+        notify("error", `${ui("迁移已完成切换，但清理尚未完成", "Migration switched successfully, but cleanup is incomplete")}: ${completed.error}`);
+      } else {
+        notify("success", ui(`已释放 ${formatBytes(completed.totalBytes)} 原磁盘空间`, `Released ${formatBytes(completed.totalBytes)} on the source drive`));
+      }
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
+      setConsent(false);
+      runningRef.current = false;
       setRunning(false);
+      await onCompleted().catch((error) =>
+        notify("error", error instanceof Error ? error.message : String(error))
+      );
     }
   };
 
@@ -145,15 +189,14 @@ export function MigrateView({
             <FolderOpen size={18} />
             <input
               value={source}
+              disabled={running}
               onChange={(event) => {
                 setSource(event.target.value);
-                setPreflight(undefined);
-                setConsent(false);
-                setAcceptStaleAnalysis(false);
+                resetPlan();
               }}
               placeholder={ui("任意盘符:\\路径\\需要迁移的目录", "Any drive:\\path\\directory to migrate")}
             />
-            <button type="button" onClick={() => void browse("source")}>
+            <button type="button" disabled={running} onClick={() => void browse("source")}>
               {ui("浏览", "Browse")}
             </button>
           </div>
@@ -174,15 +217,14 @@ export function MigrateView({
             <FolderInput size={18} />
             <input
               value={destination}
+              disabled={running}
               onChange={(event) => {
                 setDestination(event.target.value);
-                setPreflight(undefined);
-                setConsent(false);
-                setAcceptStaleAnalysis(false);
+                resetPlan();
               }}
               placeholder="D:\Data"
             />
-            <button type="button" onClick={() => void browse("destination")}>
+            <button type="button" disabled={running} onClick={() => void browse("destination")}>
               {ui("浏览", "Browse")}
             </button>
           </div>
@@ -292,7 +334,7 @@ export function MigrateView({
                 style={{ "--migration-progress": `${progressPercent}%` } as CSSProperties}
               >
                 <div className="migration-live-head">
-                  <span>{progressMessage || ui("正在处理", "Processing")}</span>
+                  <span>{runtimeText(progressMessage) || ui("正在处理", "Processing")}</span>
                   <strong>
                     {record.stage === "linked"
                       ? ui("完成", "Complete")
@@ -327,6 +369,7 @@ export function MigrateView({
                     </div>
                   ))}
                 </div>
+                {record.error && <p className="record-error" role="alert">{runtimeText(record.error)}</p>}
               </div>
             )}
           </article>
@@ -386,6 +429,7 @@ export function MigrateView({
               <input
                 type="checkbox"
                 checked={consent}
+                disabled={running}
                 onChange={(event) => setConsent(event.target.checked)}
               />
               <span>

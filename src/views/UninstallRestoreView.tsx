@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -21,41 +21,54 @@ export function UninstallRestoreView() {
   const [restoring, setRestoring] = useState(false);
   const [currentPath, setCurrentPath] = useState("");
   const [errors, setErrors] = useState<string[]>([]);
+  const [loadError, setLoadError] = useState("");
+
+  const loadRecords = useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
+    try {
+      const items = await api.listMigrations();
+      const restorable = items.filter((item) => item.stage === "linked");
+      setRecords(restorable);
+      setSelected(new Set(restorable.map((item) => item.id)));
+    } catch (reason) {
+      setLoadError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     void api.getSettings().then((settings) => applyTextScale(settings.uiScale)).catch(() => undefined);
     const offSettings = api.onSettingsChanged((settings) => applyTextScale(settings.uiScale));
     const offTextScale = api.onTextScalePreview(applyTextScale);
-    void api
-      .listMigrations()
-      .then((items) => {
-        const restorable = items.filter((item) => item.stage === "linked");
-        setRecords(restorable);
-        setSelected(new Set(restorable.map((item) => item.id)));
-      })
-      .finally(() => setLoading(false));
+    void loadRecords();
     return () => {
       offSettings();
       offTextScale();
     };
-  }, []);
+  }, [loadRecords]);
 
   const selectedRecords = useMemo(
     () => records.filter((item) => selected.has(item.id)),
     [records, selected]
   );
 
-  const continueUninstall = () => void api.finishUtilityWindow();
+  const continueUninstall = () => void api.finishUtilityWindow().catch((reason) =>
+    setErrors([reason instanceof Error ? reason.message : String(reason)])
+  );
   const restoreSelected = async () => {
-    if (selectedRecords.length === 0) return;
+    if (selectedRecords.length === 0 || restoring || loading) return;
     setRestoring(true);
     setErrors([]);
     const failed: string[] = [];
     for (const record of selectedRecords) {
       setCurrentPath(record.source);
       try {
-        await api.rollbackMigration(record.id);
+        const restored = await api.rollbackMigration(record.id);
         setRecords((items) => items.filter((item) => item.id !== record.id));
+        setSelected((items) => new Set([...items].filter((id) => id !== record.id)));
+        if (restored.error) failed.push(`${record.source}：${restored.error}`);
       } catch (reason) {
         failed.push(
           `${record.source}：${reason instanceof Error ? reason.message : String(reason)}`
@@ -87,7 +100,7 @@ export function UninstallRestoreView() {
         <AlertTriangle size={18} />
         <div>
           <strong>{ui("恢复需要源盘有足够可用空间", "Restoring requires enough free space on the source drive")}</strong>
-          <span>{ui("数据复制回原盘并再次校验成功后，目标磁盘中的迁移副本会被删除。", "After the data is copied back and verified, the migrated copy on the destination drive is removed.")}</span>
+          <span>{ui("请先完全退出关联应用。数据复制回原盘并再次校验成功后，目标磁盘中的迁移副本会被删除。", "Close all related applications first. After the data is copied back and verified, the migrated copy on the destination drive is removed.")}</span>
         </div>
       </section>
 
@@ -119,6 +132,12 @@ export function UninstallRestoreView() {
           <div className="uninstall-empty">
             <span className="spinner" />
             {ui("正在读取项目目录中的迁移记录…", "Loading migration records from the application data directory…")}
+          </div>
+        ) : loadError ? (
+          <div className="uninstall-errors" role="alert">
+            <strong>{ui("无法读取迁移记录，尚不能确认是否有数据需要恢复", "Migration records could not be loaded; whether data needs restoring is unknown")}</strong>
+            <span>{loadError}</span>
+            <button type="button" onClick={() => void loadRecords()}>{ui("重试", "Retry")}</button>
           </div>
         ) : records.length === 0 ? (
           <div className="uninstall-empty">
@@ -168,7 +187,7 @@ export function UninstallRestoreView() {
       )}
       {errors.length > 0 && (
         <div className="uninstall-errors">
-          <strong>{ui("部分目录未恢复，请检查后重试或选择保留迁移状态：", "Some directories were not restored. Review the errors and retry, or keep the current migration state:")}</strong>
+          <strong>{ui("部分恢复或清理未完成，请检查后重试或选择保留现状：", "Some restoration or cleanup steps did not finish. Review the errors and retry, or keep the current state:")}</strong>
           {errors.map((error) => <span key={error}>{error}</span>)}
         </div>
       )}
@@ -177,7 +196,7 @@ export function UninstallRestoreView() {
         <button
           type="button"
           className="secondary-button"
-          disabled={restoring}
+          disabled={restoring || loading}
           onClick={continueUninstall}
         >
           {ui("保留现状并继续卸载", "Keep current state and continue uninstalling")}
@@ -185,7 +204,7 @@ export function UninstallRestoreView() {
         <button
           type="button"
           className="primary-button"
-          disabled={restoring || selectedRecords.length === 0}
+          disabled={restoring || loading || Boolean(loadError) || selectedRecords.length === 0}
           onClick={() => void restoreSelected()}
         >
           <DatabaseBackup size={16} />

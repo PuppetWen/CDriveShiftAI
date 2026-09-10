@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { migrationDestinationFor } from "../../electron/migration-path";
+import { migrationDestinationFor, normalizeMigrationPath } from "../../electron/migration-path";
 
 describe("migrationDestinationFor", () => {
   it("places a migrated directory directly below the selected destination", () => {
@@ -22,5 +22,12 @@ describe("migrationDestinationFor", () => {
     expect(result).toBe("E:\\Archive\\D3DSCache");
     expect(result).not.toContain("\\C\\Users\\");
     expect(result).not.toContain("\\CDriveShiftAI\\C\\");
+  });
+
+  it("rejects relative, drive-relative, root, and alternate-stream source paths", () => {
+    for (const source of ["", "app", "C:app", "C:\\", "C:\\Apps\\App:stream", "C:\\Apps\\bad."]) {
+      expect(() => migrationDestinationFor(source, "D:\\Moved")).toThrow();
+    }
+    expect(() => normalizeMigrationPath("\\\\server\\share\\App")).toThrow();
   });
 });

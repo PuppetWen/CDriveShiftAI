@@ -32,7 +32,11 @@ import {
 import { configureApplicationDataPaths } from "./data-root";
 import { createDiagnosticReport } from "./diagnostics";
 import { normalizeDirectoryDialogPurpose } from "./directory-dialog";
+import { openDeleteHelper } from "./delete-helper";
+import { ExplorerContextMenuService } from "./explorer-context-menu";
+import { ForceDeleteLaunchQueue, parseForceDeleteLaunch } from "./force-delete-launch";
 import { ForceDeleteService } from "./force-delete";
+import { assertNoMigrationPathMutation, assertRenameDestinationAvailable, migrationRecordDeletionReason } from "./file-operation-guard";
 import { nativeStrings } from "./i18n";
 import {
   configureLogger,
@@ -108,13 +112,68 @@ let visibleUpdateCheckTimer: NodeJS.Timeout | undefined;
 let mainWindowRecoveryTimer: NodeJS.Timeout | undefined;
 let lastVisibleUpdateCheckAt = 0;
 const store = new AppStore();
+const explorerContextMenu = new ExplorerContextMenuService({
+  isPackaged: app.isPackaged,
+  executablePath: process.execPath,
+  appPath: app.getAppPath(),
+  portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE
+});
+const forceDeleteLaunches = new ForceDeleteLaunchQueue();
+let fileRequestWindowReady = false;
 let migrationService: MigrationService;
 const aiVerifications = new Map<string, { fingerprint: string; expiresAt: number }>();
 const forceDeleteService = new ForceDeleteService({
   applicationExecutable: process.execPath,
   applicationDataRoot,
-  createVerificationId: randomUUID
+  createVerificationId: randomUUID,
+  assertPathAllowed: assertFileMutationAllowed
 });
+let settingsUpdateQueue: Promise<unknown> = Promise.resolve();
+let fileMutationCount = 0;
+const pendingFileMutations = new Set<Promise<unknown>>();
+
+async function assertFileMutationAllowed(targetPath: string): Promise<void> {
+  if (migrationService?.isBusy()) throw new Error("迁移或恢复正在执行，请完成后再删除或重命名");
+  await assertNoMigrationPathMutation(targetPath, store.listMigrations(), [path.dirname(process.execPath), applicationDataRoot]);
+}
+
+async function runFileMutation<T>(targetPath: string, operation: () => Promise<T>): Promise<T> {
+  if (isQuitting) throw new Error("程序正在退出，无法开始新的文件操作");
+  if (forceDeleteService.isBusy() || fileMutationCount > 0) throw new Error("其他文件操作正在执行，请完成后重试");
+  fileMutationCount++;
+  const pending = (async () => {
+    await assertFileMutationAllowed(targetPath);
+    return operation();
+  })();
+  pendingFileMutations.add(pending);
+  try {
+    return await pending;
+  } finally { fileMutationCount--; pendingFileMutations.delete(pending); }
+}
+
+function assertMigrationCanStart(): void {
+  if (isQuitting) throw new Error("程序正在退出，无法开始新的迁移或恢复");
+  if (fileMutationCount > 0 || forceDeleteService.isBusy()) throw new Error("文件操作正在执行，请完成后再迁移或恢复");
+}
+
+function serializeSettingsUpdate<T>(operation: () => Promise<T>): Promise<T> {
+  if (isQuitting) return Promise.reject(new Error("程序正在退出，无法保存新设置"));
+  const pending = settingsUpdateQueue.catch(() => undefined).then(operation);
+  settingsUpdateQueue = pending.catch(() => undefined);
+  return pending;
+}
+
+function applyLoginSettings(settings: AppSettings): void {
+  const portableExecutable = process.env.PORTABLE_EXECUTABLE_FILE?.trim();
+  app.setLoginItemSettings({
+    openAtLogin: settings.launchAtLogin,
+    ...(portableExecutable ? { path: portableExecutable } : {}),
+    args: [
+      ...(!app.isPackaged ? [app.getAppPath()] : []),
+      ...(settings.launchAtLogin && settings.launchMinimized ? ["--startup-minimized"] : [])
+    ]
+  });
+}
 
 function syncSearchBackgroundMode(): void {
   const hasVisibleWindow = [mainWindow, quickSearchWindow, uninstallRestoreWindow].some(
@@ -531,7 +590,7 @@ function assertUpdateCanInstall(): Promise<void> {
     "rolling-back"
   ]);
   const busy = store.listMigrations().find((record) => busyStages.has(record.stage));
-  if (busy) {
+  if (busy || migrationService?.isBusy() || forceDeleteService.isBusy() || fileMutationCount > 0) {
     return Promise.reject(
       new Error("当前有迁移或恢复事务正在执行；完成后才能更新程序")
     );
@@ -548,6 +607,30 @@ function sendNavigation(
   };
   if (window.webContents.isLoading()) window.webContents.once("did-finish-load", send);
   else send();
+}
+
+function showForceDeleteRequests(): void {
+  if (!fileRequestWindowReady || !forceDeleteLaunches.pending || isQuitting) return;
+  if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  // React also drains after subscribing, avoiding a cold-start listener race.
+  mainWindow.webContents.send("shell:force-delete-requests-available");
+}
+
+function acceptForceDeleteLaunch(argv: readonly string[]): boolean {
+  try {
+    const target = parseForceDeleteLaunch(argv);
+    if (!target) return false;
+    forceDeleteLaunches.enqueue(target);
+    showForceDeleteRequests();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn("force_delete.invalid_launch", { message });
+    void app.whenReady().then(() => dialog.showErrorBox("无法打开强制删除", message));
+  }
+  return true;
 }
 
 function showMainView(
@@ -681,6 +764,7 @@ const trayAiProviders: Array<{
 ];
 
 async function chooseTrayAiProvider(providerId: AiProviderId): Promise<void> {
+  return serializeSettingsUpdate(async () => {
   const preset = trayAiProviders.find((item) => item.id === providerId);
   if (!preset) return;
   const current = store.getSettings();
@@ -700,6 +784,7 @@ async function chooseTrayAiProvider(providerId: AiProviderId): Promise<void> {
   emitSettingsChanged(updated);
   createTray();
   showMainView("settings", { focus: "ai-settings" });
+  });
 }
 
 function createTray(): void {
@@ -810,10 +895,10 @@ function createTray(): void {
             | "theme-ivory"
         ),
         click: () => {
-          void store.updateSettings({ effectMode }).then((updated) => {
+          void serializeSettingsUpdate(() => store.updateSettings({ effectMode })).then((updated) => {
             emitSettingsChanged(updated);
             createTray();
-          });
+          }).catch((error) => logger.error("settings.tray_update_failed", { error: serializeError(error) }));
         }
       }))
     },
@@ -1051,7 +1136,7 @@ function showSearchContextMenu(
               noLink: true
             });
             if (confirmation.response !== 1) return { action: "dismissed" };
-            await shell.trashItem(targetPath);
+            await runFileMutation(targetPath, () => shell.trashItem(targetPath));
             return { action: "deleted", message: "已移入回收站" };
           })
       }
@@ -1129,61 +1214,91 @@ function registerIpc(): void {
     logger.info("diagnostics.exported", { reportPath: selected.filePath });
     return { cancelled: false, path: selected.filePath };
   });
-  ipcMain.handle("settings:update", async (_event, patch: unknown) => {
-    if (!patch || typeof patch !== "object") throw new Error("设置内容无效");
+  ipcMain.handle("settings:update", (_event, patch: unknown) => serializeSettingsUpdate(async () => {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error("设置内容无效");
     const { ai: _ignoredAi, apiKey: _ignoredApiKey, ...safePatch } = patch as Record<
       string,
       unknown
     >;
-    const previous = store.getSettings();
-    const candidate = {
-      ...previous,
-      ...(safePatch as Partial<Omit<AppSettings, "ai">>)
+    if ("forceDeleteContextMenu" in safePatch && typeof safePatch.forceDeleteContextMenu !== "boolean") {
+      throw new Error("右键强制删除开关必须为布尔值");
+    }
+    const applySettings = async () => {
+      const previous = store.getSettings();
+      const candidate = {
+        ...previous,
+        ...(safePatch as Partial<Omit<AppSettings, "ai">>)
+      };
+      const changesKeyboardShortcuts =
+        Object.prototype.hasOwnProperty.call(safePatch, "globalShortcut") ||
+        Object.prototype.hasOwnProperty.call(safePatch, "quickSearchShortcut");
+      for (const key of ["globalShortcut", "quickSearchShortcut"] as const) {
+        if (key in safePatch && typeof safePatch[key] !== "string") throw new Error("快捷键格式无效");
+      }
+      if (changesKeyboardShortcuts) {
+        const shortcutFailures = applyGlobalShortcuts(candidate);
+        if (shortcutFailures.length > 0) {
+          applyGlobalShortcuts(previous);
+          throw new Error(shortcutFailures.join("；"));
+        }
+      }
+      const changesLogin = "launchAtLogin" in safePatch || "launchMinimized" in safePatch;
+      let persisted = false;
+      try {
+        if (changesLogin) {
+          if (typeof candidate.launchAtLogin !== "boolean" || typeof candidate.launchMinimized !== "boolean") {
+            throw new Error("开机启动设置无效");
+          }
+          applyLoginSettings(candidate);
+        }
+        const settings = await store.updateSettings(
+          safePatch as Partial<Omit<AppSettings, "ai">>
+        );
+        persisted = true;
+        if (
+          previous.mouseQuickSearchButton !== settings.mouseQuickSearchButton ||
+          previous.mouseQuickSearchHoldMs !== settings.mouseQuickSearchHoldMs
+        ) {
+          await searchService?.configureMouseShortcut(
+            settings.mouseQuickSearchButton,
+            settings.mouseQuickSearchHoldMs
+          );
+        }
+        if (
+          previous.magnifierEnabled !== settings.magnifierEnabled ||
+          previous.magnifierModifiers !== settings.magnifierModifiers ||
+          previous.magnifierWidth !== settings.magnifierWidth ||
+          previous.magnifierHeight !== settings.magnifierHeight
+        ) {
+          await searchService?.configureMagnifier(
+            settings.magnifierEnabled,
+            settings.magnifierModifiers,
+            settings.magnifierWidth,
+            settings.magnifierHeight
+          );
+        }
+        emitSettingsChanged(settings);
+        createTray();
+        return settings;
+      } catch (error) {
+        const recovery: Array<Promise<unknown>> = [];
+        if (persisted) {
+          recovery.push(store.updateSettings(previous).then(emitSettingsChanged));
+          recovery.push(Promise.resolve().then(() => searchService?.configureMouseShortcut(previous.mouseQuickSearchButton, previous.mouseQuickSearchHoldMs)));
+          recovery.push(Promise.resolve().then(() => searchService?.configureMagnifier(previous.magnifierEnabled, previous.magnifierModifiers, previous.magnifierWidth, previous.magnifierHeight)));
+        }
+        if (changesKeyboardShortcuts) recovery.push(Promise.resolve().then(() => applyGlobalShortcuts(previous)));
+        if (changesLogin) recovery.push(Promise.resolve().then(() => applyLoginSettings(previous)));
+        for (const outcome of await Promise.allSettled(recovery)) {
+          if (outcome.status === "rejected") logger.error("settings.restore_failed", { error: serializeError(outcome.reason) });
+        }
+        throw error;
+      }
     };
-    const changesKeyboardShortcuts =
-      Object.prototype.hasOwnProperty.call(safePatch, "globalShortcut") ||
-      Object.prototype.hasOwnProperty.call(safePatch, "quickSearchShortcut");
-    if (changesKeyboardShortcuts) {
-      const shortcutFailures = applyGlobalShortcuts(candidate);
-      if (shortcutFailures.length > 0) {
-        applyGlobalShortcuts(previous);
-        throw new Error(shortcutFailures.join("；"));
-      }
-    }
-    try {
-      const settings = await store.updateSettings(
-        safePatch as Partial<Omit<AppSettings, "ai">>
-      );
-      if (
-        previous.mouseQuickSearchButton !== settings.mouseQuickSearchButton ||
-        previous.mouseQuickSearchHoldMs !== settings.mouseQuickSearchHoldMs
-      ) {
-        await searchService?.configureMouseShortcut(
-          settings.mouseQuickSearchButton,
-          settings.mouseQuickSearchHoldMs
-        );
-      }
-      if (
-        previous.magnifierEnabled !== settings.magnifierEnabled ||
-        previous.magnifierModifiers !== settings.magnifierModifiers ||
-        previous.magnifierWidth !== settings.magnifierWidth ||
-        previous.magnifierHeight !== settings.magnifierHeight
-      ) {
-        await searchService?.configureMagnifier(
-          settings.magnifierEnabled,
-          settings.magnifierModifiers,
-          settings.magnifierWidth,
-          settings.magnifierHeight
-        );
-      }
-      emitSettingsChanged(settings);
-      createTray();
-      return settings;
-    } catch (error) {
-      if (changesKeyboardShortcuts) applyGlobalShortcuts(previous);
-      throw error;
-    }
-  });
+    return "forceDeleteContextMenu" in safePatch
+      ? explorerContextMenu.withEnabled(safePatch.forceDeleteContextMenu as boolean, applySettings)
+      : applySettings();
+  }));
   ipcMain.handle(
     "shortcut:check",
     (_event, shortcut: unknown, target: unknown) =>
@@ -1311,7 +1426,7 @@ function registerIpc(): void {
     };
   });
 
-  ipcMain.handle("ai:save-draft", async (_event, raw: unknown) => {
+  ipcMain.handle("ai:save-draft", (_event, raw: unknown) => serializeSettingsUpdate(async () => {
     if (!raw || typeof raw !== "object") throw new Error("AI 草稿配置无效");
     const input = raw as AiDraftSaveInput;
     const rawBaseUrl =
@@ -1361,9 +1476,9 @@ function registerIpc(): void {
     emitSettingsChanged(updated);
     createTray();
     return updated;
-  });
+  }));
 
-  ipcMain.handle("ai:save", async (_event, raw: unknown) => {
+  ipcMain.handle("ai:save", (_event, raw: unknown) => serializeSettingsUpdate(async () => {
     if (!raw || typeof raw !== "object") throw new Error("AI 保存配置无效");
     const input = raw as AiSaveInput;
     if (!input.enabled) {
@@ -1421,7 +1536,7 @@ function registerIpc(): void {
     emitSettingsChanged(updated);
     createTray();
     return updated;
-  });
+  }));
 
   ipcMain.handle("dialog:directory", async (event, title?: unknown, purpose?: unknown) => {
     const safePurpose = normalizeDirectoryDialogPurpose(purpose);
@@ -1523,14 +1638,14 @@ function registerIpc(): void {
         await lstat(destination);
         throw new Error(`目标已存在：${destination}`);
       } catch (error) {
-        if (error instanceof Error && error.message.startsWith("目标已存在")) throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
-      await cp(source, destination, {
+      await runFileMutation(destination, () => cp(source, destination, {
         recursive: sourceStats.isDirectory(),
         errorOnExist: true,
         force: false,
         preserveTimestamps: true
-      });
+      }));
       return destination;
     }
   );
@@ -1540,6 +1655,9 @@ function registerIpc(): void {
     async (_event, targetPath: unknown, requestedName: unknown) => {
       const source = assertString(targetPath, "路径");
       await lstat(source);
+      const protection = protectedReason(source);
+      if (protection) throw new Error(`受保护路径不能重命名：${protection}`);
+      await assertFileMutationAllowed(source);
       const newName = assertString(requestedName, "新名称", 255).trim();
       if (
         /[<>:"/\\|?*\u0000-\u001f]/.test(newName) ||
@@ -1549,7 +1667,11 @@ function registerIpc(): void {
         throw new Error("名称包含 Windows 不允许的字符或保留名称");
       }
       const destination = path.join(path.dirname(source), newName);
-      await rename(source, destination);
+      await runFileMutation(source, async () => {
+        await assertFileMutationAllowed(destination);
+        await assertRenameDestinationAvailable(source, destination);
+        await rename(source, destination);
+      });
       return destination;
     }
   );
@@ -1623,7 +1745,7 @@ function registerIpc(): void {
       noLink: true
     });
     if (confirmation.response !== 1) return false;
-    await shell.trashItem(value);
+    await runFileMutation(value, () => shell.trashItem(value));
     return true;
   });
 
@@ -1631,9 +1753,30 @@ function registerIpc(): void {
     forceDeleteService.preview(assertString(targetPath, "路径"))
   );
 
-  ipcMain.handle("shell:force-delete-execute", (_event, verificationId: unknown) =>
-    forceDeleteService.execute(assertString(verificationId, "强制删除确认 ID", 128))
+  ipcMain.handle("shell:delete-helper", (_event, target: unknown) =>
+    openDeleteHelper(target, shell)
   );
+
+  ipcMain.handle("shell:force-delete-menu-status", async () => {
+    const status = await explorerContextMenu.getStatus();
+    return {
+      enabled: status.registered,
+      available: status.supported,
+      reason: status.needsRepair
+        ? "菜单指向旧版本或注册不完整，请关闭后重新开启 / Menu needs repair; switch it off and on again"
+        : !status.supported ? "仅支持 Windows 桌面版 / Windows desktop only" : undefined
+    };
+  });
+  ipcMain.handle("shell:force-delete-requests", (event) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) return [];
+    return forceDeleteLaunches.takeAll();
+  });
+
+  ipcMain.handle("shell:force-delete-execute", (_event, verificationId: unknown) => {
+    if (isQuitting) throw new Error("程序正在退出，无法开始新的删除操作");
+    if (fileMutationCount > 0 || forceDeleteService.isBusy()) throw new Error("其他文件操作正在执行，请完成后重试");
+    return forceDeleteService.execute(assertString(verificationId, "强制删除确认 ID", 128));
+  });
 
   ipcMain.handle(
     "shell:search-context-menu",
@@ -1925,20 +2068,25 @@ function registerIpc(): void {
   );
   ipcMain.handle(
     "migration:execute",
-    (_event, source: unknown, destination: unknown) =>
-      migrationService.execute(
+    (_event, source: unknown, destination: unknown) => {
+      assertMigrationCanStart();
+      return migrationService.execute(
         assertString(source, "源目录"),
         assertString(destination, "目标目录")
-      )
+      );
+    }
   );
   ipcMain.handle("migration:list", () => store.listMigrations());
-  ipcMain.handle("migration:rollback", (_event, id: unknown) =>
-    migrationService.rollback(assertString(id, "迁移记录 ID", 128))
-  );
-  ipcMain.handle("migration:reapply", (_event, id: unknown) =>
-    migrationService.reapply(assertString(id, "迁移记录 ID", 128))
-  );
+  ipcMain.handle("migration:rollback", (_event, id: unknown) => {
+    assertMigrationCanStart();
+    return migrationService.rollback(assertString(id, "迁移记录 ID", 128));
+  });
+  ipcMain.handle("migration:reapply", (_event, id: unknown) => {
+    assertMigrationCanStart();
+    return migrationService.reapply(assertString(id, "迁移记录 ID", 128));
+  });
   ipcMain.handle("migration:delete", async (_event, rawIds: unknown) => {
+    if (migrationService.isBusy()) throw new Error("迁移或恢复正在执行，不能删除记录");
     if (!Array.isArray(rawIds)) throw new Error("迁移记录 ID 列表无效");
     const ids = [
       ...new Set(
@@ -1947,27 +2095,22 @@ function registerIpc(): void {
           .map((id) => assertString(id, "迁移记录 ID", 128))
       )
     ];
-    const busyStages = new Set([
-      "preflight",
-      "copying",
-      "verifying",
-      "switching",
-      "rolling-back"
-    ]);
-    const busy = ids
-      .map((id) => store.getMigration(id))
-      .filter((record) => record && busyStages.has(record.stage));
-    if (busy.length > 0) {
-      throw new Error("正在迁移或回滚的记录不能删除");
+    for (const id of ids) {
+      const record = store.getMigration(id);
+      const reason = record && migrationRecordDeletionReason(record);
+      if (reason) throw new Error(reason);
     }
     return store.deleteMigrations(ids);
   });
 }
 
 const uninstallRestoreMode = process.argv.includes("--uninstall-restore");
-const singleInstance = uninstallRestoreMode ? true : app.requestSingleInstanceLock();
+const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) {
-  app.quit();
+  if (uninstallRestoreMode) {
+    dialog.showErrorBox("无法开始卸载恢复", "CDriveShiftAI 仍在运行。请先退出正在运行的程序，再重试卸载。");
+    app.exit(1);
+  } else app.quit();
 } else if (uninstallRestoreMode) {
   app.whenReady().then(async () => {
     logger.info("application.ready", {
@@ -1984,12 +2127,17 @@ if (!singleInstance) {
     });
     await store.init();
     applyNativeEffect(store.getSettings().effectMode);
-    migrationService = new MigrationService(store, () => undefined);
+    migrationService = new MigrationService(store, () => undefined, {
+      protectedPaths: [path.dirname(process.execPath), applicationDataRoot]
+    });
+    await migrationService.recoverIncomplete();
     registerIpc();
     createUninstallRestoreWindow();
-  });
+  }).catch(handleStartupFailure);
 } else {
-  app.on("second-instance", () => {
+  acceptForceDeleteLaunch(process.argv);
+  app.on("second-instance", (_event, argv) => {
+    if (acceptForceDeleteLaunch(argv)) return;
     // The renderer is intentionally destroyed while resident in the tray.
     // Launching the executable again must therefore recreate the main window,
     // not silently return just because no BrowserWindow currently exists.
@@ -2053,17 +2201,20 @@ if (!singleInstance) {
       }
     );
     migrationService = new MigrationService(store, (record, message) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("migration:progress", { record, message });
+      for (const window of [mainWindow, uninstallRestoreWindow]) {
+        if (window && !window.isDestroyed()) window.webContents.send("migration:progress", { record, message });
       }
-    });
+    }, { protectedPaths: [path.dirname(process.execPath), applicationDataRoot] });
+    await migrationService.recoverIncomplete();
     updateService = new UpdateService(emitUpdateState, assertUpdateCanInstall);
     registerIpc();
+    fileRequestWindowReady = true;
     const startupMinimized =
       process.argv.includes("--startup-minimized") &&
       currentSettings.launchAtLogin &&
       currentSettings.launchMinimized;
     if (!startupMinimized) mainWindow = createWindow();
+    showForceDeleteRequests();
     createTray();
     syncSearchBackgroundMode();
     triggerVisibleUpdateCheck("application-startup", 2_500);
@@ -2074,7 +2225,6 @@ if (!singleInstance) {
         failures: shortcutFailures
       });
     }
-    await migrationService.recoverIncomplete();
     // Let Chromium finish the first interactive frame before parsing a
     // multi-million-entry persistent index. Search remains fully accurate once
     // the same cache is loaded; this only removes startup contention.
@@ -2103,7 +2253,13 @@ if (!singleInstance) {
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) showMainView("overview");
     });
-  });
+  }).catch(handleStartupFailure);
+}
+
+function handleStartupFailure(error: unknown): void {
+  logger.error("application.startup_failed", { error: serializeError(error) });
+  dialog.showErrorBox("CDriveShiftAI 启动失败", error instanceof Error ? error.message : String(error));
+  app.exit(1);
 }
 
 app.on("window-all-closed", () => {
@@ -2133,11 +2289,19 @@ app.on("before-quit", (event) => {
   if (!shutdownPromise) {
     shutdownPromise = (async () => {
       try {
-        await searchService?.stop();
+        await migrationService?.whenIdle();
+        await forceDeleteService.whenIdle();
+        await Promise.allSettled([...pendingFileMutations]);
+        await settingsUpdateQueue;
+        await store.whenIdle();
       } finally {
-        shutdownComplete = true;
-        logger.info("application.shutdown_completed");
-        app.quit();
+        try {
+          await searchService?.stop();
+        } finally {
+          shutdownComplete = true;
+          logger.info("application.shutdown_completed");
+          app.quit();
+        }
       }
     })();
   }

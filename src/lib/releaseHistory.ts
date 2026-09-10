@@ -10,6 +10,47 @@ const previousReleases: Array<{
   en: Omit<BundledReleaseNote, "version">;
 }> = [
   {
+    version: "0.1.3",
+    zh: {
+      summary: "修复更新完成后在安装目录旁遗留 CDriveShiftAI-Update-Runner 空目录的问题，并加强更新助手清理验证。",
+      sections: [
+        {
+          title: "更新目录位置与清理",
+          items: [
+            "安装版与便携版的更新助手改用安装目录内部的专用目录，文件名包含目标版本。",
+            "新版本启动确认后清除整个内部 runner 目录，并清理由旧版遗留且确实为空的同级目录。"
+          ]
+        },
+        {
+          title: "安装安全与验证",
+          items: [
+            "更新保留助手哈希校验、原安装路径和应用数据，严格限制清理范围。",
+            "安装版和便携版完整更新测试覆盖助手启动、失败恢复及更新文件清理。"
+          ]
+        }
+      ]
+    },
+    en: {
+      summary: "Prevented updates from leaving an empty CDriveShiftAI-Update-Runner beside the installation and strengthened helper cleanup verification.",
+      sections: [
+        {
+          title: "Runner location and cleanup",
+          items: [
+            "Installed and portable updates use an internal helper directory with versioned helper filenames.",
+            "Startup acknowledgement removes the internal runner and any empty legacy sibling runner directory."
+          ]
+        },
+        {
+          title: "Installation safety and verification",
+          items: [
+            "Updates retain helper hashes, installation paths, and application data with strict cleanup boundaries.",
+            "Installed and portable update tests cover helper startup, recovery, and update-file cleanup."
+          ]
+        }
+      ]
+    }
+  },
+  {
     version: "0.1.2",
     zh: {
       summary: "重做非系统盘归属扫描，深入识别安装应用、绿色便携应用及其应用数据，并修正受限目录统计。",

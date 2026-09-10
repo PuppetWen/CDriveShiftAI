@@ -5682,6 +5682,11 @@ input:checked + .toggle::after { transform: translateX(13px); }
 .setting-row small { display: block; }
 .setting-row strong { font-size: 9px; }
 .setting-row small { margin-top: 2px; color: var(--dim); font-size: 7px; }
+.force-delete-context-menu-card .setting-row { gap: 16px; padding: 6px 0 14px; }
+.force-delete-context-menu-card .setting-row small { margin-top: 5px; line-height: 1.6; }
+.context-menu-status { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 12px; color: var(--muted); font-size: 9px; }
+.context-menu-status .secondary-button { min-height: 30px; font-size: 8px; }
+.context-menu-warning, .context-menu-warning svg { color: var(--amber); }
 
 .ai-master { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 9px; }
 .disabled-form { opacity: .5; }
@@ -8015,6 +8020,7 @@ html.background-suspended *::after {
 }
 
 .force-delete-dialog > header {
+  flex: 0 0 auto;
   min-height: 76px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -8059,6 +8065,7 @@ html.background-suspended *::after {
 .force-delete-dialog > header > button:hover { color: var(--text); border-color: var(--border-strong); }
 
 .force-delete-body {
+  min-height: 0;
   overflow: auto;
   display: grid;
   gap: 12px;
@@ -8189,9 +8196,28 @@ html.background-suspended *::after {
   background: color-mix(in srgb, var(--danger) 10%, var(--surface-solid));
 }
 .force-delete-error svg { flex: 0 0 auto; }
-.force-delete-error span { font-size: 8px; line-height: 1.55; overflow-wrap: anywhere; }
+.force-delete-error span { font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+
+.force-delete-guidance { display: grid; gap: 14px; }
+.force-delete-guidance h3 { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--amber); font-size: 14px; }
+.force-delete-guidance h3 svg { flex: 0 0 auto; }
+.force-delete-help-intro { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.force-delete-guidance ol { display: grid; gap: 10px; margin: 0; padding-left: 24px; }
+.force-delete-guidance li { padding-left: 3px; color: var(--muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.force-delete-guidance li::marker { color: var(--mint); font-weight: 700; }
+.force-delete-last-processes { margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); color: var(--muted); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.force-delete-help-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.force-delete-help-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 6px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 11px; cursor: pointer; }
+.force-delete-help-actions button:hover { border-color: var(--mint); }
+.force-delete-help-actions button:focus-visible,
+.force-delete-guidance summary:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+.force-delete-advanced-help, .force-delete-error-details { padding-top: 12px; border-top: 1px solid var(--border); }
+.force-delete-guidance summary { color: var(--muted); font-size: 12px; line-height: 1.5; cursor: pointer; }
+.force-delete-advanced-help[open] ol { margin: 14px 0; }
+.force-delete-error-details[open] .force-delete-error { margin-top: 12px; }
 
 .force-delete-dialog > footer {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;

@@ -29,6 +29,7 @@ const programFilesPaths = [
 
 export const CORE_PROTECTED_PATHS = [
   windowsRoot,
+  ...programFilesPaths.map((root) => path.join(root, "WindowsApps")),
   path.join(systemDrive, "ProgramData", "Microsoft"),
   path.join(systemDrive, "Users", "Default"),
   path.join(systemDrive, "Users", "Public"),
@@ -49,11 +50,14 @@ export function samePath(a: string, b: string): boolean {
 
 export function isPathWithin(candidate: string, parent: string): boolean {
   const relative = path.win32.relative(normalizeWindowsPath(parent), normalizeWindowsPath(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.win32.isAbsolute(relative));
+  return relative === "" || (relative !== ".." && !relative.startsWith("..\\") && !path.win32.isAbsolute(relative));
 }
 
 export function protectedReason(candidate: string): string | undefined {
+  if (/^(?:\\\\[?.]\\|\\\?\?\\)/.test(candidate)) return "不支持设备命名空间路径，请选择普通本地路径";
   const normalized = normalizeWindowsPath(candidate);
+  if (/^[a-z]:\\(?:WindowsApps|WpSystem)(?:\\|$)/i.test(normalized)) return "Windows 商店应用由系统管理，不能直接迁移或删除";
+  if (/\\AppData\\Local\\Packages(?:\\|$)/i.test(normalized)) return "Windows 商店应用数据由应用容器管理，不能直接迁移或删除";
   if (/^[a-zA-Z]:\\$/.test(normalized)) return "不能迁移整个盘符根目录";
   const exactOrParent = CORE_PROTECTED_PATHS.find(
     (protectedPath) =>
@@ -143,11 +147,13 @@ export async function getLocalDriveRoots(): Promise<string[]> {
 export async function isElevated(): Promise<boolean> {
   elevationCheck ??= (async () => {
     try {
-      await execFileAsync("net.exe", ["session"], {
+      const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"
+      ], {
         windowsHide: true,
         timeout: 3_000
       });
-      return true;
+      return stdout.trim().toLowerCase() === "true";
     } catch {
       return false;
     }

@@ -33,6 +33,8 @@ import { Sidebar } from "./components/Sidebar";
 import { Toasts, type ToastItem } from "./components/ui";
 import { OverviewView } from "./views/OverviewView";
 
+const ForceDeleteDialog = lazy(() => import("./components/ForceDeleteDialog").then((module) => ({ default: module.ForceDeleteDialog })));
+
 const SearchView = lazy(() =>
   import("./views/SearchView").then((module) => ({ default: module.SearchView }))
 );
@@ -95,9 +97,14 @@ export default function App() {
     pending: false
   });
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [forceDeleteJobs, setForceDeleteJobs] = useState<Array<{ path: string; onDeleted?: (path: string) => void }>>([]);
+  const forceDeleteJobsRef = useRef(forceDeleteJobs);
+  forceDeleteJobsRef.current = forceDeleteJobs;
   const [startupEffect] = useState<EffectMode>(initialEffectMode);
   const effectRequest = useRef(0);
   const viewScrollRef = useRef<HTMLElement>(null);
+  const localization = useRef({ ui, runtimeText });
+  localization.current = { ui, runtimeText };
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -119,7 +126,36 @@ export default function App() {
     setHistory(records);
   }, []);
 
+  const requestForceDelete = useCallback((path: string, onDeleted?: (path: string) => void) => {
+    setForceDeleteJobs((jobs) => {
+      const index = jobs.findIndex((job) => job.path.toLowerCase() === path.toLowerCase());
+      if (index < 0) return [...jobs, { path, onDeleted }];
+      if (!onDeleted || jobs[index].onDeleted === onDeleted) return jobs;
+      return jobs.map((job, position) => position !== index ? job : {
+        ...job, onDeleted: (deletedPath) => { job.onDeleted?.(deletedPath); onDeleted(deletedPath); }
+      });
+    });
+  }, []);
+
   useEffect(() => {
+    const receive = () => {
+      void api.takeForceDeleteRequests().then((paths) => {
+        for (const path of paths) requestForceDelete(path);
+      }).catch((reason) => notify("error", String(reason)));
+    };
+    // Subscribe before draining: cold launches and resident/tray launches use
+    // the same queue, including requests arriving while a dialog is executing.
+    const unsubscribe = api.onForceDeleteRequests(receive);
+    receive();
+    return unsubscribe;
+  }, [notify, requestForceDelete]);
+
+  useEffect(() => {
+    let active = true;
+    let settingsChanged = false;
+    let migrationChanged = false;
+    let indexerChanged = false;
+    let navigationChanged = false;
     void Promise.allSettled([
       api.getOverview(),
       api.getSettings(),
@@ -127,26 +163,33 @@ export default function App() {
       api.getLastAnalysis(),
       api.getUiLayout()
     ]).then(([overviewResult, settingsResult, migrationsResult, analysisResult, layoutResult]) => {
+      if (!active) return;
+      const { ui } = localization.current;
       const failures: string[] = [];
       if (overviewResult.status === "fulfilled") {
         setOverview(overviewResult.value);
-        setIndexer(overviewResult.value.indexer);
+        if (!indexerChanged) setIndexer(overviewResult.value.indexer);
       } else {
         failures.push(`${ui("系统信息", "System overview")}: ${String(overviewResult.reason)}`);
       }
       if (settingsResult.status === "fulfilled") {
-        setSettings(settingsResult.value);
-        setAppLanguage(settingsResult.value.language);
+        if (!settingsChanged) {
+          setSettings(settingsResult.value);
+          setAppLanguage(settingsResult.value.language);
+        }
       } else {
         failures.push(`${ui("设置", "Settings")}: ${String(settingsResult.reason)}`);
       }
       if (migrationsResult.status === "fulfilled") {
-        setHistory(migrationsResult.value);
+        if (!migrationChanged) setHistory(migrationsResult.value);
       } else {
         failures.push(`${ui("迁移记录", "Migration history")}: ${String(migrationsResult.reason)}`);
       }
       if (analysisResult.status === "fulfilled") {
-        if (analysisResult.value) setSelectedPath(analysisResult.value.summary.path);
+        if (analysisResult.value && !navigationChanged) {
+          const savedPath = analysisResult.value.summary.path;
+          setSelectedPath((current) => current || savedPath);
+        }
       } else {
         failures.push(`${ui("分析记录", "Analysis history")}: ${String(analysisResult.reason)}`);
       }
@@ -163,15 +206,20 @@ export default function App() {
       }
     });
 
-    const offIndexer = api.onIndexerStatus(setIndexer);
+    const offIndexer = api.onIndexerStatus((status) => {
+      indexerChanged = true;
+      setIndexer(status);
+    });
     const offMigration = api.onMigrationProgress(({ record, message }) => {
+      migrationChanged = true;
       setHistory((items) => {
         const next = items.filter((item) => item.id !== record.id);
         return [record, ...next];
       });
-      if (record.stage === "linked") notify("success", runtimeText(message));
+      if (record.stage === "linked") notify(record.error ? "error" : "success", localization.current.runtimeText(record.error ?? message));
     });
     const offNavigation = api.onAppNavigation((event) => {
+      navigationChanged = true;
       if (event.path) {
         setSelectedPath(event.path);
         if (event.view === "analyze") {
@@ -194,19 +242,21 @@ export default function App() {
       }
     });
     const offSettings = api.onSettingsChanged((updated) => {
+      settingsChanged = true;
       setSettings(updated);
       setAppLanguage(updated.language);
     });
     const offUpdate = api.onUpdateStatus(setUpdateInfo);
     void api.getUpdateState().then(setUpdateInfo).catch(() => undefined);
     return () => {
+      active = false;
       offIndexer();
       offMigration();
       offNavigation();
       offSettings();
       offUpdate();
     };
-  }, [notify, runtimeText, ui]);
+  }, [notify]);
 
   const refreshUpdate = useCallback(async () => {
     const result = await api.checkForUpdates(true);
@@ -273,7 +323,7 @@ export default function App() {
         if (request === effectRequest.current) setSettings(updated);
       } catch (error) {
         if (request === effectRequest.current) {
-          setSettings(previous);
+          setSettings((current) => current ? { ...current, effectMode: previous.effectMode } : previous);
           notify("error", error instanceof Error ? error.message : String(error));
         }
       }
@@ -320,6 +370,7 @@ export default function App() {
             onAnalyze={analyzePath}
             onMigrate={migratePath}
             notify={notify}
+            onRequestForceDelete={requestForceDelete}
           />
         );
       case "ownership-map":
@@ -382,6 +433,7 @@ export default function App() {
     overview,
     refreshUpdate,
     refreshHistory,
+    requestForceDelete,
     selectedPath,
     settings,
     settingsModule,
@@ -461,6 +513,15 @@ export default function App() {
         </section>
       </main>
       <Toasts items={toasts} dismiss={(id) => setToasts((items) => items.filter((x) => x.id !== id))} />
+      {forceDeleteJobs[0] && <Suspense fallback={null}>
+        <ForceDeleteDialog
+          key={forceDeleteJobs[0].path}
+          path={forceDeleteJobs[0].path}
+          onClose={() => setForceDeleteJobs((jobs) => jobs.slice(1))}
+          onDeleted={(path) => forceDeleteJobsRef.current[0]?.onDeleted?.(path)}
+          notify={notify}
+        />
+      </Suspense>}
     </div>
   );
 }

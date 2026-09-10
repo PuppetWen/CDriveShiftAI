@@ -98,6 +98,7 @@ interface SearchViewProps {
   onMigrate: (path: string) => void;
   notify: (type: "success" | "error", message: string) => void;
   standalone?: boolean;
+  onRequestForceDelete?: (path: string, onDeleted: (path: string) => void) => void;
 }
 
 const NAME_PAGE_SIZE = 240;
@@ -178,6 +179,7 @@ export function SearchView({
   onAnalyze,
   onMigrate,
   notify,
+  onRequestForceDelete,
   standalone = false
 }: SearchViewProps) {
   const { t, ui, runtimeText, formatNumber } = useI18n();
@@ -517,6 +519,7 @@ export function SearchView({
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
         event.preventDefault();
         searchInputRef.current?.focus();
@@ -1515,6 +1518,12 @@ export function SearchView({
     setContentResults((items) => items.filter((item) => item.path !== targetPath));
     setSelectedPath("");
   }, []);
+
+  useEffect(() => {
+    if (!forceDeletePath || !onRequestForceDelete) return;
+    onRequestForceDelete(forceDeletePath, removeResult);
+    setForceDeletePath("");
+  }, [forceDeletePath, onRequestForceDelete, removeResult]);
 
   const renameResult = useCallback((oldPath: string, newPath: string) => {
     const name = newPath.split(/[\\/]/).pop() ?? newPath;
@@ -2750,7 +2759,7 @@ export function SearchView({
           notify={notify}
         />
       )}
-      {forceDeletePath && (
+      {forceDeletePath && !onRequestForceDelete && (
         <ForceDeleteDialog
           path={forceDeletePath}
           onClose={() => setForceDeletePath("")}

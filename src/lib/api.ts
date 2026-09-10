@@ -66,6 +66,7 @@ const mockSettings: AppSettings = {
   launchAtLogin: false,
   launchMinimized: false,
   minimizeToTray: true,
+  forceDeleteContextMenu: false,
   globalShortcut: "CommandOrControl+Alt+Space",
   quickSearchShortcut: "CommandOrControl+Alt+F",
   mouseQuickSearchButton: "back",
@@ -466,6 +467,17 @@ const browserFallback: CDriveShiftApi = {
   async executeForceDelete() {
     return { deleted: true, terminatedProcesses: [] };
   },
+  async openDeleteHelper(target) {
+    const manualSteps = target === "task-manager"
+      ? "请按 Ctrl + Shift + Esc 打开任务管理器"
+      : "请按 Win + I 打开设置，进入“应用”→“已安装的应用”（Windows 10 为“应用和功能”）";
+    throw new Error(`浏览器预览无法打开 Windows 系统工具。${manualSteps}，或使用 Windows 桌面版。`);
+  },
+  async getForceDeleteContextMenuStatus() {
+    return { enabled: false, available: false, reason: "Windows 右键菜单需要使用桌面版 / Explorer integration requires the Windows desktop app" };
+  },
+  async takeForceDeleteRequests() { return []; },
+  onForceDeleteRequests: () => () => undefined,
   async directorySizes(paths) {
     return paths.map((path, index) => ({
       path,

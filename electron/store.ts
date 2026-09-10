@@ -1,5 +1,5 @@
 import { app, safeStorage } from "electron";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { sanitizeDirectoryDialogPaths } from "./directory-dialog";
 import {
@@ -31,6 +31,7 @@ const defaults: StoreShape = {
     launchAtLogin: false,
     launchMinimized: false,
     minimizeToTray: true,
+    forceDeleteContextMenu: false,
     globalShortcut: "CommandOrControl+Alt+Space",
     quickSearchShortcut: "CommandOrControl+Alt+F",
     mouseQuickSearchButton: "back",
@@ -420,6 +421,10 @@ function sanitizeMigration(value: unknown): MigrationRecord | undefined {
     id,
     source,
     destination,
+    restorePath:
+      typeof input.restorePath === "string"
+        ? safeString(input.restorePath, 32_768)
+        : undefined,
     stagingPath:
       typeof input.stagingPath === "string"
         ? safeString(input.stagingPath, 32_768)
@@ -526,7 +531,10 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
   ].filter((part): part is string => Boolean(part));
   return {
     ...defaults.settings,
-    ...input,
+    launchAtLogin: typeof input?.launchAtLogin === "boolean" ? input.launchAtLogin : defaults.settings.launchAtLogin,
+    launchMinimized: typeof input?.launchMinimized === "boolean" ? input.launchMinimized : defaults.settings.launchMinimized,
+    minimizeToTray: typeof input?.minimizeToTray === "boolean" ? input.minimizeToTray : defaults.settings.minimizeToTray,
+    forceDeleteContextMenu: typeof input?.forceDeleteContextMenu === "boolean" ? input.forceDeleteContextMenu : false,
     effectMode: ["aurora", "matrix", "calm", "ember", "ivory"].includes(
       input?.effectMode ?? ""
     )
@@ -570,17 +578,21 @@ function mergeSettings(input?: Partial<AppSettings>): AppSettings {
       input?.mouseQuickSearchHoldMs,
       defaults.settings.mouseQuickSearchHoldMs
     ),
-    magnifierEnabled: Boolean(input?.magnifierEnabled),
+    magnifierEnabled: input?.magnifierEnabled === true,
     magnifierModifiers: magnifierModifiers.join("+") || defaults.settings.magnifierModifiers,
     magnifierWidth: Math.round(Math.min(1200, Math.max(160, Number(input?.magnifierWidth) || 480)) / 10) * 10,
     magnifierHeight: Math.round(Math.min(900, Math.max(120, Number(input?.magnifierHeight) || 300)) / 10) * 10,
-    indexRoots: Array.isArray(input?.indexRoots) ? input.indexRoots : defaults.settings.indexRoots,
+    indexRoots: Array.isArray(input?.indexRoots)
+      ? input.indexRoots.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 64)
+      : defaults.settings.indexRoots,
     excludedPaths: Array.isArray(input?.excludedPaths)
-      ? input.excludedPaths
+      ? input.excludedPaths.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 256)
       : defaults.settings.excludedPaths,
     ai: {
       ...defaults.settings.ai,
-      ...(aiInput ?? {}),
+      enabled: aiInput?.enabled === true,
+      model: typeof aiInput?.model === "string" ? aiInput.model.slice(0, 512) : "",
+      privacyMode: aiInput?.privacyMode === "allow-samples" ? "allow-samples" : "metadata-only",
       provider,
       protocol,
       baseUrl:
@@ -600,6 +612,7 @@ export class AppStore {
   private filePath = "";
   private data: DiskShape = structuredClone(defaults);
   private flushQueue: Promise<void> = Promise.resolve();
+  private mutationQueue: Promise<unknown> = Promise.resolve();
 
   async init(): Promise<void> {
     const directory = app.getPath("userData");
@@ -607,12 +620,17 @@ export class AppStore {
     await mkdir(directory, { recursive: true });
     try {
       const parsed = JSON.parse(await readFile(this.filePath, "utf8")) as Partial<DiskShape>;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("状态文件格式无效");
+      }
+      if (parsed.migrations !== undefined && (!Array.isArray(parsed.migrations) || parsed.migrations.some((record) => !sanitizeMigration(record)))) {
+        throw new Error("迁移记录格式损坏，无法安全加载");
+      }
       this.data = {
         settings: mergeSettings(parsed.settings),
         migrations: (Array.isArray(parsed.migrations) ? parsed.migrations : [])
           .map(sanitizeMigration)
-          .filter((item): item is MigrationRecord => Boolean(item))
-          .slice(-2_000),
+          .filter((item): item is MigrationRecord => Boolean(item)),
         directoryDialogPaths: sanitizeDirectoryDialogPaths(parsed.directoryDialogPaths),
         searchWorkspace: sanitizeSearchWorkspace(parsed.searchWorkspace),
         searchBookmarks: (
@@ -641,7 +659,12 @@ export class AppStore {
         encryptedApiKey:
           typeof parsed.encryptedApiKey === "string" ? parsed.encryptedApiKey : undefined
       };
-    } catch {
+    } catch (error) {
+      // A damaged or unreadable journal must never be replaced with defaults:
+      // it may be the only record of where a migrated application's data lives.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`无法读取配置与迁移记录，原文件已保留：${this.filePath}`, { cause: error });
+      }
       await this.flush();
     }
   }
@@ -658,21 +681,23 @@ export class AppStore {
     purpose: DirectoryDialogPurpose,
     selectedPath: string
   ): Promise<void> {
-    this.data.directoryDialogPaths[purpose] = selectedPath.slice(0, 32_768);
-    await this.flush();
+    await this.mutate(() => {
+        this.data.directoryDialogPaths[purpose] = selectedPath.slice(0, 32_768);
+    });
   }
 
   async updateSettings(
     patch: Partial<AppSettings> & { ai?: Partial<AppSettings["ai"]>; apiKey?: string }
   ): Promise<AppSettings> {
-    const { apiKey, ...settingsPatch } = patch;
-    this.data.settings = mergeSettings({
-      ...this.data.settings,
-      ...settingsPatch,
-      ai: {
-        ...this.data.settings.ai,
-        ...(settingsPatch.ai ?? {})
-      }
+    return this.mutate(() => {
+      const { apiKey, ...settingsPatch } = patch;
+      this.data.settings = mergeSettings({
+        ...this.data.settings,
+        ...settingsPatch,
+        ai: {
+          ...this.data.settings.ai,
+          ...(settingsPatch.ai ?? {})
+        }
     });
 
     if (typeof apiKey === "string") {
@@ -687,15 +712,8 @@ export class AppStore {
       }
     }
 
-    app.setLoginItemSettings({
-      openAtLogin: this.data.settings.launchAtLogin,
-      args:
-        this.data.settings.launchAtLogin && this.data.settings.launchMinimized
-          ? ["--startup-minimized"]
-          : []
-    });
-    await this.flush();
     return this.getSettings();
+    });
   }
 
   getApiKey(): string | undefined {
@@ -714,10 +732,11 @@ export class AppStore {
   }
 
   async saveMigration(record: MigrationRecord): Promise<void> {
-    const index = this.data.migrations.findIndex((item) => item.id === record.id);
-    if (index >= 0) this.data.migrations[index] = structuredClone(record);
-    else this.data.migrations.push(structuredClone(record));
-    await this.flush();
+    await this.mutate(() => {
+      const index = this.data.migrations.findIndex((item) => item.id === record.id);
+      if (index >= 0) this.data.migrations[index] = structuredClone(record);
+      else this.data.migrations.push(structuredClone(record));
+    });
   }
 
   getMigration(id: string): MigrationRecord | undefined {
@@ -726,14 +745,15 @@ export class AppStore {
   }
 
   async deleteMigrations(ids: string[]): Promise<number> {
-    const selected = new Set(ids);
-    const before = this.data.migrations.length;
-    this.data.migrations = this.data.migrations.filter(
-      (record) => !selected.has(record.id)
-    );
-    const deleted = before - this.data.migrations.length;
-    if (deleted > 0) await this.flush();
-    return deleted;
+    return this.mutate(() => {
+      const selected = new Set(ids);
+      const before = this.data.migrations.length;
+      this.data.migrations = this.data.migrations.filter(
+        (record) => !selected.has(record.id)
+      );
+      const deleted = before - this.data.migrations.length;
+      return deleted;
+    });
   }
 
   getSearchWorkspace(): SearchWorkspaceState | undefined {
@@ -745,8 +765,7 @@ export class AppStore {
   async saveSearchWorkspace(value: unknown): Promise<void> {
     const workspace = sanitizeSearchWorkspace(value);
     if (!workspace) throw new Error("搜索工作区状态无效");
-    this.data.searchWorkspace = workspace;
-    await this.flush();
+    await this.mutate(() => { this.data.searchWorkspace = workspace; });
   }
 
   listSearchBookmarks(): SearchBookmark[] {
@@ -758,28 +777,30 @@ export class AppStore {
   async saveSearchBookmark(value: unknown): Promise<SearchBookmark> {
     const bookmark = sanitizeSearchBookmark(value);
     if (!bookmark) throw new Error("搜索书签无效，无法保存");
-    const existing = this.data.searchBookmarks.find(
-      (item) => item.id === bookmark.id
-    );
-    const saved = {
-      ...bookmark,
-      createdAt: existing?.createdAt ?? bookmark.createdAt,
-      updatedAt: new Date().toISOString()
-    };
-    this.data.searchBookmarks = [
-      ...this.data.searchBookmarks.filter((item) => item.id !== saved.id),
-      saved
-    ].slice(-500);
-    await this.flush();
-    return structuredClone(saved);
+    return this.mutate(() => {
+      const existing = this.data.searchBookmarks.find(
+        (item) => item.id === bookmark.id
+      );
+      const saved = {
+        ...bookmark,
+        createdAt: existing?.createdAt ?? bookmark.createdAt,
+        updatedAt: new Date().toISOString()
+      };
+      this.data.searchBookmarks = [
+        ...this.data.searchBookmarks.filter((item) => item.id !== saved.id),
+        saved
+      ].slice(-500);
+      return structuredClone(saved);
+    });
   }
 
   async deleteSearchBookmark(id: string): Promise<boolean> {
-    const next = this.data.searchBookmarks.filter((item) => item.id !== id);
-    if (next.length === this.data.searchBookmarks.length) return false;
-    this.data.searchBookmarks = next;
-    await this.flush();
-    return true;
+    return this.mutate(() => {
+      const next = this.data.searchBookmarks.filter((item) => item.id !== id);
+      if (next.length === this.data.searchBookmarks.length) return false;
+      this.data.searchBookmarks = next;
+      return true;
+    });
   }
 
   listSearchBookmarkFolders(): SearchBookmarkFolder[] {
@@ -791,33 +812,35 @@ export class AppStore {
   async saveSearchBookmarkFolder(value: unknown): Promise<SearchBookmarkFolder> {
     const folder = sanitizeSearchBookmarkFolder(value);
     if (!folder) throw new Error("搜索书签文件夹无效，无法保存");
-    const existing = this.data.searchBookmarkFolders.find(
-      (item) => item.id === folder.id
-    );
-    const saved = {
-      ...folder,
-      createdAt: existing?.createdAt ?? folder.createdAt,
-      updatedAt: new Date().toISOString()
-    };
-    this.data.searchBookmarkFolders = [
-      ...this.data.searchBookmarkFolders.filter((item) => item.id !== saved.id),
-      saved
-    ].slice(-100);
-    await this.flush();
-    return structuredClone(saved);
+    return this.mutate(() => {
+      const existing = this.data.searchBookmarkFolders.find(
+        (item) => item.id === folder.id
+      );
+      const saved = {
+        ...folder,
+        createdAt: existing?.createdAt ?? folder.createdAt,
+        updatedAt: new Date().toISOString()
+      };
+      this.data.searchBookmarkFolders = [
+        ...this.data.searchBookmarkFolders.filter((item) => item.id !== saved.id),
+        saved
+      ].slice(-100);
+      return structuredClone(saved);
+    });
   }
 
   async deleteSearchBookmarkFolder(id: string): Promise<boolean> {
-    const next = this.data.searchBookmarkFolders.filter((item) => item.id !== id);
-    if (next.length === this.data.searchBookmarkFolders.length) return false;
-    this.data.searchBookmarkFolders = next;
-    this.data.searchBookmarks = this.data.searchBookmarks.map((bookmark) =>
-      bookmark.folderId === id
-        ? { ...bookmark, folderId: undefined, updatedAt: new Date().toISOString() }
-        : bookmark
-    );
-    await this.flush();
-    return true;
+    return this.mutate(() => {
+      const next = this.data.searchBookmarkFolders.filter((item) => item.id !== id);
+      if (next.length === this.data.searchBookmarkFolders.length) return false;
+      this.data.searchBookmarkFolders = next;
+      this.data.searchBookmarks = this.data.searchBookmarks.map((bookmark) =>
+        bookmark.folderId === id
+          ? { ...bookmark, folderId: undefined, updatedAt: new Date().toISOString() }
+          : bookmark
+      );
+      return true;
+    });
   }
 
   getUiLayout(): UiLayoutState {
@@ -826,12 +849,13 @@ export class AppStore {
 
   async updateUiLayout(value: unknown): Promise<UiLayoutState> {
     const patch = sanitizeUiLayout(value);
-    this.data.uiLayout = {
-      ...this.data.uiLayout,
-      ...patch
-    };
-    await this.flush();
-    return this.getUiLayout();
+    return this.mutate(() => {
+      this.data.uiLayout = {
+        ...this.data.uiLayout,
+        ...patch
+      };
+      return this.getUiLayout();
+    });
   }
 
   getAnalysis(targetPath: string): AnalysisResult | undefined {
@@ -850,25 +874,27 @@ export class AppStore {
   async saveAnalysis(result: AnalysisResult): Promise<void> {
     const safe = sanitizeAnalysis(result);
     if (!safe) throw new Error("分析结果无效，无法保存");
-    const key = analysisKey(safe.summary.path);
-    this.data.analyses = [
-      ...this.data.analyses.filter(
-        (item) => analysisKey(item.summary.path) !== key
-      ),
-      safe
-    ].slice(-200);
-    await this.flush();
+    await this.mutate(() => {
+      const key = analysisKey(safe.summary.path);
+      this.data.analyses = [
+        ...this.data.analyses.filter(
+          (item) => analysisKey(item.summary.path) !== key
+        ),
+        safe
+      ].slice(-200);
+    });
   }
 
   async deleteAnalysis(targetPath: string): Promise<boolean> {
-    const key = analysisKey(targetPath);
-    const next = this.data.analyses.filter(
-      (item) => analysisKey(item.summary.path) !== key
-    );
-    if (next.length === this.data.analyses.length) return false;
-    this.data.analyses = next;
-    await this.flush();
-    return true;
+    return this.mutate(() => {
+      const key = analysisKey(targetPath);
+      const next = this.data.analyses.filter(
+        (item) => analysisKey(item.summary.path) !== key
+      );
+      if (next.length === this.data.analyses.length) return false;
+      this.data.analyses = next;
+      return true;
+    });
   }
 
   getOwnershipMap(drive: string): OwnershipMapResult | undefined {
@@ -882,14 +908,43 @@ export class AppStore {
   async saveOwnershipMap(result: OwnershipMapResult): Promise<void> {
     const safe = sanitizeOwnershipMap(result);
     if (!safe) throw new Error("归属地图结果无效，无法保存");
-    const key = ownershipMapKey(safe.drive);
-    this.data.ownershipMaps = [
-      ...this.data.ownershipMaps.filter(
-        (item) => ownershipMapKey(item.drive) !== key
-      ),
-      safe
-    ].slice(-32);
-    await this.flush();
+    await this.mutate(() => {
+      const key = ownershipMapKey(safe.drive);
+      this.data.ownershipMaps = [
+        ...this.data.ownershipMaps.filter(
+          (item) => ownershipMapKey(item.drive) !== key
+        ),
+        safe
+      ].slice(-32);
+    });
+  }
+
+  async whenIdle(): Promise<void> {
+    await this.mutationQueue;
+    await this.flushQueue;
+  }
+
+  private mutate<T>(operation: () => T): Promise<T> {
+    const pending = this.mutationQueue.catch(() => undefined).then(async () => {
+      const previous = this.data;
+      this.data = structuredClone(previous);
+      let result: T;
+      let write: Promise<void>;
+      let next: DiskShape;
+      try {
+        result = operation();
+        next = this.data;
+        write = this.flush();
+      } finally {
+        // Readers must see only committed state while the write is pending.
+        this.data = previous;
+      }
+      await write;
+      this.data = next;
+      return result;
+    });
+    this.mutationQueue = pending.catch(() => undefined);
+    return pending;
   }
 
   private async flush(): Promise<void> {
@@ -899,7 +954,13 @@ export class AppStore {
     this.flushQueue = this.flushQueue
       .catch(() => undefined)
       .then(async () => {
-        await writeFile(temporaryPath, snapshot, "utf8");
+        const handle = await open(temporaryPath, "w", 0o600);
+        try {
+          await handle.writeFile(snapshot, "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
         await rename(temporaryPath, this.filePath);
       });
     await this.flushQueue;

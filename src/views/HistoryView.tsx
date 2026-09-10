@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { formatBytes } from "../lib/format";
+import { canDeleteMigrationRecord } from "../lib/migration-record";
 import { useI18n } from "../lib/i18n";
 import type { MigrationRecord } from "../types";
 import {
@@ -45,6 +46,7 @@ function stageLabel(stage: MigrationRecord["stage"], ui: (zh: string, en: string
 export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
   const { t, ui, formatNumber, formatDate: formatLocaleDate } = useI18n();
   const [rollbackId, setRollbackId] = useState("");
+  const [reapplyId, setReapplyId] = useState("");
   const [busyId, setBusyId] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -62,16 +64,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
   useEffect(() => {
     const currentIds = new Set(
       records
-        .filter(
-          (record) =>
-            ![
-              "preflight",
-              "copying",
-              "verifying",
-              "switching",
-              "rolling-back"
-            ].includes(record.stage)
-        )
+        .filter(canDeleteMigrationRecord)
         .map((record) => record.id)
     );
     setSelected((items) => {
@@ -80,20 +73,8 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
     });
   }, [records]);
 
-  const busyStages = new Set<MigrationRecord["stage"]>([
-    "preflight",
-    "copying",
-    "verifying",
-    "switching",
-    "rolling-back"
-  ]);
-  const selectableRecords = records.filter(
-    (record) => !busyStages.has(record.stage)
-  );
-  const selectedRecords = records.filter((record) => selected.has(record.id));
-  const selectedLinkedCount = selectedRecords.filter(
-    (record) => record.stage === "linked"
-  ).length;
+  const selectableRecords = records.filter(canDeleteMigrationRecord);
+  const operationPending = Boolean(busyId) || deleting;
 
   const toggleSelected = (id: string) => {
     setConfirmDelete(false);
@@ -106,10 +87,10 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
   };
 
   const deleteSelected = async () => {
-    if (selected.size === 0) return;
+    if (selected.size === 0 || operationPending) return;
     setDeleting(true);
     try {
-      const deleted = await api.deleteMigrations([...selected]);
+      const deleted = await api.deleteMigrations(selectableRecords.filter((record) => selected.has(record.id)).map((record) => record.id));
       setSelected(new Set());
       setConfirmDelete(false);
       await onRefresh();
@@ -138,34 +119,43 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
   };
 
   const rollback = async (record: MigrationRecord) => {
+    if (operationPending) return;
     setBusyId(record.id);
     try {
-      await api.rollbackMigration(record.id);
-      notify("success", ui("数据已恢复到原始磁盘，目标磁盘迁移副本已删除", "Data was restored to the original drive and the migrated destination copy was removed"));
+      const updated = await api.rollbackMigration(record.id);
+      if (updated.error) {
+        notify("error", `${ui("数据已恢复到原位置，但清理尚未完成", "Data was restored, but cleanup is incomplete")}: ${updated.error}`);
+      } else {
+        notify("success", ui("数据已恢复到原始磁盘，目标磁盘迁移副本已删除", "Data was restored to the original drive and the migrated destination copy was removed"));
+      }
       setRollbackId("");
-      await onRefresh();
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
       setBusyId("");
+      await onRefresh().catch((error) => notify("error", String(error)));
     }
   };
 
   const reapply = async (record: MigrationRecord) => {
+    if (operationPending) return;
     setBusyId(record.id);
     try {
       const updated = await api.reapplyMigration(record.id);
+      setReapplyId("");
       notify(
-        "success",
-        updated.migrationCount > 1
+        updated.error ? "error" : "success",
+        updated.error
+          ? `${ui("再次迁移已完成切换，但清理尚未完成", "Migration switched successfully again, but cleanup is incomplete")}: ${updated.error}`
+          : updated.migrationCount > 1
           ? ui(`再次迁移完成，当前已迁移 ${updated.migrationCount} 次`, `Migration completed again; migrated ${updated.migrationCount} times in total`)
           : ui("迁移完成", "Migration complete")
       );
-      await onRefresh();
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
     } finally {
       setBusyId("");
+      await onRefresh().catch((error) => notify("error", String(error)));
     }
   };
 
@@ -183,7 +173,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                 <button
                   type="button"
                   className="secondary-button"
-                  disabled={selectableRecords.length === 0 || deleting}
+                  disabled={selectableRecords.length === 0 || operationPending}
                   onClick={() => {
                     setConfirmDelete(false);
                     setSelected(
@@ -207,7 +197,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                 <button
                   type="button"
                   className="secondary-button danger"
-                  disabled={selected.size === 0 || deleting}
+                  disabled={selected.size === 0 || operationPending}
                   onClick={() => setConfirmDelete(true)}
                 >
                   <Trash2 size={14} />
@@ -226,14 +216,13 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
             <strong>{ui(`确认删除 ${selected.size} 条迁移记录？`, `Delete ${selected.size} migration records?`)}</strong>
             <span>
               {ui("此操作只删除日志，不会删除、移动或恢复磁盘数据。", "This deletes only the log records; it does not delete, move, or restore disk data.")}
-              {selectedLinkedCount > 0 &&
-                ui(` 其中 ${selectedLinkedCount} 条仍在使用链接；删除后将无法再通过 CDriveShiftAI 自动恢复。`, ` ${selectedLinkedCount} selected records still use links; after deletion, CDriveShiftAI can no longer restore them automatically.`)}
+              {ui("仍在使用的迁移或含待处理临时目录的记录需先恢复或处理完成，才能删除。", "Active migrations and records with pending temporary directories must be restored or resolved before deletion.")}
             </span>
           </div>
           <button
             type="button"
             className="secondary-button"
-            disabled={deleting}
+            disabled={operationPending}
             onClick={() => setConfirmDelete(false)}
           >
             {ui("取消", "Cancel")}
@@ -241,7 +230,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
           <button
             type="button"
             className="primary-button danger"
-            disabled={deleting}
+            disabled={operationPending}
             onClick={() => void deleteSelected()}
           >
             {deleting ? <span className="spinner light" /> : <Trash2 size={14} />}
@@ -266,15 +255,15 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
               <label
                 className="history-select"
                 title={
-                  busyStages.has(record.stage)
-                    ? ui("正在执行的迁移记录不能删除", "An active migration record cannot be deleted")
+                  !canDeleteMigrationRecord(record)
+                    ? ui("请先恢复迁移并处理遗留目录，再删除记录", "Restore the migration and resolve remaining directories before deleting the record")
                     : ui("选择此迁移记录", "Select this migration record")
                 }
               >
                 <input
                   type="checkbox"
                   checked={selected.has(record.id)}
-                  disabled={busyStages.has(record.stage) || deleting}
+                  disabled={!canDeleteMigrationRecord(record) || operationPending}
                   onChange={() => toggleSelected(record.id)}
                 />
                 <span>
@@ -371,7 +360,7 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                   )}
                   {record.error && <p className="record-error">{record.error}</p>}
                   {record.stage === "linked" && rollbackId !== record.id && (
-                    <button className="secondary-button" type="button" onClick={() => setRollbackId(record.id)}>
+                    <button className="secondary-button" type="button" disabled={operationPending} onClick={() => { setReapplyId(""); setRollbackId(record.id); }}>
                       <RotateCcw size={14} /> {ui("恢复到原位置", "Restore to original location")}
                     </button>
                   )}
@@ -379,8 +368,8 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                     <button
                       className="secondary-button"
                       type="button"
-                      disabled={busyId === record.id}
-                      onClick={() => void reapply(record)}
+                      disabled={operationPending}
+                      onClick={() => { setRollbackId(""); setReapplyId(record.id); }}
                     >
                       {busyId === record.id ? (
                         <span className="spinner" />
@@ -391,19 +380,23 @@ export function HistoryView({ records, notify, onRefresh }: HistoryViewProps) {
                     </button>
                   )}
                 </div>
-                {rollbackId === record.id && (
+                {(rollbackId === record.id || reapplyId === record.id) && (
                   <div className="rollback-confirm">
                     <AlertTriangle size={17} />
-                    <span>{ui("恢复会先复制并校验源目录，确认恢复完整后删除目标磁盘迁移副本。", "Restore first copies and verifies the source directory, then removes the migrated destination copy after integrity is confirmed.")}</span>
-                    <button type="button" onClick={() => setRollbackId("")}>
+                    <span>{reapplyId === record.id
+                      ? ui("请先完全退出关联应用。再次迁移将重新预检并将原路径指向目标磁盘，目标磁盘离线时应用将不可用。", "Close all related applications first. Migrating again reruns preflight and redirects the original path to the destination drive; the application is unavailable if that drive is offline.")
+                      : ui("请先完全退出关联应用。恢复会先复制并校验源目录，确认恢复完整后删除目标磁盘迁移副本。", "Close all related applications first. Restore copies and verifies the source directory, then removes the migrated destination copy after integrity is confirmed.")}</span>
+                    <button type="button" disabled={operationPending} onClick={() => { setRollbackId(""); setReapplyId(""); }}>
                       {ui("取消", "Cancel")}
                     </button>
                     <button
                       type="button"
-                      disabled={busyId === record.id}
-                      onClick={() => void rollback(record)}
+                      disabled={operationPending}
+                      onClick={() => void (reapplyId === record.id ? reapply(record) : rollback(record))}
                     >
-                      {busyId === record.id ? ui("回滚中…", "Restoring…") : ui("确认回滚", "Confirm restore")}
+                      {busyId === record.id
+                        ? ui("正在处理…", "Processing…")
+                        : reapplyId === record.id ? ui("确认再次迁移", "Confirm migration") : ui("确认回滚", "Confirm restore")}
                     </button>
                   </div>
                 )}
