@@ -21,5 +21,6 @@ jobs:
       - run: npm run build:native
       - run: npm run build:main
       - run: npm run build:web
+      - run: npm run prepare:electron
       - run: node scripts/smoke-explorer-launch.mjs
       - run: node scripts/smoke-force-delete-cwd.mjs
