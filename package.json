@@ -1,6 +1,6 @@
 {
   "name": "cdriveshiftai",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "CDriveShiftAI - AI-assisted Windows disk organizer and safe cross-drive directory migration tool",
   "main": "dist-electron/main.js",

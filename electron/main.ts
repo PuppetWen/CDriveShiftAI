@@ -37,7 +37,7 @@ import { ExplorerContextMenuService } from "./explorer-context-menu";
 import { createForceDeleteLaunchData, ForceDeleteLaunchQueue, parseForceDeleteLaunch } from "./force-delete-launch";
 import { ForceDeleteService } from "./force-delete";
 import { assertNoMigrationPathMutation, assertRenameDestinationAvailable, migrationRecordDeletionReason } from "./file-operation-guard";
-import { nativeStrings } from "./i18n";
+import { nativeStrings, resolveNativeLanguage } from "./i18n";
 import {
   configureLogger,
   getLogDirectory,
@@ -102,6 +102,7 @@ process.on("unhandledRejection", (reason) => {
 let mainWindow: BrowserWindow | undefined;
 let quickSearchWindow: BrowserWindow | undefined;
 let uninstallRestoreWindow: BrowserWindow | undefined;
+let forceDeleteWindow: BrowserWindow | undefined;
 let searchService: SearchService | undefined;
 let updateService: UpdateService | undefined;
 let tray: Tray | undefined;
@@ -186,7 +187,7 @@ function syncSearchBackgroundMode(): void {
   searchService?.setBackgroundMode(!hasVisibleWindow);
 }
 
-function trackWindowActivity(window: BrowserWindow, role: "main" | "quick"): void {
+function trackWindowActivity(window: BrowserWindow, role: "main" | "quick" | "force-delete"): void {
   const sync = () => setImmediate(syncSearchBackgroundMode);
   window.on("show", sync);
   window.on("hide", sync);
@@ -243,7 +244,7 @@ function applyNativeEffect(
   nativeTheme.themeSource = colors.nativeTheme;
   if (!window || window.isDestroyed()) return;
   window.setBackgroundColor(colors.background);
-  if (process.platform === "win32") {
+  if (process.platform === "win32" && window !== forceDeleteWindow) {
     window.setTitleBarOverlay({
       color: "#00000000",
       symbolColor: colors.symbols,
@@ -524,7 +525,7 @@ function createWindow(): BrowserWindow {
 
 function emitSettingsChanged(settings: AppSettings): void {
   const strings = nativeStrings(settings.language);
-  for (const window of [mainWindow, quickSearchWindow]) {
+  for (const window of [mainWindow, quickSearchWindow, forceDeleteWindow]) {
     if (window && !window.isDestroyed()) {
       window.webContents.send("settings:changed", settings);
       applyNativeEffect(settings.effectMode, window);
@@ -536,6 +537,9 @@ function emitSettingsChanged(settings: AppSettings): void {
   }
   if (quickSearchWindow && !quickSearchWindow.isDestroyed()) {
     quickSearchWindow.setTitle(strings.quickWindow);
+  }
+  if (forceDeleteWindow && !forceDeleteWindow.isDestroyed()) {
+    forceDeleteWindow.setTitle(forceDeleteWindowTitle(settings.language));
   }
   if (uninstallRestoreWindow && !uninstallRestoreWindow.isDestroyed()) {
     uninstallRestoreWindow.setTitle(strings.uninstallWindow);
@@ -611,12 +615,77 @@ function sendNavigation(
 
 function showForceDeleteRequests(): void {
   if (!fileRequestWindowReady || !forceDeleteLaunches.pending || isQuitting) return;
-  if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+  if (!forceDeleteWindow || forceDeleteWindow.isDestroyed()) {
+    forceDeleteWindow = createForceDeleteWindow();
+  } else {
+    if (forceDeleteWindow.isMinimized()) forceDeleteWindow.restore();
+    forceDeleteWindow.show();
+    forceDeleteWindow.focus();
+  }
   // React also drains after subscribing, avoiding a cold-start listener race.
-  mainWindow.webContents.send("shell:force-delete-requests-available");
+  forceDeleteWindow.webContents.send("shell:force-delete-requests-available");
+}
+
+function forceDeleteWindowTitle(language: AppSettings["language"]): string {
+  const resolved = resolveNativeLanguage(language);
+  if (resolved === "zh-CN") return "强制永久删除";
+  if (resolved === "zh-TW") return "強制永久刪除";
+  return "Permanently delete";
+}
+
+function createForceDeleteWindow(): BrowserWindow {
+  const settings = store.getSettings();
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const width = Math.min(760, display.workArea.width);
+  const height = Math.min(700, display.workArea.height);
+  const window = new BrowserWindow({
+    width,
+    height,
+    x: display.workArea.x + Math.round((display.workArea.width - width) / 2),
+    y: display.workArea.y + Math.round((display.workArea.height - height) / 2),
+    minWidth: Math.min(600, width),
+    minHeight: Math.min(520, height),
+    show: false,
+    frame: false,
+    minimizable: true,
+    maximizable: false,
+    backgroundColor: effectColors[settings.effectMode].background,
+    icon: applicationIconPath(),
+    title: forceDeleteWindowTitle(settings.language),
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      backgroundThrottling: true,
+      devTools: !app.isPackaged
+    }
+  });
+  forceDeleteWindow = window;
+  initializeUiScale(window, settings.uiScale);
+  window.setMenuBarVisibility(false);
+  trackWindowActivity(window, "force-delete");
+  window.on("close", (event) => {
+    // Keep the result surface alive through process release and UAC retries.
+    // A normal application quit already waits for this service to finish.
+    if (!isQuitting && forceDeleteService.isBusy()) event.preventDefault();
+  });
+  window.on("closed", () => {
+    if (forceDeleteWindow === window) forceDeleteWindow = undefined;
+  });
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  window.webContents.on("will-navigate", (event, url) => {
+    const devUrl = process.env.VITE_DEV_SERVER_URL;
+    const allowed = devUrl ? url.startsWith(devUrl) : url.startsWith("file:");
+    if (!allowed) event.preventDefault();
+  });
+  showAsSoonAsRenderable(window);
+  loadRenderer(window, settings.effectMode, { mode: "force-delete" });
+  return window;
 }
 
 function acceptForceDeleteLaunch(argv: readonly string[], additionalData?: unknown): boolean {
@@ -1388,6 +1457,10 @@ function registerIpc(): void {
   });
   ipcMain.handle("app:finish-utility", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
+    if (window === forceDeleteWindow && forceDeleteLaunches.pending) {
+      showForceDeleteRequests();
+      return;
+    }
     const finishingUninstall = window === uninstallRestoreWindow;
     window?.close();
     if (finishingUninstall) app.quit();
@@ -1570,6 +1643,9 @@ function registerIpc(): void {
     event.sender.send("settings:text-scale-preview", scale);
     if (quickSearchWindow && !quickSearchWindow.isDestroyed() && quickSearchWindow !== sourceWindow) {
       applyUiScale(quickSearchWindow, scale);
+    }
+    if (forceDeleteWindow && !forceDeleteWindow.isDestroyed() && forceDeleteWindow !== sourceWindow) {
+      applyUiScale(forceDeleteWindow, scale);
     }
     if (
       uninstallRestoreWindow &&
@@ -1768,7 +1844,7 @@ function registerIpc(): void {
     };
   });
   ipcMain.handle("shell:force-delete-requests", (event) => {
-    if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) return [];
+    if (!forceDeleteWindow || forceDeleteWindow.isDestroyed() || event.sender.id !== forceDeleteWindow.webContents.id) return [];
     return forceDeleteLaunches.takeAll();
   });
 
@@ -2135,7 +2211,7 @@ if (!singleInstance) {
     createUninstallRestoreWindow();
   }).catch(handleStartupFailure);
 } else {
-  acceptForceDeleteLaunch(process.argv);
+  const forceDeleteStartup = acceptForceDeleteLaunch(process.argv);
   app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
     if (acceptForceDeleteLaunch(argv, additionalData)) return;
     // The renderer is intentionally destroyed while resident in the tray.
@@ -2213,7 +2289,7 @@ if (!singleInstance) {
       process.argv.includes("--startup-minimized") &&
       currentSettings.launchAtLogin &&
       currentSettings.launchMinimized;
-    if (!startupMinimized) mainWindow = createWindow();
+    if (!startupMinimized && !forceDeleteStartup && !forceDeleteLaunches.pending) mainWindow = createWindow();
     showForceDeleteRequests();
     createTray();
     syncSearchBackgroundMode();

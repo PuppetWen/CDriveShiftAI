@@ -283,6 +283,51 @@ try {
   await send("Page.navigate", { url: `http://127.0.0.1:${vitePort}/${fixtureUrlPath}/index.html` });
   await waitFor("window.__fixtureReady === true", 200);
 
+  for (const theme of ["ivory", "matrix"]) {
+    await evaluate(`document.documentElement.dataset.effect = ${JSON.stringify(theme)}`);
+    await runScenario("busy", "zh-CN", 1100, 1000);
+    await check(`${theme}: consent checkbox is visibly rendered and receives pointer input`, `(() => {
+      const input = document.querySelector(".force-delete-confirmation input");
+      const style = getComputedStyle(input);
+      const bounds = input.getBoundingClientRect();
+      return !input.checked && !input.disabled && style.opacity === "1" && style.position === "static"
+        && style.pointerEvents === "auto" && bounds.width >= 20 && bounds.height >= 20
+        && document.querySelector("footer button.danger").disabled
+        && document.querySelector("#force-delete-status").innerText.includes("请先勾选");
+    })()`);
+    const uncheckedBackground = await evaluate('getComputedStyle(document.querySelector(".force-delete-confirmation")).backgroundColor');
+    await capture(`${theme}-consent-unchecked`);
+    // Click the copy rather than the checkbox to exercise the user's whole-row interaction.
+    await click(".force-delete-confirmation-copy");
+    await waitFor('document.querySelector(".force-delete-confirmation input").checked');
+    await check(`${theme}: consent row click immediately shows checked status and enables deletion`, `(() => {
+      const label = document.querySelector(".force-delete-confirmation");
+      return label.dataset.confirmed === "true" && label.innerText.includes("已勾选确认")
+        && getComputedStyle(label).backgroundColor !== ${JSON.stringify(uncheckedBackground)}
+        && document.querySelector("#force-delete-status").innerText.includes("已勾选确认")
+        && !document.querySelector("footer button.danger").disabled
+        && !window.__deleteSmoke.calls.some(call => call.operation === "execute");
+    })()`);
+    await capture(`${theme}-consent-checked`);
+    await evaluate('document.querySelector(".force-delete-confirmation input").focus()');
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+    await waitFor('!document.querySelector(".force-delete-confirmation input").checked');
+    await check(`${theme}: Space reverses consent and keyboard focus remains visible`, `(() => {
+      const label = document.querySelector(".force-delete-confirmation");
+      return label.dataset.confirmed === "false" && document.querySelector("footer button.danger").disabled
+        && document.activeElement === label.querySelector("input")
+        && parseFloat(getComputedStyle(label).outlineWidth) >= 2
+        && getComputedStyle(label).outlineStyle !== "none";
+    })()`);
+    await click(".force-delete-confirmation input");
+    await waitFor('document.querySelector(".force-delete-confirmation input").checked');
+    await click(".force-delete-confirmation-copy");
+    await waitFor('!document.querySelector(".force-delete-confirmation input").checked');
+    await check(`${theme}: another row click unchecks consent without executing deletion`, 'document.querySelector("footer button.danger").disabled && !window.__deleteSmoke.calls.some(call => call.operation === "execute")');
+    await checkLayout(`${theme} visible consent`);
+  }
+
   await runScenario("eperm", "zh-CN");
   await causeFailure("permission");
   await check("administrator failure does not ask for elevation again", `(() => {
@@ -389,6 +434,8 @@ try {
     await click("footer button.danger");
     await waitFor('typeof window.__deleteSmoke.finishElevation === "function"');
     await check(`${scenario}: pending authorization blocks duplicate deletion and explains UAC`, 'document.querySelector("footer button.danger").disabled && document.querySelector("footer").innerText.includes("UAC") && !document.querySelector(".force-delete-guidance")');
+    await click(".force-delete-confirmation-copy");
+    await check(`${scenario}: pending deletion disables consent and preserves its checked state`, 'document.querySelector(".force-delete-confirmation").getAttribute("aria-disabled") === "true" && document.querySelector(".force-delete-confirmation input").disabled && document.querySelector(".force-delete-confirmation input").checked && window.__deleteSmoke.calls.filter(call => call.operation === "execute").length === 1');
     await checkLayout(`${scenario} while waiting for UAC`);
     await evaluate("window.__deleteSmoke.finishElevation()");
     if (scenario === "elevation-success") {

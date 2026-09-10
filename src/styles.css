@@ -8185,9 +8185,32 @@ html.background-suspended *::after {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
+  transition: border-color 120ms ease, background-color 120ms ease;
 }
-.force-delete-confirmation input { margin-top: 1px; accent-color: var(--danger); }
-.force-delete-confirmation span { color: var(--muted); font-size: 8px; line-height: 1.55; }
+.force-delete-confirmation:hover:not([aria-disabled="true"]) { border-color: var(--danger); }
+.force-delete-confirmation[data-confirmed="true"] {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface-solid));
+}
+.force-delete-confirmation:focus-within { outline: 2px solid var(--danger); outline-offset: 3px; }
+.force-delete-confirmation[aria-disabled="true"] { cursor: not-allowed; opacity: .65; }
+/* Settings switches hide their native input globally; this consent needs a visible checkbox. */
+.force-delete-confirmation > input[type="checkbox"] {
+  position: static;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  margin: 1px 0 0;
+  opacity: 1;
+  pointer-events: auto;
+  appearance: auto;
+  accent-color: var(--danger);
+  cursor: inherit;
+}
+.force-delete-confirmation-copy { display: grid; gap: 4px; min-width: 0; }
+.force-delete-confirmation-copy strong { color: var(--text); font-size: 10px; line-height: 1.4; }
+.force-delete-confirmation[data-confirmed="true"] .force-delete-confirmation-copy strong { color: var(--danger); }
+.force-delete-confirmation-copy > span { color: var(--muted); font-size: 8px; line-height: 1.55; }
 
 .force-delete-error {
   align-items: center;
@@ -8226,7 +8249,7 @@ html.background-suspended *::after {
   border-top: 1px solid var(--border);
   background: var(--surface);
 }
-.force-delete-dialog > footer > span { color: var(--dim); font-size: 7px; }
+.force-delete-dialog > footer > span { color: var(--muted); font-size: 8px; line-height: 1.55; }
 .force-delete-dialog > footer > div { display: flex; gap: 8px; }
 .force-delete-dialog > footer button {
   min-height: 36px;

@@ -1,0 +1,46 @@
+:root[data-utility="force-delete"],
+:root[data-utility="force-delete"] body,
+:root[data-utility="force-delete"] #root {
+  width: 100%;
+  height: 100vh;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--surface-solid);
+}
+
+.force-delete-window { height: 100vh; color: var(--text); }
+
+:root[data-utility="force-delete"] .force-delete-backdrop {
+  padding: 0;
+  background: var(--surface-solid);
+  backdrop-filter: none;
+  animation: none;
+}
+
+:root[data-utility="force-delete"] .force-delete-dialog {
+  width: 100%;
+  height: 100vh;
+  max-height: 100vh;
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+}
+
+:root[data-utility="force-delete"] .force-delete-body { flex: 1; align-content: start; }
+:root[data-utility="force-delete"] .force-delete-dialog > header,
+.force-delete-completion > header { -webkit-app-region: drag; }
+:root[data-utility="force-delete"] button,
+:root[data-utility="force-delete"] input,
+:root[data-utility="force-delete"] a { -webkit-app-region: no-drag; }
+
+.force-delete-completion { display: flex; flex-direction: column; height: 100vh; border: 1px solid var(--border); }
+.force-delete-completion > header { display: flex; align-items: center; justify-content: space-between; min-height: 68px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.force-delete-completion button { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 18px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.force-delete-completion button:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+.force-delete-completion > header button { padding: 8px; }
+.force-delete-completion-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; text-align: center; }
+.force-delete-completion-body > svg { flex-shrink: 0; color: var(--good); }
+.force-delete-completion h1 { margin: 18px 0 10px; font-size: 22px; }
+.force-delete-completion p { color: var(--muted); line-height: 1.7; }
+.force-delete-completion code { display: block; max-width: 100%; padding: 12px; color: var(--dim); overflow-wrap: anywhere; }
+.force-delete-completion > footer { display: flex; justify-content: flex-end; padding: 16px 20px; border-top: 1px solid var(--border); }

@@ -7,58 +7,46 @@ export interface BundledReleaseNote {
 }
 
 export const bundledReleaseNotes: BundledReleaseNote = {
-  version: "0.1.5",
-  summary: "本版修复程序已运行时右键强制删除误报“绝对路径无效”的问题，并增加目录句柄占用检测，处理 PowerShell 进入目录后导致的删除失败。",
+  version: "0.1.6",
+  summary: "本版修复强制删除确认框勾选后没有明显反馈的问题。资源管理器右键删除只打开独立确认窗口，保留删除进度、成功结果和失败指引。",
   sections: [
     {
-      title: "右键删除路径传递",
+      title: "确认操作即时反馈",
       items: [
-        "程序已运行或最小化到托盘时，资源管理器右键请求正确传递目标，不再因二次启动参数重排误报绝对路径无效。",
-        "继续使用同一预检确认窗口和请求队列；已有菜单无需重新注册。"
+        "修复确认复选框被通用样式隐藏的问题；点击整行即可勾选或取消，勾选后显示对勾、高亮和“已勾选确认”。",
+        "底部明确提示先勾选再执行，删除按钮随确认状态启用；支持键盘空格切换和可见焦点。",
+        "删除或等待管理员授权时显示执行状态并禁用重复操作，勾选本身不会开始删除。"
       ]
     },
     {
-      title: "目录占用检测",
+      title: "独立右键删除窗口",
       items: [
-        "补充目录句柄检测，识别 PowerShell 等进程将待删除目录作为当前工作目录的占用，包括空目录。",
-        "预检展示实际占用进程，用户确认后再次核对进程身份，再处理可结束的普通进程并重试删除。",
-        "不会按进程名称批量结束 PowerShell；管理员权限仍无法解除所有驱动锁或系统限制。"
-      ]
-    },
-    {
-      title: "结果与回归验证",
-      items: [
-        "删除后核验目标确实不存在，失败时保留错误与操作指引；重新执行需要新的预检和确认。",
-        "新增真实 Electron 二次启动及 PowerShell 当前目录占用测试，覆盖目标传递、空目录、进程身份和用户确认。"
+        "资源管理器右键强制删除只弹出独立确认窗口，无需打开或唤起桌面端主界面。",
+        "覆盖程序未启动、主界面已打开和托盘运行场景，连续请求继续排队，逐项预检并确认。",
+        "删除成功后显示结果，失败时保留原因和操作指引；已有右键菜单无需重新添加。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: BundledReleaseNote = {
-  version: "0.1.5",
-  summary: "This release fixes invalid-path errors from Explorer when the app is already running and detects directory locks held by PowerShell and other processes.",
+  version: "0.1.6",
+  summary: "This release makes force-delete consent visibly respond to clicks and opens Explorer deletion in a separate confirmation window with progress, results, and failure guidance.",
   sections: [
     {
-      title: "Explorer path delivery",
+      title: "Clear confirmation feedback",
       items: [
-        "Keep the selected path intact when another instance or tray session receives an Explorer delete request.",
-        "Use the existing preview, confirmation, and request queue; registered menus do not need to be recreated."
+        "Restore the checkbox hidden by shared styles; clicking the row toggles a visible checkmark, highlight, and confirmation message.",
+        "Explain when to check the box and enable deletion only after consent, with Space-key support and visible focus.",
+        "Show deletion or authorization progress and block duplicate actions; checking the box alone never starts deletion."
       ]
     },
     {
-      title: "Directory lock detection",
+      title: "Separate Explorer deletion window",
       items: [
-        "Detect directory handles, including empty folders used as the current directory by PowerShell.",
-        "Show actual holders in the preview and recheck process identity after confirmation before handling them.",
-        "Never stop PowerShell processes by name alone; elevation cannot remove every driver lock or system restriction."
-      ]
-    },
-    {
-      title: "Results and regression coverage",
-      items: [
-        "Verify that deletion completed, retain failure guidance, and require a fresh preview and consent for retries.",
-        "Add real Electron relaunch and PowerShell directory-lock tests for paths, empty folders, identity, and consent."
+        "Open only a separate confirmation window for Explorer force deletion, without opening or bringing forward the main app.",
+        "Handle cold starts, an open main window, and tray sessions while keeping queued requests and individual confirmation.",
+        "Keep the success result or failure guidance visible; existing context-menu registrations do not need to be recreated."
       ]
     }
   ]

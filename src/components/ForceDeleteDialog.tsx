@@ -119,6 +119,16 @@ export function ForceDeleteDialog({
   };
 
   const guidance = error ? forceDeleteGuidance(error, lastPreview, ui) : undefined;
+  const confirmationDisabled = deleting || loading || previewForPath !== path;
+  const status = deleting
+    ? ui("正在执行删除，请稍候。若出现系统授权窗口，请完成 UAC 授权。", "Deleting, please wait. Complete UAC if Windows requests authorization.")
+    : loading
+    ? ui("检查完成后，请勾选确认框。", "Check the confirmation box after the preview is ready.")
+    : !preview || previewForPath !== path
+    ? ui("请先处理上方提示并重新检查。", "Follow the guidance above and check again.")
+    : confirmed
+    ? ui("已勾选确认；点击“强制永久删除”开始。", "Confirmed. Click Force delete to begin.")
+    : ui("请先勾选上方确认框，再点击“强制永久删除”。", "Check the confirmation box above, then click Force delete.");
   const runHelper = async (operation: () => Promise<unknown>) => {
     try { await operation(); }
     catch (reason) { notify("error", reason instanceof Error ? reason.message : String(reason)); }
@@ -229,7 +239,7 @@ export function ForceDeleteDialog({
                   <div><Cpu size={16} /><strong>{ui("相关进程", "Related processes")}</strong></div>
                   <span>{preview.processes.length}</span>
                 </header>
-                <p>{ui("结合文件占用检测、启动路径与命令行检查；目录或驱动层面的锁定等情况可能无法识别。", "Checks open file handles, executable paths, and command lines. Directory or driver-level locks may not be detected.")}</p>
+                <p>{ui("检查文件和目录占用、启动路径与命令行；部分驱动层面的锁定等情况可能无法识别。", "Checks open file and directory handles, executable paths, and command lines. Some driver-level locks may not be detected.")}</p>
                 {preview.processWarnings?.map((warning) => <p key={warning}>{warning}</p>)}
                 {preview.processes.length === 0 ? (
                   <p>{ui("未发现可识别的目标占用进程。", "No identifiable process using the target was found.")}</p>
@@ -250,14 +260,24 @@ export function ForceDeleteDialog({
                 )}
               </section>
 
-              <label className="force-delete-confirmation">
+              <label
+                className="force-delete-confirmation"
+                data-confirmed={confirmed}
+                aria-disabled={confirmationDisabled}
+              >
                 <input
                   type="checkbox"
                   checked={confirmed}
-                  disabled={deleting}
+                  disabled={confirmationDisabled}
+                  aria-describedby="force-delete-status"
                   onChange={(event) => setConfirmed(event.target.checked)}
                 />
-                <span>{ui("我确认永久删除当前选中的这一项，并同意必要时结束上方进程、通过管理员 PowerShell 重试删除。", "I confirm permanent deletion of this selected item and allow the listed processes to be stopped and administrator PowerShell to retry deletion if needed.")}</span>
+                <span className="force-delete-confirmation-copy">
+                  <strong>{confirmed
+                    ? ui("已勾选确认", "Confirmation checked")
+                    : ui("点击勾选，确认永久删除", "Check to confirm permanent deletion")}</strong>
+                  <span>{ui("我确认永久删除当前选中的这一项，并同意必要时结束上方进程、通过管理员 PowerShell 重试删除。", "I confirm permanent deletion of this selected item and allow the listed processes to be stopped and administrator PowerShell to retry deletion if needed.")}</span>
+                </span>
               </label>
             </>
           )}
@@ -271,15 +291,14 @@ export function ForceDeleteDialog({
         </div>
 
         <footer>
-          <span>{deleting
-            ? ui("若出现系统授权窗口，请完成 UAC 授权；不会自动重启电脑。", "If Windows requests authorization, complete UAC. Your computer will not restart automatically.")
-            : ui("普通删除仍可使用右键菜单中的“删除到回收站”", "Normal deletion remains available as “Move to Recycle Bin”")}</span>
+          <span id="force-delete-status" role="status">{status}</span>
           <div>
             <button type="button" onClick={onClose} disabled={deleting}>{ui("取消", "Cancel")}</button>
             <button
               type="button"
               className="danger"
               disabled={!preview || previewForPath !== path || !confirmed || deleting || loading}
+              aria-describedby="force-delete-status"
               onClick={() => void execute()}
             >
               {deleting ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
