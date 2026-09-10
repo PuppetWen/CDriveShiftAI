@@ -3,6 +3,7 @@ import { lstat, readdir, readlink, stat, symlink, unlink } from "node:fs/promise
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { isPathWithin, samePath } from "./system";
+import { canonicalizeMigrationPath } from "./migration-path";
 
 export function normalizeReparseTarget(target: string): string {
   return plainReparseTarget(target).toLocaleLowerCase();
@@ -38,11 +39,29 @@ export function relocatedReparseTarget(
     : normalized;
 }
 
+function relocatedTargetWithSourceAlias(
+  target: string,
+  relativePath: string,
+  sourceRoot: string,
+  canonicalSourceRoot: string,
+  restoredRoot: string
+): string {
+  const normalized = plainReparseTarget(target);
+  // Legacy journals can use an 8.3 parent while an application writes a link
+  // using its long name. Recognize both spellings of that verified logical root;
+  // do not resolve the link target through other links or require it to exist.
+  const logicalSource = path.win32.isAbsolute(normalized) &&
+    !isPathWithin(normalized, sourceRoot) && isPathWithin(normalized, canonicalSourceRoot)
+    ? canonicalSourceRoot : sourceRoot;
+  return relocatedReparseTarget(target, relativePath, logicalSource, restoredRoot);
+}
+
 export async function relocateCopiedLinks(
   source: string,
   destination: string,
   restoredRoot: string
 ): Promise<void> {
+  const canonicalSource = await canonicalizeMigrationPath(source);
   const queue = [""];
   for (let index = 0; index < queue.length; index += 1) {
     const relativeDirectory = queue[index]!;
@@ -52,7 +71,7 @@ export async function relocateCopiedLinks(
       const stats = await lstat(sourcePath);
       if (stats.isSymbolicLink()) {
         const target = await readlink(sourcePath);
-        const relocated = relocatedReparseTarget(target, relativePath, source, restoredRoot);
+        const relocated = relocatedTargetWithSourceAlias(target, relativePath, source, canonicalSource, restoredRoot);
         if (normalizeReparseTarget(target) === normalizeReparseTarget(relocated)) continue;
         const targetStats = await stat(sourcePath).catch(() => {
           throw new Error(`链接目标不可访问，无法安全调整迁移后的链接：${sourcePath}`);
@@ -85,6 +104,8 @@ export async function verifyMigrationCopy(
   restoredRoot = source,
   options: { allowExtraDestinationEntries?: boolean; sourceRoot?: string } = {}
 ): Promise<void> {
+  const logicalSource = options.sourceRoot ?? source;
+  const canonicalSource = await canonicalizeMigrationPath(logicalSource, { allowMissingLeaf: true, allowLeafLink: true });
   const queue = [""];
   const snapshots: Array<{ source: string; destination: string; size: number; mtime: number; ctime: number; destinationMtime: number; destinationCtime: number }> = [];
   for (const root of [source, destination]) {
@@ -114,7 +135,7 @@ export async function verifyMigrationCopy(
       if (sourceStat.isSymbolicLink()) {
         if (!destinationStat.isSymbolicLink()) throw new Error(`副本链接类型不一致：${relativePath}`);
         const [sourceTarget, destinationTarget] = await Promise.all([readlink(sourcePath), readlink(destinationPath)]);
-        const expected = relocatedReparseTarget(sourceTarget, relativePath, options.sourceRoot ?? source, restoredRoot);
+        const expected = relocatedTargetWithSourceAlias(sourceTarget, relativePath, logicalSource, canonicalSource, restoredRoot);
         if (normalizeReparseTarget(expected) !== normalizeReparseTarget(destinationTarget) && !samePath(
           path.win32.resolve(path.win32.dirname(destinationPath), plainReparseTarget(expected)),
           path.win32.resolve(path.win32.dirname(destinationPath), plainReparseTarget(destinationTarget))
@@ -153,5 +174,9 @@ export async function assertRecordedLink(source: string, destination: string): P
   if (!(await lstat(source)).isSymbolicLink()) throw new Error("原路径已不是迁移链接，已停止操作");
   const target = plainReparseTarget(await readlink(source));
   const resolved = path.win32.resolve(path.win32.dirname(source), target);
-  if (!samePath(resolved, destination)) throw new Error("原路径不再指向记录中的目标，已停止操作");
+  const [canonicalTarget, canonicalDestination] = await Promise.all([
+    canonicalizeMigrationPath(resolved, { allowMissingLeaf: true }),
+    canonicalizeMigrationPath(destination, { allowMissingLeaf: true })
+  ]);
+  if (!samePath(canonicalTarget, canonicalDestination)) throw new Error("原路径不再指向记录中的目标，已停止操作");
 }

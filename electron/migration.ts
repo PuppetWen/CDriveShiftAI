@@ -14,7 +14,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { summarizeDirectory } from "./analyzer";
 import { hasSignificantAnalysisChange } from "./analysis-freshness";
-import { migrationDestinationFor, normalizeMigrationPath } from "./migration-path";
+import { canonicalizeMigrationPath, migrationDestinationFor, normalizeMigrationPath } from "./migration-path";
 import type { AppStore } from "./store";
 import type { MigrationRecord, PreflightResult } from "./types";
 import { assertRecordedLink, relocateCopiedLinks, verifyMigrationCopy } from "./migration-copy";
@@ -51,6 +51,21 @@ async function entryExists(candidate: string): Promise<boolean> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
+  }
+}
+
+async function canonicalProtectionPath(candidate: string): Promise<string> {
+  let current = normalizeMigrationPath(candidate);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      return path.win32.join(normalizeMigrationPath(await realpath(current)), ...missing);
+    } catch (error) {
+      const parent = path.win32.dirname(current);
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || samePath(parent, current)) throw error;
+      missing.unshift(path.win32.basename(current));
+      current = parent;
+    }
   }
 }
 
@@ -166,14 +181,17 @@ export async function runRobocopy(source: string, destination: string): Promise<
 
 async function removeTreeAtExactPath(candidate: string, expectedParent: string): Promise<void> {
   const normalized = normalizeWindowsPath(candidate);
-  if (!samePath(path.dirname(normalized), expectedParent)) {
+  const parent = await canonicalizeMigrationPath(expectedParent);
+  const candidateParent = await canonicalizeMigrationPath(path.dirname(normalized));
+  if (!samePath(candidateParent, parent)) {
     throw new Error(`拒绝清理未验证路径：${normalized}`);
   }
-  if (samePath(normalized, path.parse(normalized).root) || !samePath(await realpath(expectedParent), expectedParent)) {
+  if (samePath(normalized, path.parse(normalized).root)) {
     throw new Error(`拒绝清理经过目录联接或根目录的路径：${normalized}`);
   }
-  if ((await lstat(normalized)).isSymbolicLink()) throw new Error(`拒绝递归清理已替换为链接的目录：${normalized}`);
-  await rm(normalized, { recursive: true, force: false, maxRetries: 2, retryDelay: 250 });
+  const canonical = await canonicalizeMigrationPath(normalized);
+  if (!samePath(path.dirname(canonical), parent)) throw new Error(`拒绝清理未验证路径：${normalized}`);
+  await rm(canonical, { recursive: true, force: false, maxRetries: 2, retryDelay: 250 });
 }
 
 export class MigrationService {
@@ -200,6 +218,11 @@ export class MigrationService {
 
   private renameEntry(source: string, destination: string, operation: string): Promise<void> {
     return (this.options.renameEntry ?? renameWithRetry)(source, destination, { operation });
+  }
+
+  private async protectedPaths(): Promise<string[]> {
+    const configured = this.options.protectedPaths ?? [];
+    return [...configured, ...await Promise.all(configured.map(canonicalProtectionPath))];
   }
 
   isBusy(): boolean {
@@ -338,13 +361,20 @@ export class MigrationService {
       };
     }
 
+    try {
+      source = await canonicalizeMigrationPath(source, { allowMissingLeaf: true });
+      destinationBase = await canonicalizeMigrationPath(destinationBase, { allowMissingLeaf: true });
+    } catch (error) {
+      blockers.push(error instanceof Error ? error.message : String(error));
+    }
     const finalDestination = migrationDestinationFor(source, destinationBase);
+    const protectedPaths = await this.protectedPaths();
     const protection = protectedReason(source);
     if (protection) blockers.push(protection);
-    if (this.options.protectedPaths?.some((candidate) => isPathWithin(candidate, source) || isPathWithin(source, candidate))) {
+    if (protectedPaths.some((candidate) => isPathWithin(candidate, source) || isPathWithin(source, candidate))) {
       blockers.push("不能迁移本程序的运行目录、配置数据目录或其父子目录");
     }
-    if (this.options.protectedPaths?.some((candidate) => isPathWithin(candidate, finalDestination) || isPathWithin(finalDestination, candidate))) {
+    if (protectedPaths.some((candidate) => isPathWithin(candidate, finalDestination) || isPathWithin(finalDestination, candidate))) {
       blockers.push("迁移目标不能位于本程序的运行或配置数据目录，也不能包含这些目录");
     }
     if (path.parse(source).root.toLocaleLowerCase() === path.parse(destinationBase).root.toLocaleLowerCase()) {
@@ -368,9 +398,7 @@ export class MigrationService {
       if (stats.isSymbolicLink()) blockers.push("源目录已经是符号链接或目录联接");
       const destinationStats = await lstat(destinationBase);
       if (!destinationStats.isDirectory()) blockers.push("目标基础路径不是目录");
-      for (const candidate of [source, destinationBase]) {
-        if (!samePath(await realpath(candidate), candidate)) blockers.push(`路径包含目录联接、符号链接或磁盘别名，请直接选择实际路径：${candidate}`);
-      }
+      for (const candidate of [source, destinationBase]) await canonicalizeMigrationPath(candidate);
       const targetProtection = protectedReason(destinationBase);
       if (targetProtection && !samePath(destinationBase, path.parse(destinationBase).root)) blockers.push(`目标位置不安全：${targetProtection}`);
       const [sourceDrive, destinationDrive] = await Promise.all([
@@ -471,7 +499,10 @@ export class MigrationService {
     if (!preflight.allowed) throw new Error(preflight.blockers.join("；"));
     if (
       previousRecord &&
-      !samePath(preflight.finalDestination, previousRecord.destination)
+      !samePath(
+        await canonicalizeMigrationPath(preflight.finalDestination, { allowMissingLeaf: true }),
+        await canonicalizeMigrationPath(previousRecord.destination, { allowMissingLeaf: true })
+      )
     ) {
       throw new Error("再次迁移的目标路径与原迁移记录不一致");
     }
@@ -550,7 +581,7 @@ export class MigrationService {
       }
 
       const resolved = await realpath(preflight.source);
-      if (!samePath(resolved, preflight.finalDestination)) {
+      if (!samePath(resolved, await canonicalizeMigrationPath(preflight.finalDestination))) {
         throw new Error(`链接指向异常：${resolved}`);
       }
       await access(path.join(preflight.source));
@@ -836,20 +867,24 @@ export class MigrationService {
   }
 
   private async assertRecordPaths(record: MigrationRecord): Promise<void> {
-    const source = normalizeMigrationPath(record.source);
-    const destination = normalizeMigrationPath(record.destination);
-    if (this.options.protectedPaths?.some((candidate) => [source, destination, record.stagingPath, record.backupPath, record.restorePath].some((entry) => entry && (isPathWithin(entry, candidate) || isPathWithin(candidate, entry))))) {
+    // The source is intentionally a link after migration, and a final entry may
+    // be missing between journaled rename steps. Canonicalize its parents without
+    // replacing that logical source with the link's live destination.
+    const source = await canonicalizeMigrationPath(record.source, { allowMissingLeaf: true, allowLeafLink: true });
+    const destination = await canonicalizeMigrationPath(record.destination, { allowMissingLeaf: true });
+    const transactionPaths = await Promise.all([record.stagingPath, record.backupPath, record.restorePath].map(async (entry) =>
+      entry ? await canonicalizeMigrationPath(entry, { allowMissingLeaf: true }) : undefined
+    ));
+    const protectedPaths = await this.protectedPaths();
+    if (protectedPaths.some((candidate) => [source, destination, ...transactionPaths].some((entry) => entry && (isPathWithin(entry, candidate) || isPathWithin(candidate, entry))))) {
       throw new Error("迁移记录涉及本程序的运行或配置数据目录，已停止操作");
     }
     if (protectedReason(source) || protectedReason(destination) || isPathWithin(source, destination) || isPathWithin(destination, source)) {
       throw new Error("迁移记录包含受保护或相互包含的路径，已停止操作");
     }
-    for (const parent of [path.dirname(source), path.dirname(destination)]) {
-      if (!samePath(await realpath(parent), parent)) throw new Error(`迁移路径的父目录已被重定向：${parent}`);
-    }
-    if (record.backupPath) this.assertTransactionPath(record.backupPath, source, "backup");
-    if (record.stagingPath) this.assertTransactionPath(record.stagingPath, destination, "partial");
-    if (record.restorePath) this.assertTransactionPath(record.restorePath, source, "restore");
+    if (record.backupPath) this.assertTransactionPath(record.backupPath, record.source, "backup");
+    if (record.stagingPath) this.assertTransactionPath(record.stagingPath, record.destination, "partial");
+    if (record.restorePath) this.assertTransactionPath(record.restorePath, record.source, "restore");
   }
 
   private async persist(record: MigrationRecord, message: string): Promise<void> {

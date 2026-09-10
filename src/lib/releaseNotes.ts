@@ -15,7 +15,8 @@ export const bundledReleaseNotes: BundledReleaseNote = {
       items: [
         "迁移前后逐文件校验内容、目录结构与链接，复制并核验 NTFS 访问权限，识别复制期间的写入变化。",
         "修复内部绝对链接和外部相对链接在迁移、迁回后指向错误位置的问题，并核对原路径是否被替换。",
-        "修复部分清理失败和中断恢复误判，保留可用数据与待清理状态，恢复后支持再次迁移。"
+        "修复部分清理失败和中断恢复误判，保留可用数据与待清理状态，恢复后支持再次迁移。",
+        "正确识别 Windows 8.3 短路径，避免将普通目录名称误判为目录重定向。"
       ]
     },
     {
@@ -63,7 +64,8 @@ export const bundledReleaseNotesEnglish: BundledReleaseNote = {
       items: [
         "Verify individual file contents, structure, links, and NTFS permissions; detect writes during copying.",
         "Repair relocated link targets and reject replaced source paths during migration and restore.",
-        "Preserve usable data after interrupted operations or partial cleanup, and allow migration again after restore."
+        "Preserve usable data after interrupted operations or partial cleanup, and allow migration again after restore.",
+        "Recognize Windows 8.3 short names without mistaking ordinary directory names for redirected paths."
       ]
     },
     {
