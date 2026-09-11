@@ -8,10 +8,11 @@ import {
   ShieldCheck
 } from "lucide-react";
 import { api } from "../lib/api";
+import { effectBackgrounds, isLightEffect } from "../lib/effects";
 import { formatBytes } from "../lib/format";
 import { useI18n } from "../lib/i18n";
 import { applyTextScale } from "../lib/textScale";
-import type { MigrationRecord } from "../types";
+import type { AppSettings, MigrationRecord } from "../types";
 
 export function UninstallRestoreView() {
   const { ui, formatNumber } = useI18n();
@@ -39,11 +40,25 @@ export function UninstallRestoreView() {
   }, []);
 
   useEffect(() => {
-    void api.getSettings().then((settings) => applyTextScale(settings.uiScale)).catch(() => undefined);
-    const offSettings = api.onSettingsChanged((settings) => applyTextScale(settings.uiScale));
+    let active = true;
+    let changed = false;
+    const applySettings = (settings: AppSettings) => {
+      applyTextScale(settings.uiScale);
+      document.documentElement.dataset.effect = settings.effectMode;
+      document.documentElement.style.background = effectBackgrounds[settings.effectMode];
+      document.documentElement.style.colorScheme = isLightEffect(settings.effectMode) ? "light" : "dark";
+    };
+    const offSettings = api.onSettingsChanged((settings) => {
+      changed = true;
+      applySettings(settings);
+    });
+    void api.getSettings().then((settings) => {
+      if (active && !changed) applySettings(settings);
+    }).catch(() => undefined);
     const offTextScale = api.onTextScalePreview(applyTextScale);
     void loadRecords();
     return () => {
+      active = false;
       offSettings();
       offTextScale();
     };

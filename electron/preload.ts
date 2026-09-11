@@ -8,6 +8,21 @@ import type {
 } from "./types";
 import type { AppUpdateInfo } from "./update";
 
+// The initial URL covers first paint; IPC keeps every live window in sync when
+// Windows accessibility / transparency preferences change without a reload.
+let windowMaterial = new URL(window.location.href).searchParams.get("nativeGlass") === "acrylic"
+  ? "acrylic"
+  : "none";
+const syncWindowMaterial = () => {
+  if (document.documentElement) document.documentElement.dataset.nativeGlass = windowMaterial;
+};
+syncWindowMaterial();
+window.addEventListener("DOMContentLoaded", syncWindowMaterial, { once: true });
+ipcRenderer.on("window:background-material", (_event, material: unknown) => {
+  windowMaterial = material === "acrylic" ? "acrylic" : "none";
+  syncWindowMaterial();
+});
+
 contextBridge.exposeInMainWorld("cDriveShiftAI", {
   getOverview: () => ipcRenderer.invoke("system:overview"),
   checkForUpdates: (force?: boolean) =>

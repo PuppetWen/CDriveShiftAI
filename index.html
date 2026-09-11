@@ -18,6 +18,8 @@
           ivory: "#f6f2ea"
         };
         document.documentElement.dataset.effect = effect;
+        document.documentElement.dataset.nativeGlass =
+          new URLSearchParams(location.search).get("nativeGlass") === "acrylic" ? "acrylic" : "none";
         document.documentElement.style.background = colors[effect];
         document.documentElement.style.colorScheme = ["calm", "ivory"].includes(effect)
           ? "light"

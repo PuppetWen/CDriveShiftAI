@@ -1,0 +1,412 @@
+/* Shared optical material. Theme identity stays in styles.css; this file owns
+   transmission, edge lighting and contrast for every application window. */
+:root[data-effect] {
+  --glass-panel: color-mix(in srgb, var(--surface-solid) 46%, transparent);
+  --glass-control: color-mix(in srgb, var(--surface-solid) 32%, transparent);
+  --glass-overlay: color-mix(in srgb, var(--surface-solid) 80%, transparent);
+  --glass-fallback: var(--surface-solid);
+  --glass-highlight: rgba(242, 252, 255, .32);
+  --glass-border: color-mix(in srgb, var(--muted) 26%, transparent);
+  --glass-sheen: linear-gradient(145deg, rgba(245, 253, 255, .10), rgba(245, 253, 255, .025) 28%, transparent 52%, color-mix(in srgb, var(--blue) 5%, transparent));
+  --glass-inset: inset 0 1px 0 var(--glass-highlight), inset 1px 0 0 rgba(255, 255, 255, .055), inset 0 -1px 0 rgba(0, 0, 0, .10);
+  --glass-shadow: 0 12px 32px rgba(0, 8, 18, .14), 0 2px 6px rgba(0, 8, 18, .06);
+  --glass-overlay-shadow: 0 28px 80px rgba(0, 6, 18, .32), 0 4px 14px rgba(0, 6, 18, .12);
+  --glass-filter: blur(18px) saturate(145%);
+  --glass-control-filter: blur(10px) saturate(135%);
+  --glass-overlay-filter: blur(30px) saturate(140%);
+  --glass-window-tint: color-mix(in srgb, var(--bg) 28%, transparent);
+  --glass-window-base: var(--bg);
+  --glass-on-accent: #112e34;
+  --glass-accent-highlight: rgba(255, 255, 255, .22);
+  --glass-backdrop: rgba(3, 12, 22, .26);
+  --glass-atmosphere:
+    radial-gradient(ellipse at 12% 5%, color-mix(in srgb, var(--blue) 20%, transparent), transparent 46%),
+    radial-gradient(ellipse at 88% 38%, color-mix(in srgb, var(--purple) 16%, transparent), transparent 50%),
+    radial-gradient(ellipse at 48% 105%, color-mix(in srgb, var(--mint) 13%, transparent), transparent 48%);
+  --surface: var(--glass-panel);
+  --surface-hover: color-mix(in srgb, var(--surface-solid) 60%, transparent);
+  --border: var(--glass-border);
+  --border-strong: color-mix(in srgb, var(--mint) 48%, var(--glass-border));
+  --shadow: var(--glass-shadow);
+  --sidebar: color-mix(in srgb, var(--surface-solid) 38%, transparent);
+  --control-radius: 10px;
+}
+
+:root[data-effect="aurora"] {
+  --radius: 14px;
+  --muted: #d1e3df;
+  --dim: #b5cdca;
+}
+
+:root[data-effect="matrix"] {
+  --radius: 18px;
+  --muted: #c0d5e7;
+  --dim: #a8bfd3;
+}
+
+:root[data-effect="ember"] {
+  --radius: 14px;
+  --muted: #e2c9bb;
+  --dim: #c9afa1;
+  --glass-on-accent: #34170a;
+}
+
+:root:is([data-effect="calm"], [data-effect="ivory"]) {
+  --radius: 20px;
+  --glass-panel: color-mix(in srgb, var(--surface-solid) 48%, transparent);
+  --glass-control: color-mix(in srgb, var(--surface-solid) 38%, transparent);
+  --glass-overlay: color-mix(in srgb, var(--surface-solid) 84%, transparent);
+  --glass-highlight: rgba(255, 255, 255, .92);
+  --glass-border: color-mix(in srgb, var(--text) 20%, transparent);
+  --glass-sheen: linear-gradient(145deg, rgba(255, 255, 255, .48), rgba(255, 255, 255, .12) 26%, transparent 52%, color-mix(in srgb, var(--blue) 4%, transparent));
+  --glass-inset: inset 0 1px 0 var(--glass-highlight), inset 1px 0 0 rgba(255, 255, 255, .36), inset 0 -1px 0 rgba(48, 69, 85, .055);
+  --glass-shadow: 0 12px 32px rgba(50, 68, 86, .07), 0 2px 5px rgba(50, 68, 86, .025);
+  --glass-overlay-shadow: 0 28px 80px rgba(50, 68, 86, .20), 0 4px 14px rgba(50, 68, 86, .08);
+  --glass-window-tint: color-mix(in srgb, var(--bg) 38%, transparent);
+  --glass-backdrop: rgba(47, 65, 83, .16);
+  --glass-on-accent: #fff;
+  --glass-accent-highlight: rgba(255, 255, 255, .07);
+}
+
+:root[data-effect="calm"] {
+  --muted: #405b69;
+  --dim: #536c79;
+  --mint: #087577;
+  --blue: #32638e;
+  --amber: #875820;
+  --good: #17674e;
+}
+
+:root[data-effect="ivory"] {
+  --muted: #5b4e47;
+  --dim: #6d5e54;
+  --mint: #ac402c;
+  --blue: #42667f;
+  --amber: #915824;
+  --good: #3b6c55;
+}
+
+/* Only native acrylic windows expose the desktop. Browser/older Windows keep
+   an opaque theme canvas beneath the same translucent component materials. */
+:root[data-effect] body { background: var(--bg); }
+
+:root[data-effect] :is(.app-shell, .quick-search-window, .uninstall-restore-window) {
+  background: var(--glass-atmosphere), var(--glass-window-base);
+}
+:root[data-effect] .quick-search-workspace-body { background: transparent; }
+
+:root[data-native-glass="acrylic"] {
+  --glass-window-base: var(--glass-window-tint);
+  /* Theme initialization sets an inline background to prevent startup flashes. */
+  background: transparent !important;
+}
+
+:root[data-native-glass="acrylic"] :is(body, #root) { background: transparent; }
+
+:root[data-effect] .sidebar {
+  border-inline-end: 1px solid var(--glass-border);
+  background: var(--glass-sheen), var(--sidebar);
+  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--glass-highlight) 45%, transparent);
+  backdrop-filter: var(--glass-filter);
+}
+
+:root[data-effect] :is(.topbar, .quick-search-titlebar, .quick-search-handoff-note, .quick-search-footer) {
+  border-color: var(--glass-border);
+  border-width: 1px;
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+  backdrop-filter: var(--glass-filter);
+}
+
+:root[data-effect] :is(.glass-card, .settings-module-nav) {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--glass-sheen), var(--glass-panel);
+  box-shadow: var(--glass-inset), var(--glass-shadow);
+  backdrop-filter: var(--glass-filter);
+}
+
+/* Remove opaque theme trim without changing the theme's canvas or icons. */
+:root[data-effect] :is(.glass-card, .settings-section)::after { display: none; }
+:root[data-effect] :is(.page-heading h1, .brand strong) { text-shadow: none; }
+
+:root[data-effect] :is(.nav-item, .index-mini, .settings-module-nav > button, .effect-card) {
+  border-radius: var(--control-radius);
+}
+
+:root[data-effect] :is(.index-mini, .effect-switcher, .quick-search-effect-switcher, .privacy-pill, .search-mode-switch) {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--control-radius);
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+}
+
+:root[data-effect] :is(.nav-item:hover, .secondary-button:hover:not(:disabled), .effect-card:hover, .action-card:hover, .drive-tile:hover) {
+  border-color: var(--border-strong);
+  background: var(--glass-sheen), color-mix(in srgb, var(--mint) 9%, var(--glass-control));
+  box-shadow: var(--glass-inset), var(--glass-shadow);
+}
+
+:root[data-effect] :is(.nav-item.active, .settings-module-nav > button.active, .effect-card.active) {
+  border-color: var(--border-strong);
+  color: var(--text);
+  background: var(--glass-sheen), color-mix(in srgb, var(--mint) 12%, var(--glass-control));
+  box-shadow: var(--glass-inset), inset 3px 0 0 var(--mint);
+}
+
+:root[data-effect] :is(.effect-switcher, .quick-search-effect-switcher, .search-mode-switch) button.active {
+  color: var(--text);
+  background: var(--glass-sheen), color-mix(in srgb, var(--mint) 15%, var(--glass-control));
+  box-shadow: var(--glass-inset), inset 0 0 0 1px var(--border-strong);
+}
+
+/* Controls inherit the parent blur. Keeping thousands of result rows and
+   their buttons off separate backdrop layers preserves scrolling performance. */
+:root[data-effect] :is(.secondary-button, .path-input, .ownership-search, .sort-control,
+  .provider-picker-trigger, .language-picker-trigger, .provider-picker-search,
+  .language-picker-search, .path-properties-path, .path-properties-rename,
+  .search-bookmark-chip, .filter-chip, .setting-row, .effect-card,
+  .ui-scale-preview, .path-properties-metrics article, .path-properties-grid > article) {
+  border-color: var(--glass-border);
+  border-width: 1px;
+  border-radius: var(--control-radius);
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+}
+
+:root[data-effect] :is(.path-input, .ownership-search, .search-input-wrap) {
+  color: var(--text);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+:root[data-effect] .search-input-wrap {
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+}
+
+:root[data-effect] :is(.path-input, .ownership-search, .search-input-wrap, .provider-picker-search, .language-picker-search):focus-within {
+  outline: 2px solid var(--mint);
+  outline-offset: -2px;
+  box-shadow: var(--glass-inset), 0 0 0 3px color-mix(in srgb, var(--mint) 12%, transparent);
+}
+
+:root[data-effect] :is(.ai-model-discovery input, .ai-connection-grid input,
+  .filter-input-line input, .size-range-inputs input, .date-range-inputs input,
+  .context-rename input, .search-bookmark-editor input, .shortcut-capture input,
+  .model-picker > input, .path-properties-rename input) {
+  border-color: var(--glass-border);
+  border-radius: var(--control-radius);
+  color: var(--text);
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+}
+
+:root[data-effect] :is(input, textarea)::placeholder { color: var(--dim); opacity: 1; }
+:root[data-effect] :is(input, textarea) { caret-color: var(--mint); }
+:root[data-effect] select option { color: var(--text); background: var(--surface-solid); }
+:root[data-effect] .date-range-inputs input { color-scheme: inherit; }
+
+:root[data-effect] :is(.path-input, .ownership-search, .search-input-wrap, .provider-picker-search, .language-picker-search) input {
+  border-radius: 0;
+  color: var(--text);
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-effect] :is(.path-input button, .path-properties-path button, .scope-button,
+  .index-content-button, .all-computer-button, .scope-clear-button,
+  .path-properties-dialog > footer button, .force-delete-dialog > footer button:not(.danger),
+  .force-delete-help-actions button) {
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+}
+
+:root[data-effect] :is(.primary-button, .secondary-button, .text-button) { border-radius: var(--control-radius); }
+:root[data-effect] .primary-button {
+  border: 1px solid color-mix(in srgb, var(--mint-bright) 65%, transparent);
+  color: var(--glass-on-accent);
+  background: linear-gradient(155deg, var(--glass-accent-highlight), transparent 52%), linear-gradient(120deg, var(--mint-bright), var(--mint));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .40), 0 5px 16px color-mix(in srgb, var(--mint) 17%, transparent);
+  text-shadow: none;
+}
+:root[data-effect] .primary-button:active:not(:disabled) { transform: translateY(1px); }
+
+/* Toolbars and filter bands must not stack nearly opaque painted panels. */
+:root[data-effect] :is(.search-filter-workbench, .search-filter-workbench-row) { background: transparent; }
+:root[data-effect] :is(.search-filter-group, .search-toolbar, .search-options-row, .regex-assistant,
+  .results-head, .ownership-board-head, .context-target,
+  .provider-picker-popover > header, .model-picker-popover > header,
+  .path-properties-titlebar, .path-properties-dialog > footer,
+  .force-delete-dialog > footer, .uninstall-restore-window > header, .uninstall-restore-window > footer) {
+  border-color: var(--glass-border);
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+}
+
+/* This toolbar only arranges separate controls. Paint the count's rounded
+   surface itself so the layout wrapper cannot show rectangular corners. */
+:root[data-effect] .history-toolbar > .badge {
+  border-color: var(--glass-border);
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+}
+
+:root[data-effect] .search-filter-group { border-radius: 0; }
+:root[data-effect] .search-filter-group + .search-filter-group { border-inline-start: 1px solid var(--glass-border); }
+:root[data-effect] .search-filter-workbench-row + .search-filter-workbench-row { border-top: 1px solid var(--glass-border); }
+
+:root[data-effect] :is(.search-bookmark-chip.active, .filter-chip.active) {
+  border-color: var(--border-strong);
+  color: var(--mint);
+  background: var(--glass-sheen), color-mix(in srgb, var(--mint) 12%, var(--glass-control));
+  box-shadow: var(--glass-inset), inset 2px 0 0 var(--mint);
+}
+:root[data-effect] :is(.search-bookmark-chip, .filter-chip):hover {
+  border-color: var(--border-strong);
+  background: var(--glass-sheen), color-mix(in srgb, var(--mint) 9%, var(--glass-control));
+}
+:root[data-effect] :is(.provider-picker.open .provider-picker-trigger, .language-picker.open .language-picker-trigger) {
+  border-color: var(--border-strong);
+}
+
+:root[data-effect] :is(.result-columns, .ownership-table-head, .content-result-columns, .quick-search-table-head) {
+  color: var(--muted);
+  background: var(--glass-sheen), var(--glass-overlay);
+  backdrop-filter: var(--glass-control-filter);
+}
+
+:root[data-effect] :is(.result-row, .ownership-row):is(.selected, .context-active) {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--mint) 16%, transparent), color-mix(in srgb, var(--mint) 5%, transparent));
+  box-shadow: inset 3px 0 0 var(--mint);
+}
+
+/* These surfaces float over text, so use stronger tint and blur than cards. */
+:root[data-effect] :is(.search-bookmark-dropdown, .bookmark-context-menu, .search-context-menu,
+  .ownership-context-menu, .themed-tooltip, .provider-picker-popover, .model-picker-popover,
+  .language-picker-popover, .path-properties-dialog, .force-delete-dialog, .toast) {
+  border: 1px solid var(--glass-border);
+  border-top-color: var(--glass-highlight);
+  border-radius: var(--radius);
+  background: var(--glass-sheen), var(--glass-overlay);
+  box-shadow: var(--glass-inset), var(--glass-overlay-shadow);
+  backdrop-filter: var(--glass-overlay-filter);
+}
+
+:root[data-effect] :is(.themed-tooltip, .toast) { border-radius: 12px; }
+:root[data-effect] :is(.path-properties-backdrop, .force-delete-backdrop) {
+  background: var(--glass-backdrop);
+  backdrop-filter: blur(5px);
+}
+:root[data-effect] .path-properties-titlebar::before {
+  background: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
+}
+:root[data-effect] :is(.context-section > button, .bookmark-context-menu > button,
+  .provider-picker-group > button, .model-picker-option, .language-picker-list button):hover {
+  background: var(--glass-sheen), color-mix(in srgb, var(--mint) 10%, var(--glass-control));
+}
+
+:root[data-effect] :is(.force-delete-target, .force-delete-state, .force-delete-processes,
+  .force-delete-confirmation, .uninstall-summary, .uninstall-record, .uninstall-progress) {
+  background: var(--glass-sheen), var(--glass-control);
+  box-shadow: var(--glass-inset);
+}
+:root[data-effect] :is(.force-delete-warning, .force-delete-error, .force-delete-confirmation[data-confirmed="true"]) {
+  background: var(--glass-sheen), color-mix(in srgb, var(--danger) 9%, var(--glass-control));
+}
+
+/* Accent and destructive actions retain their semantic fill over the glass. */
+:root[data-effect] .path-properties-dialog > footer button.primary {
+  border-color: var(--mint);
+  color: var(--glass-on-accent);
+  background: linear-gradient(155deg, var(--glass-accent-highlight), transparent 52%), var(--mint);
+}
+:root[data-effect] :is(.primary-button.danger, .danger-action, .force-delete-dialog > footer button.danger) {
+  border-color: #e58090;
+  color: #fff;
+  background: linear-gradient(135deg, #bd314a, #a52036);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .24), 0 5px 16px rgba(165, 32, 54, .14);
+}
+
+:root[data-effect] :is(button, input, textarea, select, summary, [tabindex="0"]):focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: 3px;
+}
+:root[data-effect] :is(.path-input, .ownership-search, .search-input-wrap, .provider-picker-search, .language-picker-search) input:focus-visible {
+  /* The containing field already supplies the full rounded focus ring. */
+  outline: none;
+}
+:root[data-effect] ::selection { color: var(--text); background: color-mix(in srgb, var(--mint) 28%, var(--surface-solid)); }
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  :root[data-effect] :is(.glass-card, .path-input, .search-input-wrap, .ownership-search, .sidebar, .topbar, .quick-search-titlebar, .path-properties-dialog, .force-delete-dialog)[data-glass-lit="true"] {
+    background-image:
+      radial-gradient(ellipse 260px 160px at var(--glass-pointer-x) var(--glass-pointer-y), color-mix(in srgb, var(--glass-highlight) 35%, transparent), transparent 72%),
+      var(--glass-sheen);
+  }
+}
+
+/* CSS fallbacks also apply to the dedicated utility-window stylesheet. */
+@supports not (backdrop-filter: blur(1px)) {
+  :root[data-effect] {
+    --glass-panel: var(--glass-fallback);
+    --glass-control: var(--glass-fallback);
+    --glass-overlay: var(--glass-fallback);
+    --sidebar: var(--glass-fallback);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  :root[data-effect] {
+    --glass-panel: var(--glass-fallback);
+    --glass-control: var(--glass-fallback);
+    --glass-overlay: var(--glass-fallback);
+    --glass-window-base: var(--bg);
+    --glass-window-tint: var(--bg);
+    --glass-sheen: linear-gradient(transparent, transparent);
+    --glass-filter: none;
+    --glass-control-filter: none;
+    --glass-overlay-filter: none;
+    --glass-border: var(--muted);
+    --sidebar: var(--glass-fallback);
+  }
+  :root[data-effect] :is(.background-fx, .fx-surface) { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-effect] *, :root[data-effect] *::before, :root[data-effect] *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :root[data-effect] {
+    --bg: Canvas;
+    --text: CanvasText;
+    --muted: CanvasText;
+    --dim: CanvasText;
+    --mint: Highlight;
+    --mint-bright: Highlight;
+    --glass-fallback: Canvas;
+    --glass-panel: Canvas;
+    --glass-control: Canvas;
+    --glass-overlay: Canvas;
+    --glass-window-base: Canvas;
+    --glass-window-tint: Canvas;
+    --glass-border: ButtonText;
+    --glass-highlight: Canvas;
+    --glass-filter: none;
+    --glass-control-filter: none;
+    --glass-overlay-filter: none;
+    --sidebar: Canvas;
+  }
+  :root[data-effect] :is(.background-fx, .fx-surface) { display: none; }
+  :root[data-effect] :is(.nav-item.active, .result-row.selected, .ownership-row.selected, button[aria-pressed="true"]) {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}

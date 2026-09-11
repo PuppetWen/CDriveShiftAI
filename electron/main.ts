@@ -49,6 +49,7 @@ import { SearchService } from "./search";
 import { normalizeStoredUiScale } from "./settings-normalization";
 import { AppStore } from "./store";
 import { createTrayMenuIcon, type TrayIconKind } from "./tray-icons";
+import { applyWindowMaterial, getWindowMaterial } from "./window-material";
 import {
   completePendingUpdate,
   UpdateService,
@@ -241,14 +242,14 @@ function applyNativeEffect(
   window?: BrowserWindow
 ): void {
   const colors = effectColors[effect];
-  nativeTheme.themeSource = colors.nativeTheme;
+  if (nativeTheme.themeSource !== colors.nativeTheme) nativeTheme.themeSource = colors.nativeTheme;
   if (!window || window.isDestroyed()) return;
-  window.setBackgroundColor(colors.background);
+  applyWindowMaterial(window, colors.background);
   if (process.platform === "win32" && window !== forceDeleteWindow) {
     window.setTitleBarOverlay({
       color: "#00000000",
       symbolColor: colors.symbols,
-      height: 48
+      height: window === quickSearchWindow ? 42 : window === uninstallRestoreWindow ? 44 : 48
     });
   }
 }
@@ -277,16 +278,22 @@ function loadRenderer(
   effect: AppSettings["effectMode"],
   parameters: Record<string, string> = {}
 ): void {
+  const windowParameters = { ...parameters, nativeGlass: getWindowMaterial(window) };
+  window.webContents.on("did-finish-load", () => {
+    if (!window.isDestroyed()) {
+      window.webContents.send("window:background-material", getWindowMaterial(window));
+    }
+  });
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
-    void window.loadURL(rendererUrl(devServerUrl, effect, parameters));
+    void window.loadURL(rendererUrl(devServerUrl, effect, windowParameters));
     return;
   }
   void window.loadURL(
     rendererUrl(
       pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).toString(),
       effect,
-      parameters
+      windowParameters
     )
   );
 }
@@ -425,8 +432,8 @@ function showAsSoonAsRenderable(window: BrowserWindow, maximized = false): void 
     window.show();
   };
   // ready-to-show may be delayed by GPU initialization or a busy first paint.
-  // dom-ready is sufficient because the document has an effect-matched opaque
-  // background, so showing here improves perceived startup without a white flash.
+  // The window already has its native backdrop or effect-matched fallback,
+  // so dom-ready can improve perceived startup without a white flash.
   window.webContents.once("dom-ready", show);
   window.once("ready-to-show", show);
   const fallback = setTimeout(show, 1_200);
@@ -482,6 +489,7 @@ function createWindow(): BrowserWindow {
     }
   });
 
+  applyNativeEffect(effect, window);
   initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
   trackWindowActivity(window, "main");
@@ -525,7 +533,8 @@ function createWindow(): BrowserWindow {
 
 function emitSettingsChanged(settings: AppSettings): void {
   const strings = nativeStrings(settings.language);
-  for (const window of [mainWindow, quickSearchWindow, forceDeleteWindow]) {
+  applyNativeEffect(settings.effectMode);
+  for (const window of [mainWindow, quickSearchWindow, forceDeleteWindow, uninstallRestoreWindow]) {
     if (window && !window.isDestroyed()) {
       window.webContents.send("settings:changed", settings);
       applyNativeEffect(settings.effectMode, window);
@@ -543,9 +552,15 @@ function emitSettingsChanged(settings: AppSettings): void {
   }
   if (uninstallRestoreWindow && !uninstallRestoreWindow.isDestroyed()) {
     uninstallRestoreWindow.setTitle(strings.uninstallWindow);
-    applyUiScale(uninstallRestoreWindow, settings.uiScale);
   }
 }
+
+nativeTheme.on("updated", () => {
+  const colors = effectColors[store.getSettings().effectMode];
+  for (const window of [mainWindow, quickSearchWindow, forceDeleteWindow, uninstallRestoreWindow]) {
+    if (window && !window.isDestroyed()) applyWindowMaterial(window, colors.background);
+  }
+});
 
 function emitUpdateState(state: AppUpdateInfo): void {
   for (const window of [mainWindow, quickSearchWindow]) {
@@ -663,6 +678,7 @@ function createForceDeleteWindow(): BrowserWindow {
     }
   });
   forceDeleteWindow = window;
+  applyNativeEffect(settings.effectMode, window);
   initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
   trackWindowActivity(window, "force-delete");
@@ -761,6 +777,7 @@ function createQuickSearchWindow(): BrowserWindow {
     }
   });
   quickSearchWindow = window;
+  applyNativeEffect(settings.effectMode, window);
   initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
   trackWindowActivity(window, "quick");
@@ -807,6 +824,7 @@ function createUninstallRestoreWindow(): BrowserWindow {
     }
   });
   uninstallRestoreWindow = window;
+  applyNativeEffect(settings.effectMode, window);
   initializeUiScale(window, settings.uiScale);
   window.setMenuBarVisibility(false);
   window.once("ready-to-show", () => window.show());
