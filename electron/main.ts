@@ -81,6 +81,9 @@ import type {
 } from "./types";
 
 const applicationDataRoot = configureApplicationDataPaths();
+// Explorer/terminal launches may inherit the very directory the user wants to
+// move or delete. Windows keeps the process CWD open for its entire lifetime.
+process.chdir(applicationDataRoot);
 configureLogger(applicationDataRoot);
 crashReporter.start({ uploadToServer: false, compress: false });
 

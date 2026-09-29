@@ -15,6 +15,7 @@ describe("controlled force deletion", () => {
       [{
         pid: 4100,
         name: "tool.exe",
+        creationTime: "1230",
         executablePath: "E:\\Tools\\Example\\bin\\tool.exe",
         commandLine: "\"E:\\Tools\\Example\\bin\\tool.exe\" --serve"
       }],
@@ -70,19 +71,20 @@ describe("controlled force deletion", () => {
 });
 
 const fixtureRoots: string[] = [];
+const fixtureBase = path.resolve(".test-tmp", "force-delete");
 const windowsDescribe = process.platform === "win32" ? describe : describe.skip;
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  const workspace = path.resolve(".");
   for (const root of fixtureRoots.splice(0)) {
-    if (!root.startsWith(`${workspace}${path.sep}.force-delete-test-`)) throw new Error("Unsafe fixture cleanup");
+    if (path.dirname(path.resolve(root)) !== fixtureBase || !path.basename(root).startsWith("fixture-")) throw new Error("Unsafe fixture cleanup");
     await rm(root, { recursive: true, force: true, maxRetries: 3 });
   }
 });
 
 async function createFixture() {
-  const root = await mkdtemp(path.join(path.resolve("."), ".force-delete-test-"));
+  await mkdir(fixtureBase, { recursive: true });
+  const root = await mkdtemp(path.join(fixtureBase, "fixture-"));
   fixtureRoots.push(root);
   const target = path.join(root, "target");
   const applicationRoot = path.join(root, "application");
@@ -377,6 +379,33 @@ windowsDescribe("force deletion filesystem and process boundaries", () => {
     const preview = await service.preview(target);
     expect(preview.processes[0]).toMatchObject({ pid: 541001, canTerminate: false });
     expect(preview.processWarnings?.join("")).toContain("无法读取进程身份");
+  });
+
+  it("can identify and stop a confirmed lock holder using native metadata when CIM fails", async () => {
+    const { target, options, operations } = await createFixture();
+    operations.listProcesses.mockRejectedValue(new Error("CIM unavailable"));
+    operations.remove.mockRejectedValueOnce(busyError(target));
+    const service = new ForceDeleteService(options, { ...operations,
+      listFileLocks: async () => ({ processes: [{ pid: 541001, name: "editor.exe", appName: "Example Editor",
+        executablePath: "E:\\Tools\\Editor\\editor.exe", lockedPath: path.join(target, "test.txt"), creationTime: "1237", protected: false }], warnings: [] })
+    });
+    const preview = await service.preview(target);
+    expect(preview.processes[0]).toMatchObject({ appName: "Example Editor", name: "editor.exe", canTerminate: true, matchReason: "file-handle" });
+    await expect(service.execute(preview.verificationId)).resolves.toMatchObject({ deleted: true });
+    expect(operations.terminateProcess).toHaveBeenCalledExactlyOnceWith(541001, "1237");
+  });
+
+  it("keeps a confirmed identity valid when discovery changes FILETIME precision", async () => {
+    const { target, options, operations } = await createFixture();
+    operations.listProcesses.mockResolvedValueOnce([{ pid: 541001, name: "editor.exe", commandLine: "editor.exe", creationTime: "1230" }]);
+    operations.listProcesses.mockRejectedValue(new Error("CIM unavailable"));
+    operations.remove.mockRejectedValueOnce(busyError(target));
+    const service = new ForceDeleteService(options, { ...operations,
+      listFileLocks: async () => ({ processes: [{ pid: 541001, name: "editor.exe", creationTime: "1237", protected: false }], warnings: [] })
+    });
+    const preview = await service.preview(target);
+    await expect(service.execute(preview.verificationId)).resolves.toMatchObject({ deleted: true });
+    expect(operations.terminateProcess).toHaveBeenCalledExactlyOnceWith(541001, "1237");
   });
 
   it("falls back to command-line matching with a visible warning if handle queries fail", async () => {

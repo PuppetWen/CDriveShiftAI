@@ -184,6 +184,8 @@ export interface SearchContextActionResult {
 export interface ForceDeleteProcess {
   pid: number;
   name: string;
+  appName?: string;
+  lockedPath?: string;
   executablePath?: string;
   matchReason: "executable" | "command-line" | "file-handle";
   canTerminate: boolean;

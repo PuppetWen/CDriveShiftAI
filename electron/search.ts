@@ -2,7 +2,7 @@ import { app } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { access, lstat, opendir, stat } from "node:fs/promises";
+import { access, lstat, readdir, stat } from "node:fs/promises";
 import { uptime } from "node:os";
 import path from "node:path";
 import type {
@@ -154,6 +154,7 @@ export class SearchService {
     }
 
     const child = spawn(executable, ["--serve"], {
+      cwd: app.getPath("userData"),
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -755,8 +756,8 @@ export class SearchService {
         }
         const current = queue.shift()!;
         try {
-          const directory = await opendir(current);
-          for await (const entry of directory) {
+          const entries = await readdir(current, { withFileTypes: true });
+          for (const entry of entries) {
             visited += 1;
             if (entry.isSymbolicLink()) continue;
             const entryPath = path.join(current, entry.name);
@@ -813,8 +814,8 @@ export class SearchService {
     while (queue.length > 0 && Date.now() < deadline && results.length < 80) {
       const current = queue.shift()!;
       try {
-        const directory = await opendir(current);
-        for await (const entry of directory) {
+        const entries = await readdir(current, { withFileTypes: true });
+        for (const entry of entries) {
           if (entry.isSymbolicLink()) continue;
           const entryPath = path.join(current, entry.name);
           if (entry.isDirectory()) queue.push(entryPath);

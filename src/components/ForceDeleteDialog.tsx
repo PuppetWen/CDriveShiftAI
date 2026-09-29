@@ -236,7 +236,7 @@ export function ForceDeleteDialog({
 
               <section className="force-delete-processes">
                 <header>
-                  <div><Cpu size={16} /><strong>{ui("相关进程", "Related processes")}</strong></div>
+                  <div><Cpu size={16} /><strong>{ui("占用应用与相关进程", "Apps using this target and related processes")}</strong></div>
                   <span>{preview.processes.length}</span>
                 </header>
                 <p>{ui("检查文件和目录占用、启动路径与命令行；部分驱动层面的锁定等情况可能无法识别。", "Checks open file and directory handles, executable paths, and command lines. Some driver-level locks may not be detected.")}</p>
@@ -249,11 +249,15 @@ export function ForceDeleteDialog({
                       <article key={processItem.pid} className={!processItem.canTerminate ? "protected" : ""}>
                         <Cpu size={15} />
                         <div>
-                          <strong>{processItem.name}</strong>
-                          <span>{processItem.executablePath ?? ui("进程路径不可读", "Process path unavailable")}</span>
+                          <strong>{processItem.appName ?? processItem.name}</strong>
+                          <span>{processItem.name} · {processItem.matchReason === "file-handle"
+                            ? ui("检测到占用句柄", "Open handle detected")
+                            : processItem.matchReason === "executable" ? ui("程序位于目标中", "Executable inside target") : ui("命令行引用目标", "Command line references target")}</span>
+                          <span title={processItem.executablePath}>{processItem.executablePath ?? ui("进程路径不可读", "Process path unavailable")}</span>
+                          {processItem.lockedPath && <span title={processItem.lockedPath}>{ui("占用路径", "Open path")}: {processItem.lockedPath}</span>}
                         </div>
                         <small>PID {processItem.pid}</small>
-                        <em>{processItem.canTerminate ? ui("必要时结束", "Stop if needed") : ui("系统进程，不结束", "Protected")}</em>
+                        <em>{processItem.canTerminate ? ui("必要时结束", "Stop if needed") : ui("受保护或身份不可读", "Protected or identity unavailable")}</em>
                       </article>
                     ))}
                   </div>
@@ -276,7 +280,7 @@ export function ForceDeleteDialog({
                   <strong>{confirmed
                     ? ui("已勾选确认", "Confirmation checked")
                     : ui("点击勾选，确认永久删除", "Check to confirm permanent deletion")}</strong>
-                  <span>{ui("我确认永久删除当前选中的这一项，并同意必要时结束上方进程、通过管理员 PowerShell 重试删除。", "I confirm permanent deletion of this selected item and allow the listed processes to be stopped and administrator PowerShell to retry deletion if needed.")}</span>
+                  <span>{ui("我确认永久删除当前选中的这一项，并同意必要时结束上方进程、通过管理员 PowerShell 重试删除。结束应用可能丢失未保存的内容。", "I confirm permanent deletion of this selected item and allow the listed processes to be stopped and administrator PowerShell to retry deletion if needed. Unsaved work in those apps may be lost.")}</span>
                 </span>
               </label>
             </>

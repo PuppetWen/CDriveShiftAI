@@ -11,7 +11,7 @@ use std::cmp::Ordering as CompareOrdering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
@@ -2485,11 +2485,28 @@ fn is_excluded_content_directory(path: &Path) -> bool {
 }
 
 fn read_text_document(path: &Path) -> Option<String> {
-    let metadata = fs::metadata(path).ok()?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Content indexing must never reserve the user's file against rename,
+        // delete or writes. Only our own cache is memory mapped.
+        options.share_mode(0x1 | 0x2 | 0x4);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
     if !metadata.is_file() || metadata.len() > 8 * 1024 * 1024 {
         return None;
     }
-    let bytes = fs::read(path).ok()?;
+    let mut bytes = Vec::new();
+    // Limit the read as well as the initial size: a log can grow during indexing.
+    file.take(8 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return None;
+    }
     if bytes.is_empty() {
         return None;
     }
@@ -2639,19 +2656,14 @@ fn start_content_index(
                             continue;
                         }
                     };
-                    if let Ok(items) = fs::read_dir(&directory) {
-                        for item in items.flatten() {
+                    if let Ok(items) = snapshot_directory(&directory) {
+                        for (item_path, file_type) in items {
                             if wait_while_backgrounded(&backgrounded, &stopping) {
                                 break;
                             }
-                            let file_type = match item.file_type() {
-                                Ok(value) => value,
-                                Err(_) => continue,
-                            };
                             if file_type.is_symlink() {
                                 continue;
                             }
-                            let item_path = item.path();
                             if file_type.is_dir() {
                                 if is_excluded_content_directory(&item_path) {
                                     continue;
@@ -2664,7 +2676,7 @@ fn start_content_index(
                                 visited.fetch_add(1, Ordering::Relaxed);
                                 if is_content_candidate(&item_path) {
                                     if let Some(content) = read_text_document(&item_path) {
-                                        let metadata = item.metadata().ok();
+                                        let metadata = fs::metadata(&item_path).ok();
                                         let size =
                                             metadata.as_ref().map(|value| value.len()).unwrap_or(0);
                                         let modified_ms = metadata
@@ -2677,7 +2689,7 @@ fn start_content_index(
                                         if sender
                                             .send((
                                                 item_path.to_string_lossy().to_string(),
-                                                item.file_name().to_string_lossy().to_string(),
+                                                file_name(&item_path.to_string_lossy()).to_string(),
                                                 content,
                                                 size,
                                                 modified_ms,
@@ -3500,19 +3512,14 @@ fn walk_filesystem(root: &str, output: &Output, state: &SharedState) -> Vec<Entr
                     continue;
                 }
             };
-            if let Ok(read_dir) = fs::read_dir(&directory) {
-                for item in read_dir.flatten() {
+            if let Ok(items) = snapshot_directory(&directory) {
+                for (path_buf, file_type) in items {
                     if wait_while_backgrounded(&backgrounded, &stopping) {
                         break;
                     }
-                    let file_type = match item.file_type() {
-                        Ok(value) => value,
-                        Err(_) => continue,
-                    };
                     if file_type.is_symlink() {
                         continue;
                     }
-                    let path_buf = item.path();
                     let path_value = path_buf.to_string_lossy().to_string();
                     if file_type.is_dir() {
                         queue
@@ -3571,6 +3578,18 @@ fn entry_from_path(path_value: &Path) -> Option<Entry> {
     })
 }
 
+// Copy only names and types. Drop the OS directory enumeration before pausing,
+// sending over a bounded channel, or reading file contents. A background pause
+// can last indefinitely and must not keep the source directory open.
+fn snapshot_directory(directory: &Path) -> io::Result<Vec<(PathBuf, fs::FileType)>> {
+    Ok(fs::read_dir(directory)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            Some((entry.path(), entry.file_type().ok()?))
+        })
+        .collect())
+}
+
 fn collect_subtree(root: &Path, maximum: usize, state: &SharedState) -> Vec<Entry> {
     let mut output = Vec::new();
     let mut queue = VecDeque::from([root.to_path_buf()]);
@@ -3581,11 +3600,10 @@ fn collect_subtree(root: &Path, maximum: usize, state: &SharedState) -> Vec<Entr
         if output.len() >= maximum {
             break;
         }
-        let Ok(items) = fs::read_dir(directory) else {
+        let Ok(items) = snapshot_directory(&directory) else {
             continue;
         };
-        for item in items.flatten() {
-            let path_value = item.path();
+        for (path_value, _) in items {
             if let Some(entry) = entry_from_path(&path_value) {
                 if entry.is_directory {
                     queue.push_back(path_value);

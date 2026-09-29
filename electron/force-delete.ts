@@ -39,6 +39,8 @@ const NEVER_TERMINATE = new Set([
 interface WindowsProcessRecord {
   pid: number;
   name: string;
+  appName?: string;
+  lockedPath?: string;
   executablePath?: string;
   commandLine?: string;
   parentPid?: number;
@@ -157,9 +159,11 @@ export function matchProcessesForTarget(
     return [{
       pid: processRecord.pid,
       name: processRecord.name,
+      appName: processRecord.appName,
+      lockedPath: processRecord.lockedPath,
       executablePath: processRecord.executablePath,
       matchReason: processRecord.fileHandleMatch ? "file-handle" : executableMatch ? "executable" : "command-line",
-      canTerminate: !protectedProcess
+      canTerminate: !protectedProcess && Boolean(processRecord.creationTime)
     }];
   });
 }
@@ -224,9 +228,9 @@ function identity(stats: BigIntStats): string {
 }
 
 function sameProcess(previous: WindowsProcessRecord, current: WindowsProcessRecord): boolean {
-  return Boolean(previous.creationTime && previous.creationTime === current.creationTime) &&
+  return Boolean(current.creationTime && sameProcessStartTime(previous.creationTime, current.creationTime)) &&
     previous.pid === current.pid && previous.name === current.name &&
-    previous.executablePath === current.executablePath && previous.commandLine === current.commandLine;
+    (!previous.executablePath || !current.executablePath || samePath(previous.executablePath, current.executablePath));
 }
 
 function excludedProcesses(processes: WindowsProcessRecord[], applicationRoot: string): Set<number> {
@@ -332,8 +336,23 @@ export class ForceDeleteService {
         if (record && sameProcessStartTime(record.creationTime, lock.creationTime)) {
           record.fileHandleMatch = true;
           record.protectedProcess = lock.protected;
+          record.appName = lock.appName;
+          record.lockedPath = lock.lockedPath;
+          record.executablePath ??= lock.executablePath;
+        } else if (record && !record.creationTime && lock.name === record.name) {
+          // The native snapshot supplies the identity. Do not retain path or
+          // command-line metadata from a CIM record without a start time.
+          record.creationTime = lock.creationTime;
+          record.fileHandleMatch = true;
+          record.protectedProcess = lock.protected;
+          record.appName = lock.appName;
+          record.lockedPath = lock.lockedPath;
+          record.executablePath = lock.executablePath;
+          record.commandLine = undefined;
         } else if (!record) {
-          records.push({ pid: lock.pid, name: `PID ${lock.pid}`, creationTime: lock.creationTime, fileHandleMatch: true, protectedProcess: true });
+          records.push({ pid: lock.pid, name: lock.name ?? `PID ${lock.pid}`, appName: lock.appName,
+            executablePath: lock.executablePath, lockedPath: lock.lockedPath, creationTime: lock.creationTime,
+            fileHandleMatch: true, protectedProcess: lock.protected || !lock.name });
         }
       }
     }

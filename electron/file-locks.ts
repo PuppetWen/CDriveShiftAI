@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { lstat, opendir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { gzipSync } from "node:zlib";
 
 const execFileAsync = promisify(execFile);
 
@@ -9,6 +10,10 @@ export interface FileLockProcess {
   pid: number;
   creationTime: string;
   protected: boolean;
+  name?: string;
+  appName?: string;
+  executablePath?: string;
+  lockedPath?: string;
 }
 
 export interface FileLockScan {
@@ -83,6 +88,10 @@ public static class CShiftFileLocks {
     public int pid;
     public string creationTime;
     public bool isProtected;
+    public string name;
+    public string appName;
+    public string executablePath;
+    public string lockedPath;
   }
   public class DirectoryScan {
     public LockProcess[] processes;
@@ -98,6 +107,7 @@ public static class CShiftFileLocks {
   static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int kind, IntPtr information, uint size);
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder name, uint size, uint flags);
+  [DllImport("kernel32.dll")] static extern uint GetFileType(SafeFileHandle file);
   [DllImport("ntdll.dll")]
   static extern int NtQueryInformationFile(SafeFileHandle file, out IoStatusBlock status, IntPtr information, uint size, int informationClass);
   [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
@@ -108,6 +118,118 @@ public static class CShiftFileLocks {
   static extern int RmGetList(uint session, out uint needed, ref uint count, [In, Out] ProcessInfo[] processes, out uint reasons);
   [DllImport("rstrtmgr.dll")]
   static extern int RmEndSession(uint session);
+  [DllImport("ntdll.dll")]
+  static extern int NtQuerySystemInformation(int kind, IntPtr data, int size, out int needed);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool DuplicateHandle(IntPtr source, IntPtr handle, IntPtr destination, out SafeFileHandle copy, uint access, bool inherit, uint options);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder name, ref int size);
+  [DllImport("kernel32.dll")]
+  static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
+  [DllImport("kernel32.dll")] static extern bool ProcessIdToSessionId(int pid, out uint session);
+  [DllImport("kernel32.dll")] static extern bool IsProcessCritical(IntPtr process, out bool critical);
+  static LockProcess Describe(int pid, string start, string app, string lockedPath, bool protect) {
+    var item = new LockProcess { pid = pid, creationTime = start, appName = app, lockedPath = lockedPath, isProtected = protect };
+    IntPtr process = OpenProcess(0x1000, false, pid); // QUERY_LIMITED_INFORMATION also works across integrity levels.
+    if (process == IntPtr.Zero) { item.isProtected = true; return item; }
+    try {
+      long created, exited, kernel, user;
+      if (!GetProcessTimes(process, out created, out exited, out kernel, out user)) { item.isProtected = true; return item; }
+      string actual = DateTime.FromFileTimeUtc(created).Ticks.ToString();
+      if (!String.IsNullOrEmpty(start) && Int64.Parse(start) / 10 != Int64.Parse(actual) / 10) return null;
+      item.creationTime = actual;
+      var name = new StringBuilder(32768); int size = name.Capacity;
+      if (QueryFullProcessImageName(process, 0, name, ref size)) {
+        item.executablePath = name.ToString(); item.name = Path.GetFileName(item.executablePath);
+        try {
+          var version = FileVersionInfo.GetVersionInfo(item.executablePath);
+          if (!String.IsNullOrWhiteSpace(version.ProductName)) item.appName = version.ProductName;
+          else if (!String.IsNullOrWhiteSpace(version.FileDescription)) item.appName = version.FileDescription;
+        } catch { }
+      }
+      uint session; bool critical;
+      item.isProtected |= pid <= 4 || !ProcessIdToSessionId(pid, out session) || session == 0 || !IsProcessCritical(process, out critical) || critical;
+      return item;
+    } finally { CloseHandle(process); }
+  }
+  public static DirectoryScan QueryHandles(string target) {
+    var result = new DirectoryScan();
+    var matches = new Dictionary<int, LockProcess>();
+    IntPtr buffer = IntPtr.Zero;
+    var sources = new Dictionary<int, IntPtr>();
+    try {
+      // Learn the File object type from our own probe instead of relying on an
+      // undocumented type number. Scan open objects, not a capped directory tree.
+      using (var probe = CreateFile(LongPath(target), 0, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
+        if (probe.IsInvalid) { result.queryFailed = true; return result; }
+        DateTime snapshotTime = DateTime.UtcNow;
+        int size = 1024 * 1024, needed, status;
+        while (true) {
+          buffer = Marshal.AllocHGlobal(size);
+          status = NtQuerySystemInformation(64, buffer, size, out needed);
+          if (status == 0) break;
+          Marshal.FreeHGlobal(buffer); buffer = IntPtr.Zero;
+          if (unchecked((uint)status) != 0xC0000004 || size >= 128 * 1024 * 1024) { result.queryFailed = true; return result; }
+          size = Math.Min(128 * 1024 * 1024, Math.Max(size * 2, needed));
+        }
+        int stride = IntPtr.Size * 3 + 16, header = IntPtr.Size * 2;
+        long count = Marshal.ReadIntPtr(buffer).ToInt64();
+        if (count < 0 || count > (size - header) / stride) { result.queryFailed = true; return result; }
+        int self; using (var current = Process.GetCurrentProcess()) self = current.Id;
+        int fileType = -1;
+        for (int i = 0; i < count; i++) {
+          IntPtr entry = IntPtr.Add(buffer, header + i * stride);
+          if (Marshal.ReadIntPtr(entry, IntPtr.Size).ToInt64() == self && Marshal.ReadIntPtr(entry, 2 * IntPtr.Size) == probe.DangerousGetHandle()) {
+            fileType = (ushort)Marshal.ReadInt16(entry, 3 * IntPtr.Size + 6); break;
+          }
+        }
+        if (fileType < 0) { result.queryFailed = true; return result; }
+        var timer = Stopwatch.StartNew();
+        string root = LongPath(target).TrimEnd('\\');
+        var name = new StringBuilder(32768);
+        for (int i = 0; i < count; i++) {
+          if (timer.ElapsedMilliseconds > 8000) { result.incomplete = true; break; }
+          IntPtr entry = IntPtr.Add(buffer, header + i * stride);
+          if ((ushort)Marshal.ReadInt16(entry, 3 * IntPtr.Size + 6) != fileType) continue;
+          long rawPid = Marshal.ReadIntPtr(entry, IntPtr.Size).ToInt64();
+          if (rawPid <= 4 || rawPid > Int32.MaxValue || rawPid == self) continue;
+          int pid = (int)rawPid;
+          if (matches.ContainsKey(pid)) continue;
+          IntPtr source;
+          if (!sources.TryGetValue(pid, out source)) { source = OpenProcess(0x40, false, pid); sources[pid] = source; }
+          // Restart Manager and per-directory queries cover processes for which
+          // DUP_HANDLE is denied; never turn an inaccessible handle into a match.
+          if (source == IntPtr.Zero) { result.identityUnavailable = true; continue; }
+          SafeFileHandle copy;
+          if (!DuplicateHandle(source, Marshal.ReadIntPtr(entry, 2 * IntPtr.Size), GetCurrentProcess(), out copy, 0, false, 2)) continue;
+          using (copy) {
+            // Named pipes are also File objects; querying their names can block
+            // behind synchronous pipe I/O. Only filesystem handles are relevant.
+            if (GetFileType(copy) != 1) continue;
+            // OPENED avoids resolving every component (including SMB paths).
+            uint length = GetFinalPathNameByHandle(copy, name, (uint)name.Capacity, 8);
+            if (length == 0 || length >= name.Capacity) continue;
+            string candidate = name.ToString();
+            if (!String.Equals(candidate.TrimEnd('\\'), root, StringComparison.OrdinalIgnoreCase) && !candidate.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase)) continue;
+            var item = Describe(pid, null, null, candidate, false);
+            if (item == null) continue;
+            if (String.IsNullOrEmpty(item.creationTime) || new DateTime(Int64.Parse(item.creationTime), DateTimeKind.Utc) > snapshotTime) { result.identityUnavailable = true; continue; }
+            matches[pid] = item;
+          }
+        }
+      }
+    } catch { result.queryFailed = true; }
+    finally {
+      if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+      foreach (IntPtr source in sources.Values) if (source != IntPtr.Zero) CloseHandle(source);
+      result.processes = new List<LockProcess>(matches.Values).ToArray();
+    }
+    return result;
+  }
   public static LockProcess[] Query(string[] names) {
     uint session;
     int result = RmStartSession(out session, 0, new StringBuilder(33));
@@ -124,11 +246,9 @@ public static class CShiftFileLocks {
           for (int i = 0; i < count; i++) {
             var item = values[i];
             long start = ((long)item.Process.StartTime.dwHighDateTime << 32) | (uint)item.Process.StartTime.dwLowDateTime;
-            output.Add(new LockProcess {
-              pid = item.Process.ProcessId,
-              creationTime = DateTime.FromFileTimeUtc(start).Ticks.ToString(),
-              isProtected = item.ApplicationType == 3 || item.ApplicationType == 4 || item.ApplicationType == 1000
-            });
+            var described = Describe(item.Process.ProcessId, DateTime.FromFileTimeUtc(start).Ticks.ToString(), item.AppName, null,
+              item.ApplicationType == 3 || item.ApplicationType == 4 || item.ApplicationType == 1000);
+            if (described != null) output.Add(described);
           }
           return output.ToArray();
         }
@@ -196,10 +316,8 @@ public static class CShiftFileLocks {
                   using (var process = Process.GetProcessById(pid)) {
                     DateTime started = process.StartTime.ToUniversalTime();
                     if (started > queryStarted || process.HasExited) { result.incomplete = true; continue; }
-                    matches[pid] = new LockProcess {
-                      pid = pid, creationTime = started.Ticks.ToString(),
-                      isProtected = pid <= 4 || process.SessionId == 0
-                    };
+                    var described = Describe(pid, started.Ticks.ToString(), null, directory, pid <= 4 || process.SessionId == 0);
+                    if (described != null) matches[pid] = described;
                   }
                 } catch (ArgumentException) { result.incomplete = true; }
                   catch (InvalidOperationException) { result.incomplete = true; }
@@ -220,55 +338,81 @@ $files = [string[]]@($resources.files)
 $directories = [string[]]@($resources.directories)
 $fileProcesses = @()
 $fileQueryFailed = $false
-if ($files.Length -gt 0) {
-  try { $fileProcesses = @([CShiftFileLocks]::Query($files)) }
+# One inaccessible resource must not discard every other file's lock holders.
+for ($offset = 0; $offset -lt $files.Length; $offset += 128) {
+  try { $fileProcesses += @([CShiftFileLocks]::Query([string[]]$files[$offset..([Math]::Min($offset + 127, $files.Length - 1))])) }
   catch { $fileQueryFailed = $true }
+  ConvertTo-Json -Depth 5 -Compress -InputObject @{ processes = @($fileProcesses); fileQueryFailed = $fileQueryFailed; handleScanIncomplete = $true }
 }
 $directoryScan = [CShiftFileLocks]::QueryDirectories($directories)
+ConvertTo-Json -Depth 5 -Compress -InputObject @{ processes = @($fileProcesses) + @($directoryScan.processes); fileQueryFailed = $fileQueryFailed; directoryQueryFailed = $directoryScan.queryFailed; directoryScanIncomplete = $directoryScan.incomplete; directoryIdentityUnavailable = $directoryScan.identityUnavailable; handleScanIncomplete = $true }
+$handleScan = [CShiftFileLocks]::QueryHandles([string]$resources.target)
 ConvertTo-Json -Depth 5 -Compress -InputObject @{
-  processes = @($fileProcesses) + @($directoryScan.processes)
+  processes = @($fileProcesses) + @($directoryScan.processes) + @($handleScan.processes)
   fileQueryFailed = $fileQueryFailed
   directoryQueryFailed = $directoryScan.queryFailed
   directoryScanIncomplete = $directoryScan.incomplete
   directoryIdentityUnavailable = $directoryScan.identityUnavailable
+  handleQueryFailed = $handleScan.queryFailed
+  handleScanIncomplete = $handleScan.incomplete
 }
 `;
 
 export async function listFileLockProcesses(target: string): Promise<FileLockScan> {
   if (process.platform !== "win32") return { processes: [], warnings: [] };
   if ((await lstat(target)).isSymbolicLink()) return { processes: [], warnings: [] };
-  const { files, directories, incomplete } = await collectLockScanFiles(await realpath(target));
-  const warnings = incomplete ? ["文件占用扫描达到 5000 项上限或存在不可读目录，列表可能不完整。"] : [];
+  const canonicalTarget = await realpath(target);
+  const { files, directories, incomplete } = await collectLockScanFiles(canonicalTarget);
+  const warnings = incomplete ? ["目录遍历达到 5000 项上限或存在不可读目录，已补充系统句柄扫描；受权限限制的占用仍可能未列出。"] : [];
   if (!files.length && !directories.length) return { processes: [], warnings };
   const executable = path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const compressedScript = gzipSync(Buffer.from(RESTART_MANAGER_SCRIPT, "utf8")).toString("base64");
+  const launcher = `$s=[IO.MemoryStream]::new([Convert]::FromBase64String('${compressedScript}')); $g=[IO.Compression.GZipStream]::new($s,[IO.Compression.CompressionMode]::Decompress); $r=[IO.StreamReader]::new($g); try { $code=$r.ReadToEnd() } finally { $r.Dispose(); $g.Dispose(); $s.Dispose() }; & ([ScriptBlock]::Create($code))`;
   const request = execFileAsync(executable, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-    Buffer.from(RESTART_MANAGER_SCRIPT, "utf16le").toString("base64")
-  ], { windowsHide: true, timeout: 15_000, maxBuffer: 2 * 1024 * 1024 });
+    Buffer.from(launcher, "utf16le").toString("base64")
+  ], { cwd: path.dirname(executable), windowsHide: true, timeout: 40_000, maxBuffer: 2 * 1024 * 1024 });
   // Send file names as data, avoiding command-length limits and shell quoting.
   request.child.stdin?.on("error", () => undefined);
-  request.child.stdin?.end(JSON.stringify({ files, directories }), "utf8");
-  const { stdout } = await request;
-  const raw: unknown = JSON.parse(stdout.replace(/^\uFEFF/, "").trim());
+  request.child.stdin?.end(JSON.stringify({ target: canonicalTarget, files, directories }), "utf8");
+  let stdout: string;
+  try { ({ stdout } = await request); }
+  catch (error) {
+    // Preserve completed discovery stages if a filesystem driver hangs a later
+    // query. Do not leak the encoded script into logs or user-visible errors.
+    stdout = String((error as { stdout?: string }).stdout ?? "");
+    if (!stdout.trim()) throw new Error("Windows 占用查询未完成，请重新检查");
+    warnings.push("占用查询超时，已保留完成的检测结果；列表可能不完整。");
+  }
+  const snapshots = stdout.replace(/^\uFEFF/, "").trim().split(/\r?\n/);
+  let raw: unknown;
+  for (const snapshot of snapshots) {
+    try { raw = JSON.parse(snapshot); } catch { /* Ignore an interrupted final line. */ }
+  }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("文件占用查询返回了无效结果");
   const scan = raw as Record<string, unknown>;
   if (scan.fileQueryFailed) warnings.push("Windows 文件句柄查询失败；部分文件占用进程可能未列出。");
   if (scan.directoryQueryFailed) warnings.push("Windows 目录句柄查询不受支持或被访问权限拒绝；请将终端切换到其他目录后重新预检。");
   if (scan.directoryScanIncomplete) warnings.push("目录占用扫描超时、目标变化或进程退出，列表可能不完整；请重新预检。");
   if (scan.directoryIdentityUnavailable) warnings.push("部分目录占用进程的身份不可读；请关闭相关终端或程序后重新预检。");
+  if (scan.handleQueryFailed || scan.handleScanIncomplete) warnings.push("系统句柄扫描未完成，部分深层文件占用可能未列出；请重新检查。");
   const records = Array.isArray(scan.processes) ? scan.processes : [];
   const parsed = records.flatMap((item: unknown): FileLockProcess[] => {
     if (!item || typeof item !== "object") return [];
     const record = item as Record<string, unknown>;
     const pid = Number(record.pid);
     if (!Number.isInteger(pid) || pid <= 0 || typeof record.creationTime !== "string" || !/^\d+$/.test(record.creationTime)) return [];
-    return [{ pid, creationTime: record.creationTime, protected: Boolean(record.isProtected) }];
+    const optional = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+    return [{ pid, creationTime: record.creationTime, protected: Boolean(record.isProtected),
+      name: optional(record.name), appName: optional(record.appName), executablePath: optional(record.executablePath), lockedPath: optional(record.lockedPath) }];
   });
   const unique = new Map<string, FileLockProcess>();
   for (const item of parsed) {
     const key = `${item.pid}:${BigInt(item.creationTime) / 10n}`;
     const previous = unique.get(key);
-    unique.set(key, { ...item, protected: Boolean(previous?.protected || item.protected) });
+    unique.set(key, { ...item, name: item.name ?? previous?.name, appName: item.appName ?? previous?.appName,
+      executablePath: item.executablePath ?? previous?.executablePath, lockedPath: item.lockedPath ?? previous?.lockedPath,
+      protected: Boolean(previous?.protected || item.protected) });
   }
   const processes = [...unique.values()];
   return { processes, warnings };

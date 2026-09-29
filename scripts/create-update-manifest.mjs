@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import packageJson from "../package.json" with { type: "json" };
 
 const workspace = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const output = path.join(workspace, "release-ready");
+const output = path.resolve(workspace, process.argv[2] || "release-ready");
 
 async function sha512(candidate) {
   return new Promise((resolve, reject) => {

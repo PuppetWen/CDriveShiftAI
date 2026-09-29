@@ -8,8 +8,8 @@ import { createServer } from "vite";
 // This smoke test imports the real component and styles but replaces every API
 // before importing api.ts. No real files, processes or system settings are changed.
 const workspace = path.resolve(import.meta.dirname, "..");
-const tempRoot = path.join(workspace, ".test-tmp");
-const outputDirectory = path.join(workspace, "review-artifacts", "delete-guidance");
+const tempRoot = path.resolve(process.env.DELETE_GUIDANCE_TEMP_DIR || path.join(workspace, ".test-tmp"));
+const outputDirectory = path.resolve(process.env.DELETE_GUIDANCE_OUTPUT_DIR || path.join(workspace, "review-artifacts", "delete-guidance"));
 const chromePath = [
   process.env.DELETE_GUIDANCE_CHROME,
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -50,7 +50,7 @@ window.cDriveShiftAI = {
     return {
       verificationId: "smoke-" + ++state.sequence, path: targetPath, name: "SampleApp cache", isDirectory: true,
       isSymbolicLink: false, highRisk: state.scenario === "eperm", elevated: state.scenario === "eperm",
-      processes: [{ pid: 4242, name: "SampleApp.exe", executablePath: "E:\\\\SampleApp\\\\SampleApp.exe", canTerminate: true },
+      processes: [{ pid: 4242, name: "SampleApp.exe", appName: "Sample Application", lockedPath: targetPath, matchReason: "file-handle", executablePath: "E:\\\\SampleApp\\\\SampleApp.exe", canTerminate: true },
         { pid: 5151, name: "SampleProtectedService.exe", executablePath: "E:\\\\SampleApp\\\\service.exe", canTerminate: false }]
     };
   },
@@ -294,6 +294,11 @@ try {
         && style.pointerEvents === "auto" && bounds.width >= 20 && bounds.height >= 20
         && document.querySelector("footer button.danger").disabled
         && document.querySelector("#force-delete-status").innerText.includes("请先勾选");
+    })()`);
+    await check(`${theme}: app, process, PID and locked path are visible`, `(() => {
+      const row = document.querySelector(".force-delete-process-list article");
+      return row.innerText.includes("Sample Application") && row.innerText.includes("SampleApp.exe")
+        && row.innerText.includes("4242") && row.innerText.includes("占用路径");
     })()`);
     const uncheckedBackground = await evaluate('getComputedStyle(document.querySelector(".force-delete-confirmation")).backgroundColor');
     await capture(`${theme}-consent-unchecked`);
