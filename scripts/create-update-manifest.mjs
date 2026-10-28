@@ -4,9 +4,11 @@ import { stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import packageJson from "../package.json" with { type: "json" };
+import { validateProjectVersion } from "./version-policy.mjs";
 
 const workspace = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(workspace, process.argv[2] || "release-ready");
+await validateProjectVersion(workspace);
 
 async function sha512(candidate) {
   return new Promise((resolve, reject) => {
