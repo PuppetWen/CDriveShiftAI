@@ -28,6 +28,46 @@ class Window extends EventEmitter {
 }
 
 describe("updated main-window acknowledgement", () => {
+  it("rechecks after did-stop-loading when did-finish-load still reports loading", async () => {
+    const window = new Window();
+    let acknowledged = false;
+    const pending = waitForVisibleUpdateWindow(window).then(() => { acknowledged = true; });
+    window.show();
+    window.webContents.url = "file:///E:/app/dist/index.html";
+    window.webContents.loading = true;
+    window.webContents.emit("did-finish-load");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(acknowledged).toBe(false);
+    window.webContents.loading = false;
+    window.webContents.emit("did-stop-loading");
+    await pending;
+    expect(acknowledged).toBe(true);
+    expect(window.webContents.eventNames()).toEqual([]);
+  });
+
+  it("rechecks visibility after the show event returns", async () => {
+    const window = new Window();
+    const pending = waitForVisibleUpdateWindow(window);
+    window.webContents.finish();
+    window.emit("show");
+    window.visible = true;
+    await pending;
+    expect(isVisibleUpdateWindow(window)).toBe(true);
+  });
+
+  it("does not acknowledge stopped loading without a completed application page", async () => {
+    const window = new Window();
+    let acknowledged = false;
+    const pending = waitForVisibleUpdateWindow(window).then(() => { acknowledged = true; });
+    window.show();
+    window.webContents.url = "file:///E:/app/dist/index.html";
+    window.webContents.emit("did-stop-loading");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(acknowledged).toBe(false);
+    window.webContents.finish();
+    await pending;
+  });
+
   it("does not confuse initial not-loading/blank state with a loaded application", async () => {
     const window = new Window();
     let acknowledged = false;

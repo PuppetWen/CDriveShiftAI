@@ -30,16 +30,19 @@ export function waitForVisibleUpdateWindow(
   return new Promise((resolve, reject) => {
     let loaded = false;
     let settled = false;
+    let recheck: NodeJS.Immediate | undefined;
     const contents = window.webContents;
     const cleanup = () => {
       clearTimeout(timer);
+      if (recheck) clearImmediate(recheck);
       contents.removeListener("did-start-loading", started);
       contents.removeListener("did-finish-load", finished);
+      contents.removeListener("did-stop-loading", checkAfterTransition);
       contents.removeListener("did-fail-load", failed);
       contents.removeListener("render-process-gone", rendererGone);
       contents.removeListener("destroyed", rendererGone);
-      window.removeListener("show", check);
-      window.removeListener("restore", check);
+      window.removeListener("show", checkAfterTransition);
+      window.removeListener("restore", checkAfterTransition);
       window.removeListener("close", closed);
       window.removeListener("closed", closed);
       window.removeListener("hide", hidden);
@@ -54,10 +57,23 @@ export function waitForVisibleUpdateWindow(
     const check = () => {
       if (loaded && isVisibleUpdateWindow(window)) settle();
     };
+    const checkAfterTransition = () => {
+      check();
+      // Electron can emit did-finish-load before clearing isLoadingMainFrame,
+      // and show/restore before updating native window visibility. Recheck
+      // once after the event returns; this is event driven, not polling.
+      if (!settled && !recheck) {
+        recheck = setImmediate(() => {
+          recheck = undefined;
+          check();
+        });
+        recheck.unref();
+      }
+    };
     const started = () => { loaded = false; };
     const finished = () => {
       loaded = contents.getURL() !== "" && contents.getURL() !== "about:blank";
-      check();
+      checkAfterTransition();
     };
     const failed = (_event: unknown, code: number, description: string, _url: string, mainFrame: boolean) => {
       if (mainFrame !== false) settle(new Error(`Updated window failed to load (${code}): ${description}`));
@@ -69,11 +85,12 @@ export function waitForVisibleUpdateWindow(
     timer.unref();
     contents.on("did-start-loading", started);
     contents.on("did-finish-load", finished);
+    contents.on("did-stop-loading", checkAfterTransition);
     contents.on("did-fail-load", failed);
     contents.on("render-process-gone", rendererGone);
     contents.on("destroyed", rendererGone);
-    window.on("show", check);
-    window.on("restore", check);
+    window.on("show", checkAfterTransition);
+    window.on("restore", checkAfterTransition);
     window.on("close", closed);
     window.on("closed", closed);
     window.on("hide", hidden);

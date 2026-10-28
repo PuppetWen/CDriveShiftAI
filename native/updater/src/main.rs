@@ -5,12 +5,22 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const DATA_DIRECTORY: &str = ".cdriveshiftai-data";
 const START_TIMEOUT: Duration = Duration::from_secs(90);
+const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[cfg(windows)]
+mod process_tree;
+#[cfg(windows)]
+use process_tree::ApplicationProcess;
+#[cfg(not(windows))]
+type ApplicationProcess = std::process::Child;
+#[cfg(all(test, windows))]
+mod process_tree_tests;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -372,17 +382,21 @@ fn application_command_with_data(plan: &UpdatePlan, configured_data: Option<&OsS
     Ok(command)
 }
 
-fn launch_updated(plan: &UpdatePlan) -> io::Result<Child> {
-    application_command(plan)?
+fn launch_updated(plan: &UpdatePlan) -> io::Result<ApplicationProcess> {
+    let mut command = application_command(plan)?;
+    command
         .arg("--updated")
         .arg("--update-staging")
         .arg(&plan.staging_dir)
         .arg("--update-version")
-        .arg(&plan.expected_version)
-        .spawn()
+        .arg(&plan.expected_version);
+    #[cfg(windows)]
+    { ApplicationProcess::spawn(&mut command, &plan.target_path) }
+    #[cfg(not(windows))]
+    { command.spawn() }
 }
 
-fn wait_for_success(child: &mut Child, marker: &Path) -> bool {
+fn wait_for_success(child: &mut ApplicationProcess, marker: &Path) -> bool {
     let started = Instant::now();
     while started.elapsed() < START_TIMEOUT {
         if marker.exists() {
@@ -398,6 +412,34 @@ fn wait_for_success(child: &mut Child, marker: &Path) -> bool {
     false
 }
 
+fn stop_updated_application(child: &mut ApplicationProcess, logger: &Logger) -> Result<(), String> {
+    logger.line("stopping the application process tree started by this update");
+    #[cfg(windows)]
+    child.terminate_and_wait(ROLLBACK_TIMEOUT).map_err(|error| error.to_string())?;
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+        child.wait().map_err(|error| error.to_string())?;
+    }
+    logger.line("updated application process tree exited; restoring files");
+    Ok(())
+}
+
+fn retry_rollback_files(mut operation: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) if matches!(error.raw_os_error(), Some(5 | 32 | 33)) && started.elapsed() < ROLLBACK_TIMEOUT => {
+                // Process termination and antivirus hooks can release image
+                // mappings shortly after the process has signalled its exit.
+                thread::sleep(Duration::from_millis(250));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn launch_restored(plan: &UpdatePlan, reason: &str) {
     if let Ok(mut command) = application_command(plan) {
         let _ = command.arg("--update-failed").arg(reason).spawn();
@@ -410,9 +452,9 @@ fn restore_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
         .as_ref()
         .ok_or_else(|| "missing installed directory".to_string())?;
     logger.line("restoring installed application backup");
-    clear_application_directory(installed).map_err(|error| error.to_string())?;
+    retry_rollback_files(|| clear_application_directory(installed)).map_err(|error| error.to_string())?;
     ensure_preserved_data_restored(plan, installed)?;
-    copy_tree(&plan.backup_path, installed, false).map_err(|error| error.to_string())
+    retry_rollback_files(|| copy_tree(&plan.backup_path, installed, false)).map_err(|error| error.to_string())
 }
 
 fn update_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
@@ -440,14 +482,19 @@ fn update_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
     }
     ensure_preserved_data_restored(plan, installed)?;
 
-    let mut child = launch_updated(plan).map_err(|error| error.to_string())?;
+    let mut child = match launch_updated(plan) {
+        Ok(child) => child,
+        Err(error) => {
+            restore_installed(plan, logger)?;
+            return Err(format!("new installed executable could not start: {error}"));
+        }
+    };
     if wait_for_success(&mut child, &plan.success_marker) {
         logger.line("new installed version reported a successful start");
         return Ok(());
     }
     logger.line("new installed version did not report success; rolling back");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_updated_application(&mut child, logger)?;
     restore_installed(plan, logger)?;
     Err("new installed version failed its startup acknowledgement".to_string())
 }
@@ -482,10 +529,9 @@ fn update_portable(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
         return Ok(());
     }
     logger.line("new portable version did not report success; rolling back");
-    let _ = child.kill();
-    let _ = child.wait();
-    remove_entry(&plan.target_path).map_err(|error| error.to_string())?;
-    fs::rename(&plan.backup_path, &plan.target_path).map_err(|error| error.to_string())?;
+    stop_updated_application(&mut child, logger)?;
+    retry_rollback_files(|| remove_entry(&plan.target_path)).map_err(|error| error.to_string())?;
+    retry_rollback_files(|| fs::rename(&plan.backup_path, &plan.target_path)).map_err(|error| error.to_string())?;
     Err("new portable version failed its startup acknowledgement".to_string())
 }
 
@@ -564,7 +610,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn fixture(name: &str) -> PathBuf {
+    pub(super) fn fixture(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -575,7 +621,7 @@ mod tests {
         ))
     }
 
-    fn installed_plan(root: &Path) -> UpdatePlan {
+    pub(super) fn installed_plan(root: &Path) -> UpdatePlan {
         let installed = root.join("CDriveShiftAI");
         let staging = root.join(".cdriveshiftai-update").join("0.2.1");
         UpdatePlan {
