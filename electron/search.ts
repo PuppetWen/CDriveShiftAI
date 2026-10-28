@@ -1,6 +1,7 @@
 import { app } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
+import type { Stats } from "node:fs";
 import { createInterface } from "node:readline";
 import { access, lstat, readdir, stat } from "node:fs/promises";
 import { uptime } from "node:os";
@@ -27,6 +28,7 @@ import {
   INDEX_REFRESH_INTERVAL_MS
 } from "./index-refresh-policy";
 import { logger, serializeError } from "./logger";
+import { LatestSearchScheduler, SEARCH_SUPERSEDED } from "./search-scheduler";
 
 interface PendingRequest {
   resolve: (response: NativeResponse) => void;
@@ -112,6 +114,11 @@ export class SearchService {
   private stopPromise?: Promise<void>;
   private lastFullRefreshRequestedAt = 0;
   private backgroundMode = false;
+  private readonly queryScheduler = new LatestSearchScheduler();
+  private readonly metadataCache = new Map<string, { expiresAt: number; stats: Stats }>();
+  private readonly metadataPending = new Map<string, Promise<Stats>>();
+  private metadataEpoch = 0;
+  private readonly directorySizeCache = new Map<string, { expiresAt: number; result: DirectorySizeResult }>();
   private mouseShortcutStatus: MouseShortcutStatus;
   private magnifierStatus: MagnifierStatus;
 
@@ -273,6 +280,7 @@ export class SearchService {
   async stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
+    this.queryScheduler.cancelAll();
     logger.info("indexer.stop_started", {
       hasChild: this.child != null,
       pendingRequests: this.pending.size
@@ -408,6 +416,7 @@ export class SearchService {
   setBackgroundMode(background: boolean, force = false): void {
     if (!force && this.backgroundMode === background) return;
     this.backgroundMode = background;
+    if (background) this.queryScheduler.cancelAll();
     if (!this.child) return;
     void this.request(
       { op: "setBackground", background, processId: process.pid },
@@ -416,6 +425,30 @@ export class SearchService {
       // The process may be between a crash and its automatic restart. start()
       // includes the current mode in init, so no retry loop is needed here.
     });
+  }
+
+  cancelWindowSearch(ownerId: number): void {
+    this.queryScheduler.cancel(`query:${ownerId}`);
+    this.queryScheduler.cancel(`sizes:${ownerId}`);
+    this.queryScheduler.cancel(`properties:${ownerId}`);
+  }
+
+  private async cachedMetadata(target: string): Promise<Stats> {
+    const key = target.toLocaleLowerCase();
+    const cached = this.metadataCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.stats;
+    const pending = this.metadataPending.get(key);
+    if (pending) return pending;
+    const epoch = this.metadataEpoch;
+    const request = lstat(target).then((stats) => {
+      if (epoch === this.metadataEpoch) {
+        if (this.metadataCache.size >= 4_096) this.metadataCache.delete(this.metadataCache.keys().next().value!);
+        this.metadataCache.set(key, { stats, expiresAt: Date.now() + 5_000 });
+      }
+      return stats;
+    }).finally(() => { if (this.metadataPending.get(key) === request) this.metadataPending.delete(key); });
+    this.metadataPending.set(key, request);
+    return request;
   }
 
   async rebuild(): Promise<void> {
@@ -460,7 +493,7 @@ export class SearchService {
   async searchContent(
     query: string,
     scope: string,
-    options: { regex?: boolean; caseSensitive?: boolean } = {}
+    options: ContentSearchOptions = {}
   ): Promise<ContentSearchResult[]> {
     return (await this.searchContentPage(query, scope, options)).items;
   }
@@ -468,7 +501,19 @@ export class SearchService {
   async searchContentPage(
     query: string,
     scope: string,
-    options: ContentSearchOptions & SearchPageOptions = {}
+    options: ContentSearchOptions & SearchPageOptions = {},
+    ownerId: number | string = "default"
+  ): Promise<SearchPage<ContentSearchResult>> {
+    if (this.backgroundMode || this.stopping) return { items: [], hasMore: false, generation: 0 };
+    this.queryScheduler.cancel(`sizes:${ownerId}`);
+    return this.queryScheduler.run(`query:${ownerId}`, (isCurrent) => this.runContentSearchPage(query, scope, options, isCurrent));
+  }
+
+  private async runContentSearchPage(
+    query: string,
+    scope: string,
+    options: ContentSearchOptions & SearchPageOptions,
+    isCurrent: () => boolean
   ): Promise<SearchPage<ContentSearchResult>> {
     const limit = Math.min(2_000, Math.max(1, Math.trunc(options.limit ?? 80)));
     if (!this.child) throw new Error("原生索引核心不可用");
@@ -476,6 +521,8 @@ export class SearchService {
       {
         op: "contentQuery",
         query: query.trim(),
+        keywords: options.keywords,
+        keywordMatch: "any",
         scope,
         regex: options.regex === true,
         caseSensitive: options.caseSensitive === true,
@@ -494,21 +541,24 @@ export class SearchService {
       },
       options.regex ? 30_000 : 15_000
     );
-    const nativeResults = (response.results ?? []) as ContentSearchResult[];
-    const results = await Promise.all(
-      nativeResults.map(async (result) => {
-        try {
-          const stats = await lstat(result.path);
-          return {
-            ...result,
-            size: stats.isFile() ? stats.size : 0,
-            modifiedAt: stats.mtime.toISOString()
-          };
-        } catch {
-          return result;
+    if (!isCurrent()) throw new Error(SEARCH_SUPERSEDED);
+    const nativeResults = (response.results ?? []) as Array<ContentSearchResult & { modifiedAtMs?: number }>;
+    const results: ContentSearchResult[] = [];
+    for (let offset = 0; offset < nativeResults.length; offset += 32) {
+      if (!isCurrent()) throw new Error(SEARCH_SUPERSEDED);
+      const batch = await Promise.all(nativeResults.slice(offset, offset + 32).map(async (result) => {
+        // Content search already reads size and timestamp from its indexed row.
+        // Avoid a second disk read for every hit on every keystroke.
+        if (Number.isFinite(result.modifiedAtMs) && result.modifiedAtMs! > 0) {
+          return { ...result, modifiedAt: new Date(result.modifiedAtMs!).toISOString() };
         }
-      })
-    );
+        try {
+          const stats = await this.cachedMetadata(result.path);
+          return { ...result, size: stats.isFile() ? stats.size : 0, modifiedAt: stats.mtime.toISOString() };
+        } catch { return result; }
+      }));
+      results.push(...batch);
+    }
     return {
       items: results,
       hasMore: response.hasMore === true,
@@ -526,7 +576,19 @@ export class SearchService {
   async searchPage(
     query: string,
     filters: SearchFilters,
-    options: SearchPageOptions = {}
+    options: SearchPageOptions = {},
+    ownerId: number | string = "default"
+  ): Promise<SearchPage<SearchResult>> {
+    if (this.backgroundMode || this.stopping) return { items: [], hasMore: false, generation: 0 };
+    this.queryScheduler.cancel(`sizes:${ownerId}`);
+    return this.queryScheduler.run(`query:${ownerId}`, (isCurrent) => this.runSearchPage(query, filters, options, isCurrent));
+  }
+
+  private async runSearchPage(
+    query: string,
+    filters: SearchFilters,
+    options: SearchPageOptions,
+    isCurrent: () => boolean
   ): Promise<SearchPage<SearchResult>> {
     const trimmed = query.trim();
     if (!trimmed) {
@@ -546,6 +608,8 @@ export class SearchService {
         {
           op: "query",
           query: trimmed,
+          keywords: filters.keywords,
+          keywordMatch: "any",
           kind: filters.kind,
           scope: filters.scope || "*",
           scopes: filters.scopes?.length ? filters.scopes : [filters.scope || "*"],
@@ -587,17 +651,18 @@ export class SearchService {
       generation = response.generation ?? 0;
       cursorReset = response.cursorReset === true;
     } else {
-      results = await this.liveSearch(trimmed, filters.scope || "*", filters);
+      results = await this.liveSearch(trimmed, filters.scope || "*", filters, isCurrent);
     }
 
     const enriched: SearchResult[] = [];
     const statConcurrency = 48;
     for (let offset = 0; offset < results.length; offset += statConcurrency) {
+      if (!isCurrent()) throw new Error(SEARCH_SUPERSEDED);
       const batch = results.slice(offset, offset + statConcurrency);
       const resolved = await Promise.all(
         batch.map(async (result): Promise<SearchResult | undefined> => {
           try {
-            const stats = await lstat(result.path);
+            const stats = await this.cachedMetadata(result.path);
             return {
               ...result,
               size: stats.isFile() ? stats.size : result.size,
@@ -688,14 +753,29 @@ export class SearchService {
     };
   }
 
-  async directorySizes(inputPaths: string[]): Promise<DirectorySizeResult[]> {
+  async directorySizes(inputPaths: string[], ownerId: number | string = "default", purpose: "search" | "properties" = "search"): Promise<DirectorySizeResult[]> {
+    if (this.backgroundMode || this.stopping) {
+      if (purpose === "properties") throw new Error("窗口已隐藏或程序正在退出，目录统计已暂停；请重新打开属性");
+      return [];
+    }
+    const key = purpose === "properties" ? `properties:${ownerId}` : `sizes:${ownerId}`;
+    return this.queryScheduler.run(key, (isCurrent) => this.runDirectorySizes(inputPaths, isCurrent, purpose));
+  }
+
+  private async runDirectorySizes(inputPaths: string[], isCurrent: () => boolean, purpose: "search" | "properties"): Promise<DirectorySizeResult[]> {
+    const ready: DirectorySizeResult[] = [];
     const normalizedTargets = new Map<
       string,
       { path: string; bytes: number; files: number; directories: number; complete: boolean }
     >();
-    for (const candidate of inputPaths.slice(0, 180)) {
+    for (const candidate of inputPaths.slice(0, 24)) {
       const value = path.resolve(candidate);
       const key = value.toLocaleLowerCase();
+      const cached = this.directorySizeCache.get(key);
+      if (cached && cached.expiresAt > Date.now() && (purpose !== "properties" || cached.result.complete)) {
+        if (!ready.some((result) => result.path.toLocaleLowerCase() === key)) ready.push({ ...cached.result });
+        continue;
+      }
       if (!normalizedTargets.has(key)) {
         normalizedTargets.set(key, {
           path: value,
@@ -706,7 +786,7 @@ export class SearchService {
         });
       }
     }
-    if (normalizedTargets.size === 0) return [];
+    if (normalizedTargets.size === 0) return ready;
 
     const roots: string[] = [];
     for (const target of [...normalizedTargets.values()].sort(
@@ -743,21 +823,24 @@ export class SearchService {
       }
     };
 
-    const deadline = Date.now() + 25_000;
-    const maximumEntries = 1_000_000;
+    const deadline = Date.now() + (purpose === "properties" ? 25_000 : 2_000);
+    const maximumEntries = purpose === "properties" ? 1_000_000 : 25_000;
     let visited = 0;
     const scanRoot = async (root: string) => {
       const queue = [root];
+      let queueOffset = 0;
       let complete = true;
-      while (queue.length > 0) {
+      while (queueOffset < queue.length) {
+        if (!isCurrent() || this.backgroundMode || this.stopping) throw new Error(SEARCH_SUPERSEDED);
         if (Date.now() > deadline || visited >= maximumEntries) {
           complete = false;
           break;
         }
-        const current = queue.shift()!;
+        const current = queue[queueOffset++];
         try {
           const entries = await readdir(current, { withFileTypes: true });
           for (const entry of entries) {
+            if (!isCurrent() || this.backgroundMode || this.stopping) throw new Error(SEARCH_SUPERSEDED);
             visited += 1;
             if (entry.isSymbolicLink()) continue;
             const entryPath = path.join(current, entry.name);
@@ -778,7 +861,8 @@ export class SearchService {
               break;
             }
           }
-        } catch {
+        } catch (error) {
+          if (error instanceof Error && error.message === SEARCH_SUPERSEDED) throw error;
           complete = false;
         }
       }
@@ -795,27 +879,37 @@ export class SearchService {
     for (let offset = 0; offset < roots.length; offset += 2) {
       await Promise.all(roots.slice(offset, offset + 2).map(scanRoot));
     }
-    return [...normalizedTargets.values()];
+    const results = [...normalizedTargets.values()];
+    for (const result of results) {
+      // Incomplete counts are estimates and must be retried soon, never kept as
+      // an authoritative zero after a large directory exceeds the idle budget.
+      if (this.directorySizeCache.size >= 256) this.directorySizeCache.delete(this.directorySizeCache.keys().next().value!);
+      this.directorySizeCache.set(result.path.toLocaleLowerCase(), { result: { ...result }, expiresAt: Date.now() + (result.complete ? 30_000 : 2_000) });
+    }
+    return [...ready, ...results];
   }
 
   private async liveSearch(
     query: string,
     root: string,
-    filters: SearchFilters
+    filters: SearchFilters,
+    isCurrent: () => boolean
   ): Promise<SearchResult[]> {
     const deadline = Date.now() + 2_500;
     const normalizedQuery = filters.caseSensitive ? query : query.toLocaleLowerCase();
-    const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
-    const expression = filters.regex
-      ? new RegExp(query, filters.caseSensitive ? "u" : "iu")
-      : undefined;
+    const rawTokens = filters.keywords?.length ? filters.keywords : filters.regex ? [query] : query.split(/\s+/).filter(Boolean);
+    const tokens = rawTokens.map((token) => filters.caseSensitive ? token : token.toLocaleLowerCase());
+    const expressions = filters.regex ? rawTokens.map((token) => new RegExp(token, filters.caseSensitive ? "u" : "iu")) : undefined;
+    const matches = (values: boolean[]) => values.some(Boolean);
     const queue = root === "*" ? await getLocalDriveRoots() : [root];
     const results: SearchResult[] = [];
     while (queue.length > 0 && Date.now() < deadline && results.length < 80) {
+      if (!isCurrent() || this.backgroundMode || this.stopping) throw new Error(SEARCH_SUPERSEDED);
       const current = queue.shift()!;
       try {
         const entries = await readdir(current, { withFileTypes: true });
         for (const entry of entries) {
+          if (!isCurrent() || this.backgroundMode || this.stopping) throw new Error(SEARCH_SUPERSEDED);
           if (entry.isSymbolicLink()) continue;
           const entryPath = path.join(current, entry.name);
           if (entry.isDirectory()) queue.push(entryPath);
@@ -828,22 +922,22 @@ export class SearchService {
             ? originalTarget
             : originalTarget.toLocaleLowerCase();
           let score: number | undefined;
-          if (expression?.test(originalTarget)) {
+          if (expressions && matches(expressions.map((expression) => expression.test(originalTarget)))) {
             score = 72;
-          } else if (!expression && filters.fuzzy) {
+          } else if (!expressions && filters.fuzzy) {
             const tokenScores = tokens.map((token) => fuzzySubsequenceScore(target, token));
-            if (tokenScores.every((value) => value != null)) {
-              score = tokenScores.reduce((sum, value) => sum + (value ?? 0), 0) /
+            if (matches(tokenScores.map((value) => value != null))) {
+              score = tokenScores.reduce<number>((sum, value) => sum + (value ?? 0), 0) /
                 Math.max(1, tokenScores.length);
             }
           } else if (
-            !expression &&
+            !expressions &&
             filters.wholeWord &&
-            tokens.every((token) => containsCompleteWord(target, token))
+            matches(tokens.map((token) => containsCompleteWord(target, token)))
           ) {
             score = 82;
-          } else if (!expression && !filters.fuzzy && !filters.wholeWord &&
-            tokens.every((token) => target.includes(token))) {
+          } else if (!expressions && !filters.fuzzy && !filters.wholeWord &&
+            matches(tokens.map((token) => target.includes(token)))) {
             score = target === normalizedQuery ? 100 : target.startsWith(normalizedQuery) ? 92 : 70;
           }
           if (kindMatches && score != null) {
@@ -858,7 +952,8 @@ export class SearchService {
             if (results.length >= 80) break;
           }
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof Error && error.message === SEARCH_SUPERSEDED) throw error;
         // Access-denied directories are expected during fallback scanning.
       }
     }
@@ -960,6 +1055,10 @@ export class SearchService {
     }
     if (response.event === "indexChanged") {
       this.executableCatalogCache = undefined;
+      this.metadataCache.clear();
+      this.metadataPending.clear();
+      this.metadataEpoch++;
+      this.directorySizeCache.clear();
       this.onIndexChanged({
         changedCount: Math.max(1, response.changedCount ?? 1),
         observedAt: new Date().toISOString(),

@@ -1735,9 +1735,35 @@ input:disabled {
   container-name: search-console;
   container-type: inline-size;
 }
-.search-input-wrap { display: flex; height: 65px; align-items: center; gap: 13px; padding: 0 20px; }
+.search-input-wrap {
+  --search-focus-color: color-mix(in srgb, var(--mint) 78%, var(--blue));
+  --search-focus-glow:
+    inset 0 0 0 1px color-mix(in srgb, var(--search-focus-color) 42%, transparent),
+    inset 0 -14px 24px -20px var(--search-focus-color),
+    0 0 18px color-mix(in srgb, var(--search-focus-color) 12%, transparent);
+  display: flex;
+  min-height: 65px;
+  align-items: center;
+  gap: 13px;
+  border-radius: var(--control-radius, 10px);
+  padding: 10px 20px;
+  transition: box-shadow 160ms ease;
+}
+.search-input-wrap:focus-within { outline: none; box-shadow: var(--search-focus-glow); }
+.search-keyword-editor { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.search-keyword-editor > input { flex: 1 1 180px; width: 180px; min-height: 34px; }
+.search-keyword-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 32px; padding: 3px 8px; border: 1px solid color-mix(in srgb, var(--mint) 55%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--mint) 10%, transparent); }
+.search-keyword-chip:focus-within {
+  border-color: color-mix(in srgb, var(--search-focus-color) 70%, transparent);
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--search-focus-color) 8%, transparent), 0 0 10px color-mix(in srgb, var(--search-focus-color) 16%, transparent);
+}
+.search-input-wrap .search-keyword-chip button { color: var(--text); font-size: 12px; overflow-wrap: anywhere; text-align: left; }
+.search-input-wrap .search-keyword-chip input { width: 180px; min-width: 70px; font-size: 12px; }
+.search-input-wrap .search-keyword-remove { flex: 0 0 auto; padding: 3px; }
+.search-keyword-hint { margin: 0; padding: 0 20px 10px; color: var(--muted); font-size: 10px; }
 .search-input-wrap > svg { color: var(--mint); filter: drop-shadow(0 0 8px color-mix(in srgb, var(--mint) 30%, transparent)); }
 .search-input-wrap input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 16px; }
+.search-input-wrap input:focus-visible { outline: none; }
 .search-input-wrap input::placeholder { color: var(--dim); }
 .search-input-wrap button { display: grid; place-items: center; color: var(--dim); background: transparent; cursor: pointer; }
 .search-input-wrap .add-search-bookmark {
@@ -2628,6 +2654,18 @@ kbd { border: 1px solid var(--border); border-radius: 5px; color: var(--dim); ba
 }
 
 .result-row.selected > * { position: relative; z-index: 1; }
+.virtual-result-list { position: relative; user-select: none; }
+.virtual-result-list.search-selection-dragging,
+.virtual-result-list.search-selection-dragging * { user-select: none; cursor: crosshair; }
+.search-selection-marquee {
+  position: absolute;
+  z-index: 4;
+  border: 1px solid color-mix(in srgb, var(--mint) 76%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--mint) 12%, transparent);
+  box-shadow: inset 0 0 12px color-mix(in srgb, var(--mint) 8%, transparent), 0 0 8px color-mix(in srgb, var(--mint) 12%, transparent);
+  pointer-events: none;
+}
 .result-name-cell {
   display: flex;
   min-width: 0;
@@ -8232,6 +8270,10 @@ html.background-suspended *::after {
 .force-delete-help-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .force-delete-help-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 6px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 11px; cursor: pointer; }
 .force-delete-help-actions button:hover { border-color: var(--mint); }
+.force-delete-help-actions button:disabled { opacity: .5; cursor: wait; }
+.force-delete-ai { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border); }
+.force-delete-ai > p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.force-delete-ai-report { padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .force-delete-help-actions button:focus-visible,
 .force-delete-guidance summary:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
 .force-delete-advanced-help, .force-delete-error-details { padding-top: 12px; border-top: 1px solid var(--border); }

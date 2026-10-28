@@ -59,6 +59,8 @@ export type SearchSortField = "relevance" | "name" | "path" | "size" | "modified
 export type SearchSortDirection = "asc" | "desc";
 
 export interface SearchFilters {
+  keywords?: string[];
+  keywordMatch?: "all" | "any";
   kind: "all" | "folder" | "file";
   scope: string;
   scopes?: string[];
@@ -189,6 +191,7 @@ export interface ForceDeleteProcess {
   executablePath?: string;
   matchReason: "executable" | "command-line" | "file-handle";
   canTerminate: boolean;
+  serviceName?: string;
 }
 
 export interface ForceDeletePreview {
@@ -247,6 +250,8 @@ export interface ContentSearchResult {
 }
 
 export interface ContentSearchOptions {
+  keywords?: string[];
+  keywordMatch?: "all" | "any";
   regex?: boolean;
   caseSensitive?: boolean;
   sortBy?: SearchSortField;
@@ -691,6 +696,7 @@ export interface CDriveShiftApi {
   getPathProperties(path: string): Promise<PathProperties>;
   trashPath(path: string): Promise<boolean>;
   previewForceDelete(path: string): Promise<ForceDeletePreview>;
+  analyzeForceDelete(path: string, failure: string): Promise<{ preview: ForceDeletePreview; analysis: string }>;
   executeForceDelete(verificationId: string): Promise<ForceDeleteResult>;
   openDeleteHelper(target: "task-manager" | "installed-apps"): Promise<void>;
   getForceDeleteContextMenuStatus(): Promise<{ enabled: boolean; available: boolean; reason?: string }>;

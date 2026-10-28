@@ -54,6 +54,12 @@ window.cDriveShiftAI = {
         { pid: 5151, name: "SampleProtectedService.exe", executablePath: "E:\\\\SampleApp\\\\service.exe", canTerminate: false }]
     };
   },
+  async analyzeForceDelete(targetPath, failure) {
+    state.calls.push({ operation: "analyze", path: targetPath, failure });
+    const preview = await window.cDriveShiftAI.previewForceDelete(targetPath);
+    await new Promise(resolve => { state.finishAi = resolve; });
+    return { preview, analysis: "SampleApp.exe · PID 4242 使用目标文件。<img src=x onerror=alert(1)>" };
+  },
   async executeForceDelete(verificationId) {
     state.calls.push({ operation: "execute", verificationId });
     if (state.scenario.startsWith("elevation")) {
@@ -375,6 +381,20 @@ try {
     const calls = window.__deleteSmoke.calls.filter(call => call.operation === "execute");
     return calls.length === 2 && calls[0].verificationId !== calls[1].verificationId;
   })()`);
+
+  await click(".force-delete-ai button");
+  await waitFor('typeof window.__deleteSmoke.finishAi === "function"');
+  await check("AI diagnosis cannot trigger deletion while running", 'document.querySelector("footer button.danger").disabled && window.__deleteSmoke.calls.filter(call => call.operation === "execute").length === 2');
+  await evaluate('window.__deleteSmoke.finishAi()');
+  await waitFor('document.querySelector(".force-delete-ai-report") !== null');
+  await check("AI evidence refresh restores a fresh unchecked preview and renders plain text", `(() => {
+    const report = document.querySelector(".force-delete-ai-report");
+    return report.innerText.includes("PID 4242") && report.innerText.includes("<img") && !report.querySelector("img")
+      && !document.querySelector(".force-delete-guidance") && !document.querySelector(".force-delete-confirmation input").checked
+      && document.querySelector("footer button.danger").disabled
+      && window.__deleteSmoke.calls.some(call => call.operation === "analyze" && call.failure.includes("EPERM"));
+  })()`);
+  await capture("zh-ai-lock-diagnosis");
 
   for (const language of ["zh-CN", "en-US"]) {
     await runScenario("protected", language, 560, 850);

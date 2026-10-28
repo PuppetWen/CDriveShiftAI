@@ -26,6 +26,8 @@ export interface ContentSearchResult {
 }
 
 export interface ContentSearchOptions {
+  keywords?: string[];
+  keywordMatch?: "all" | "any";
   regex?: boolean;
   caseSensitive?: boolean;
   sortBy?: SearchSortField;
@@ -75,6 +77,8 @@ export type SearchSortField = "relevance" | "name" | "path" | "size" | "modified
 export type SearchSortDirection = "asc" | "desc";
 
 export interface SearchFilters {
+  keywords?: string[];
+  keywordMatch?: "all" | "any";
   kind: "all" | "folder" | "file";
   scope: string;
   scopes?: string[];
@@ -163,6 +167,7 @@ export interface ForceDeleteProcess {
   appName?: string;
   lockedPath?: string;
   executablePath?: string;
+  serviceName?: string;
   matchReason: "executable" | "command-line" | "file-handle";
   canTerminate: boolean;
 }

@@ -10,6 +10,7 @@ export interface FileLockProcess {
   pid: number;
   creationTime: string;
   protected: boolean;
+  critical?: boolean;
   name?: string;
   appName?: string;
   executablePath?: string;
@@ -88,6 +89,7 @@ public static class CShiftFileLocks {
     public int pid;
     public string creationTime;
     public bool isProtected;
+    public bool critical = true;
     public string name;
     public string appName;
     public string executablePath;
@@ -152,7 +154,8 @@ public static class CShiftFileLocks {
         } catch { }
       }
       uint session; bool critical;
-      item.isProtected |= pid <= 4 || !ProcessIdToSessionId(pid, out session) || session == 0 || !IsProcessCritical(process, out critical) || critical;
+      item.critical = !IsProcessCritical(process, out critical) || critical;
+      item.isProtected |= pid <= 4 || !ProcessIdToSessionId(pid, out session) || session == 0 || item.critical;
       return item;
     } finally { CloseHandle(process); }
   }
@@ -403,7 +406,7 @@ export async function listFileLockProcesses(target: string): Promise<FileLockSca
     const pid = Number(record.pid);
     if (!Number.isInteger(pid) || pid <= 0 || typeof record.creationTime !== "string" || !/^\d+$/.test(record.creationTime)) return [];
     const optional = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-    return [{ pid, creationTime: record.creationTime, protected: Boolean(record.isProtected),
+    return [{ pid, creationTime: record.creationTime, protected: Boolean(record.isProtected), critical: typeof record.critical === "boolean" ? record.critical : undefined,
       name: optional(record.name), appName: optional(record.appName), executablePath: optional(record.executablePath), lockedPath: optional(record.lockedPath) }];
   });
   const unique = new Map<string, FileLockProcess>();

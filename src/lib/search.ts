@@ -8,6 +8,10 @@ import type {
 export type SearchMode = "name" | "content";
 export type DatePreset = "any" | "today" | "week" | "month" | "year" | "custom";
 
+export function searchKeywords(keywords: readonly string[] = [], draft = ""): string[] {
+  return [...new Set([...keywords, draft].map((term) => term.trim()).filter(Boolean))].slice(0, 32);
+}
+
 const categoryExtensions: Partial<Record<SearchCategory, readonly string[]>> = {
   document: [
     "doc", "docx", "odt", "pdf", "ppt", "pptx", "rtf", "txt", "csv", "xls", "xlsx"
@@ -74,6 +78,8 @@ export const regexTokens = [
 export function defaultFilters(): SearchFilters {
   return {
     kind: "all",
+    keywords: [],
+    keywordMatch: "any",
     scope: "*",
     scopes: [],
     categories: [],
@@ -136,7 +142,7 @@ export function bookmarkSignature(value: {
   return JSON.stringify({
     mode: value.mode,
     query: value.query.trim(),
-    filters: value.filters,
+    filters: { ...value.filters, keywordMatch: "any" },
     filterPanelOpen: value.filterPanelOpen,
     extensionInput: value.extensionInput,
     datePreset: value.datePreset,

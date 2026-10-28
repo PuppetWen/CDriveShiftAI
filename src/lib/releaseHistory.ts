@@ -10,6 +10,196 @@ const previousReleases: Array<{
   en: Omit<BundledReleaseNote, "version">;
 }> = [
   {
+    "version": "0.1.11",
+    "zh": {
+      "summary": "优化实时搜索响应与后台资源占用：恢复或关系索引预筛、减少排序和重复查询，隐藏窗口暂停搜索及目录统计。",
+      "sections": [
+        {
+          "title": "更快的实时搜索",
+          "items": [
+            "恢复适用于多个关键词或关系的索引预筛，减少全量名称转换；分页只选取需要的结果并避免重复字符串分配。",
+            "名称和内容搜索更快发起，连续输入合并为最新请求；输入法组词时暂停搜索，回车生成相同标签不重复查询。",
+            "结果更新让位于输入操作，复用短期文件元数据，避免每次输入重复读取磁盘。"
+          ]
+        },
+        {
+          "title": "后台保持安静",
+          "items": [
+            "隐藏或最小化窗口取消查询和目录大小计算；保留原生索引后台暂停机制，不增加轮询。",
+            "目录大小仅在停止输入后计算可见行，每批最多24项，限制自动统计时间与条目；显式属性查看保持较大统计预算。",
+            "目录结果与文件元数据采用有界缓存，索引变化后失效；关闭主窗口时仍可继续使用可见的独立搜索窗口。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "summary": "Improve live search responsiveness and background efficiency with OR-aware index filtering, bounded ranking and latest-query scheduling.",
+      "sections": [
+        {
+          "title": "Faster live search",
+          "items": [
+            "Restore candidate signatures for OR queries and select only the needed page instead of repeatedly sorting every candidate.",
+            "Dispatch live searches sooner, coalesce typing to the latest query, pause during IME composition and avoid repeating unchanged queries when committing chips.",
+            "Prioritize input over result rendering and reuse short-lived file metadata to reduce disk access."
+          ]
+        },
+        {
+          "title": "Quiet background operation",
+          "items": [
+            "Cancel queries and directory sizing for hidden/minimized windows without adding polling.",
+            "Size only visible folders after idle input, up to 24 per batch with a bounded automatic budget; explicit properties retain their larger scan budget.",
+            "Keep caches bounded and invalidate them on index changes. A visible standalone search stays active when the main window closes."
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "version": "0.1.10",
+    "zh": {
+      "summary": "多关键词搜索统一采用“或”关系，显示每个关键词的结果并集，同一文件或文件夹只显示一次。",
+      "sections": [
+        {
+          "title": "多关键词结果合并",
+          "items": [
+            "文件夹、文件名称和文件内容只需命中任意关键词即可显示，不再要求同时包含所有关键词。",
+            "移除全部/任一切换，保留回车标签、点击编辑和实时搜索；旧书签与搜索状态自动使用或关系。",
+            "在索引查询层合并、排序和分页，命中多个关键词的项目不会重复显示。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "summary": "Multiple keywords now always use OR: combine the results for every keyword and show each file or folder once.",
+      "sections": [
+        {
+          "title": "Combine keyword results",
+          "items": [
+            "Folder names, filenames, and file contents appear when any keyword matches.",
+            "Remove the All/Any selector while keeping editable chips and live search. Saved searches also use OR.",
+            "Combine, sort, and paginate in the index; items matching several keywords appear only once."
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "version": "0.1.9",
+    "zh": {
+      "summary": "修复代理下 GitHub 更新限流，增强占用进程与第三方服务的删除处理，并为名称和文件内容搜索加入可编辑的多关键词标签。",
+      "sections": [
+        {
+          "title": "代理与更新检查",
+          "items": [
+            "识别 GitHub API 的 403/429 限流，自动改用官方 Release 清单获取最新版本，无需另配 Token。",
+            "共享并发检查并遵守限流等待时间，下载锁定具体版本，继续执行 SHA-512 校验。"
+          ]
+        },
+        {
+          "title": "强制删除与占用分析",
+          "items": [
+            "允许处理已确认占用目标的普通 PowerShell；停止身份一致、可停止且独占进程的第三方服务，保留关键系统服务保护。",
+            "重试目录短暂非空情况，显示实际失败子路径；可使用已配置的 AI 分析本机占用证据，刷新名单后确认执行。"
+          ]
+        },
+        {
+          "title": "多关键词搜索",
+          "items": [
+            "名称和文件内容搜索均可回车生成关键词标签，点击标签编辑，支持移除及实时检索。",
+            "支持全部匹配或任一匹配，兼容文件/文件夹筛选、正则、分页、搜索状态和书签。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "summary": "Recover update checks from GitHub API rate limits, improve lock and service handling for deletion, and add editable keyword chips to name and content search.",
+      "sections": [
+        {
+          "title": "Proxy-aware update checks",
+          "items": [
+            "Recognize GitHub API 403/429 rate limits and fall back to the official Release manifest without requiring a token.",
+            "Share concurrent checks, respect rate-limit cooldowns, pin downloads to a release tag, and retain SHA-512 verification."
+          ]
+        },
+        {
+          "title": "Force deletion and lock diagnosis",
+          "items": [
+            "Handle confirmed locks held by ordinary PowerShell processes and stop eligible dedicated third-party services while retaining critical system protections.",
+            "Retry transient non-empty folders and report the failing child path. Optionally analyze local lock evidence with configured AI before confirming a refreshed process list."
+          ]
+        },
+        {
+          "title": "Multiple search keywords",
+          "items": [
+            "Commit keywords with Enter, click chips to edit them, remove individual terms, and search names and file contents as you type.",
+            "Choose all or any keywords, with file/folder filters, regex, pagination, saved state, and bookmarks."
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "version": "0.1.8",
+    "zh": {
+      "summary": "本版补强文件和目录占用检测，删除前显示所属应用、进程和占用路径，并修复搜索索引持有工作目录及后台扫描句柄的问题。",
+      "sections": [
+        {
+          "title": "找出占用应用",
+          "items": [
+            "删除预检显示应用名称、进程名、PID、程序位置和可识别的占用路径，区分实际句柄占用与启动路径、命令行关联。",
+            "增加系统文件句柄扫描，补充大目录遍历上限之外的占用；进程查询不可用时仍可通过原生进程身份识别占用应用。",
+            "排除命名管道，避免句柄查询阻塞；检测超时时保留已经完成的结果并提示列表可能不完整。"
+          ]
+        },
+        {
+          "title": "确认后处理占用并删除",
+          "items": [
+            "普通删除失败后，核对本次确认中进程的 PID 与启动时间，只结束身份一致且允许结束的进程，再重试删除。",
+            "必要时继续使用管理员权限重试，删除后检查目标确实消失；结束应用前明确提醒未保存内容可能丢失。",
+            "保留系统进程、受保护路径和迁移事务保护；系统或驱动锁无法解除时显示实际失败原因。"
+          ]
+        },
+        {
+          "title": "搜索不阻碍文件操作",
+          "items": [
+            "应用和索引子进程使用应用数据目录作为工作目录，避免继承待删除或待移动的文件夹。",
+            "名称扫描和内容索引在后台暂停、读取文件或等待队列前释放目录枚举句柄；实时搜索与目录统计同步释放枚举句柄。",
+            "内容读取明确允许共享读写和删除，并对实际读取字节数设限，避免增长中的日志突破单文件限制。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "summary": "This release improves file and folder lock detection, identifies the owning app before deletion, and releases working-directory and background-scan handles used by search.",
+      "sections": [
+        {
+          "title": "Identify apps using files",
+          "items": [
+            "Show application name, process name, PID, executable location, and detected open path; distinguish open handles from executable and command-line matches.",
+            "Scan system file handles beyond the directory traversal limit and use native process identities when CIM process discovery is unavailable.",
+            "Skip named pipes to avoid blocked name queries and retain completed discovery results if a later query times out."
+          ]
+        },
+        {
+          "title": "Handle confirmed locks before deletion",
+          "items": [
+            "After ordinary deletion fails, recheck the confirmed PID and process start time, stop only permitted unchanged processes, and retry deletion.",
+            "Retry with administrator privileges when needed and verify that the target is gone; warn that stopping apps can lose unsaved work.",
+            "Keep system-process, protected-path, and migration safeguards, and report failures when Windows or driver locks cannot be released."
+          ]
+        },
+        {
+          "title": "Keep search from obstructing file operations",
+          "items": [
+            "Use the application data directory as the working directory for the app and indexer instead of inheriting a folder the user may want to move or delete.",
+            "Close directory enumeration before background pauses, file reads, or queue waits; apply the same approach to live search and directory statistics.",
+            "Explicitly share content reads with writes and deletion, and bound the actual bytes read from growing log files."
+          ]
+        }
+      ]
+    }
+  },
+  {
     "version": "0.1.7",
     "zh": {
       "summary": "本版为五套主题统一加入透亮的液态玻璃材质，覆盖路径框、工具栏、菜单、属性和独立窗口，并修复迁移记录数量标签外露的矩形底色。",

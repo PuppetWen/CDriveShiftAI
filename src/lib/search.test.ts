@@ -5,6 +5,7 @@ import {
   defaultFilters,
   deriveKind,
   normalizeScopePath,
+  searchKeywords,
   validateRegexPattern
 } from "./search";
 import type { SearchBookmark, SearchResult } from "../types";
@@ -22,6 +23,11 @@ function result(name: string, isDirectory = false): SearchResult {
 }
 
 describe("search helpers", () => {
+  it("combines committed keywords with a live draft without splitting phrases", () => {
+    expect(searchKeywords([" dsh ", "alpha beta", "dsh", ""], " other ")).toEqual(["dsh", "alpha beta", "other"]);
+    expect(searchKeywords(["报告", "日志"], "报告")).toEqual(["报告", "日志"]);
+    expect(searchKeywords(Array.from({ length: 40 }, (_, index) => String(index)))).toHaveLength(32);
+  });
   it("normalizes extended and slash-separated scopes", () => {
     expect(normalizeScopePath("\\\\?\\E:/Data/")).toBe("e:\\data");
   });

@@ -34,6 +34,22 @@ const record = (id: string): MigrationRecord => ({ id, source: `C:\\Apps\\${id}`
   stage: "linked", totalBytes: 2, copiedBytes: 2, startedAt: "2026-01-01", updatedAt: "2026-01-01", warnings: [] });
 
 describe("durable settings and migration journal", () => {
+  it("restores old keyword searches as a union and invalidates intersection snapshots", async () => {
+    const filters = { keywords: ["alpha", "beta"], keywordMatch: "all" };
+    const snapshot = { version: 1, mode: "name", query: "", filters,
+      results: [{ name: "alpha-beta.txt", path: "E:\\fixture\\alpha-beta.txt", isDirectory: false, size: 1, score: 10 }],
+      contentResults: [{ name: "alpha-beta.txt", path: "E:\\fixture\\alpha-beta.txt", preview: "alpha beta", score: 10 }] };
+    await writeFile(filename(), JSON.stringify({ searchWorkspace: snapshot,
+      searchBookmarks: [{ id: "old-all", name: "alpha beta", mode: "name", query: "", filters }] }));
+    const store = new AppStore(); await store.init();
+    expect(store.getSearchWorkspace()?.filters).toMatchObject({ keywords: ["alpha", "beta"], keywordMatch: "any" });
+    expect(store.getSearchWorkspace()?.results).toEqual([]);
+    expect(store.getSearchWorkspace()?.contentResults).toEqual([]);
+    expect(store.listSearchBookmarks()[0]?.filters.keywordMatch).toBe("any");
+    await store.saveSearchWorkspace({ ...snapshot, filters: { ...filters, keywordMatch: "any" } });
+    expect(store.getSearchWorkspace()?.results).toHaveLength(1);
+    expect(store.getSearchWorkspace()?.contentResults).toHaveLength(1);
+  });
   it("keeps Explorer integration opt-in, normalizes invalid flags and persists explicit changes", async () => {
     await writeFile(filename(), JSON.stringify({ settings: { forceDeleteContextMenu: "true" } }));
     const store = new AppStore(); await store.init();

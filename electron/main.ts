@@ -36,6 +36,7 @@ import { openDeleteHelper } from "./delete-helper";
 import { ExplorerContextMenuService } from "./explorer-context-menu";
 import { createForceDeleteLaunchData, ForceDeleteLaunchQueue, parseForceDeleteLaunch } from "./force-delete-launch";
 import { ForceDeleteService } from "./force-delete";
+import { analyzeForceDelete } from "./force-delete-ai";
 import { assertNoMigrationPathMutation, assertRenameDestinationAvailable, migrationRecordDeletionReason } from "./file-operation-guard";
 import { nativeStrings, resolveNativeLanguage } from "./i18n";
 import {
@@ -180,7 +181,7 @@ function applyLoginSettings(settings: AppSettings): void {
   });
 }
 
-function syncSearchBackgroundMode(): void {
+function syncSearchBackgroundMode(force = false): void {
   const hasVisibleWindow = [mainWindow, quickSearchWindow, uninstallRestoreWindow].some(
     (window) =>
       window != null &&
@@ -188,11 +189,17 @@ function syncSearchBackgroundMode(): void {
       window.isVisible() &&
       !window.isMinimized()
   );
-  searchService?.setBackgroundMode(!hasVisibleWindow);
+  searchService?.setBackgroundMode(!hasVisibleWindow, force);
 }
 
 function trackWindowActivity(window: BrowserWindow, role: "main" | "quick" | "force-delete"): void {
-  const sync = () => setImmediate(syncSearchBackgroundMode);
+  const ownerId = window.webContents.id;
+  const sync = () => {
+    if (window.isDestroyed() || !window.isVisible() || window.isMinimized()) {
+      searchService?.cancelWindowSearch(ownerId);
+    }
+    setImmediate(syncSearchBackgroundMode);
+  };
   window.on("show", sync);
   window.on("hide", sync);
   window.on("minimize", sync);
@@ -299,6 +306,11 @@ function loadRenderer(
       windowParameters
     )
   );
+}
+
+function sanitizeSearchKeywords(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim().slice(0, 1024)).filter(Boolean))].slice(0, 32);
 }
 
 function assertString(value: unknown, label: string, maxLength = 32_768): string {
@@ -505,7 +517,7 @@ function createWindow(): BrowserWindow {
     // Force a native background notification even if visibility events raced
     // during startup. Besides pausing heavy work, this trims reclaimable pages
     // across the resident process tree after the renderer is released.
-    searchService?.setBackgroundMode(true, true);
+    syncSearchBackgroundMode(true);
     createTray();
     // A hidden Chromium renderer and its GPU surfaces otherwise remain the
     // largest part of the tray working set. Search, watchers, global
@@ -1783,7 +1795,7 @@ function registerIpc(): void {
     const isDirectory = Boolean(targetStats?.isDirectory());
     const sizeResult =
       isDirectory && !isSymbolicLink
-        ? (await searchService!.directorySizes([value]))[0]
+        ? (await searchService!.directorySizes([value], _event.sender.id, "properties"))[0]
         : undefined;
     const [readable, writable, linkTarget] = await Promise.all([
       access(value, 4).then(() => true, () => false),
@@ -1850,6 +1862,18 @@ function registerIpc(): void {
     forceDeleteService.preview(assertString(targetPath, "路径"))
   );
 
+  ipcMain.handle("shell:force-delete-analyze", async (_event, targetPath: unknown, failure: unknown) => {
+    if (isQuitting || forceDeleteService.isBusy()) throw new Error("文件操作正在执行或程序正在退出，请稍后再分析");
+    const settings = store.getSettings();
+    if (!settings.ai.enabled || !settings.ai.baseUrl || !settings.ai.model) {
+      throw new Error("请先在设置中启用并配置 AI 服务，再分析占用原因");
+    }
+    // Never trust a renderer-supplied process list for diagnosis or deletion.
+    const preview = await forceDeleteService.preview(assertString(targetPath, "路径"));
+    const analysis = await analyzeForceDelete(preview, failure === "" ? "" : assertString(failure, "失败信息", 4_000), settings, store.getApiKey());
+    return { preview, analysis };
+  });
+
   ipcMain.handle("shell:delete-helper", (_event, target: unknown) =>
     openDeleteHelper(target, shell)
   );
@@ -1896,8 +1920,8 @@ function registerIpc(): void {
 
   ipcMain.handle(
     "search:query",
-    async (_event, query: unknown, filters: unknown, pageOptions?: unknown) => {
-      const value = assertString(query, "搜索词", 512);
+    async (event, query: unknown, filters: unknown, pageOptions?: unknown) => {
+      const value = assertString(query, "搜索词", 33_000);
       const raw = (filters ?? {}) as Partial<SearchFilters>;
       const allowedCategories = new Set<SearchCategory>([
         "folder",
@@ -1923,6 +1947,8 @@ function registerIpc(): void {
       const fuzzy = !regex && raw.fuzzy === true;
       const wholeWord = !regex && !fuzzy && raw.wholeWord === true;
       const safeFilters: SearchFilters = {
+        keywords: sanitizeSearchKeywords(raw.keywords),
+        keywordMatch: "any",
         kind: ["all", "folder", "file"].includes(raw.kind ?? "") ? raw.kind! : "all",
         scope: typeof raw.scope === "string" && raw.scope ? raw.scope : "*",
         scopes: Array.isArray(raw.scopes)
@@ -1970,9 +1996,9 @@ function registerIpc(): void {
             typeof rawPage.limit === "number"
               ? Math.min(10_000, Math.max(1, Math.trunc(rawPage.limit)))
               : undefined
-        });
+        }, event.sender.id);
       }
-      return searchService!.search(value, safeFilters);
+      return (await searchService!.searchPage(value, safeFilters, {}, event.sender.id)).items;
     }
   );
   ipcMain.handle("search:status", () => searchService!.getStatus());
@@ -2003,12 +2029,12 @@ function registerIpc(): void {
   ipcMain.handle("ui-layout:update", (_event, value: unknown) =>
     store.updateUiLayout(value)
   );
-  ipcMain.handle("search:directory-sizes", (_event, paths: unknown) => {
+  ipcMain.handle("search:directory-sizes", (event, paths: unknown) => {
     if (!Array.isArray(paths)) throw new Error("目录列表无效");
     const safePaths = paths
       .filter((item): item is string => typeof item === "string" && item.length <= 32_768)
-      .slice(0, 180);
-    return searchService!.directorySizes(safePaths);
+      .slice(0, 24);
+    return searchService!.directorySizes(safePaths, event.sender.id);
   });
   ipcMain.handle(
     "search:content-index",
@@ -2022,30 +2048,33 @@ function registerIpc(): void {
   );
   ipcMain.handle(
     "search:content-query",
-    (_event, query: unknown, scope: unknown, options: unknown) => {
+    async (event, query: unknown, scope: unknown, options: unknown) => {
       const raw =
         options && typeof options === "object"
-          ? (options as { regex?: unknown; caseSensitive?: unknown })
+          ? (options as { regex?: unknown; caseSensitive?: unknown; keywords?: unknown; keywordMatch?: unknown })
           : {};
-      return (
-      searchService!.searchContent(
-        assertString(query, "内容搜索词", 2_048),
+      return (await searchService!.searchContentPage(
+        assertString(query, "内容搜索词", 33_000),
         assertString(scope, "内容搜索目录"),
         {
+          keywords: sanitizeSearchKeywords(raw.keywords),
+          keywordMatch: "any",
           regex: raw.regex === true,
           caseSensitive: raw.caseSensitive === true
-        }
-      )
-      );
+        },
+        event.sender.id
+      )).items;
     }
   );
 
   ipcMain.handle(
     "search:content-query-page",
-    (_event, query: unknown, scope: unknown, options: unknown, pageOptions: unknown) => {
+    (event, query: unknown, scope: unknown, options: unknown, pageOptions: unknown) => {
       const raw =
         options && typeof options === "object"
           ? (options as {
+              keywords?: unknown;
+              keywordMatch?: unknown;
               regex?: unknown;
               caseSensitive?: unknown;
               sortBy?: unknown;
@@ -2061,9 +2090,11 @@ function registerIpc(): void {
           ? (pageOptions as { cursor?: unknown; limit?: unknown })
           : {};
       return searchService!.searchContentPage(
-        assertString(query, "内容搜索词", 2_048),
+        assertString(query, "内容搜索词", 33_000),
         assertString(scope, "内容搜索目录"),
         {
+          keywords: sanitizeSearchKeywords(raw.keywords),
+          keywordMatch: "any",
           regex: raw.regex === true,
           caseSensitive: raw.caseSensitive === true,
           sortBy: ["relevance", "name", "path", "size", "modified", "type"].includes(
@@ -2088,7 +2119,8 @@ function registerIpc(): void {
             typeof rawPage.limit === "number"
               ? Math.min(2_000, Math.max(1, Math.trunc(rawPage.limit)))
               : undefined
-        }
+        },
+        event.sender.id
       );
     }
   );

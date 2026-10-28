@@ -63,6 +63,8 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
   trashPath: (targetPath: string) => ipcRenderer.invoke("shell:trash", targetPath),
   previewForceDelete: (targetPath: string) =>
     ipcRenderer.invoke("shell:force-delete-preview", targetPath),
+  analyzeForceDelete: (targetPath: string, failure: string) =>
+    ipcRenderer.invoke("shell:force-delete-analyze", targetPath, failure),
   executeForceDelete: (verificationId: string) =>
     ipcRenderer.invoke("shell:force-delete-execute", verificationId),
   openDeleteHelper: (target: "task-manager" | "installed-apps") =>

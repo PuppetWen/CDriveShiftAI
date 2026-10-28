@@ -467,6 +467,9 @@ const browserFallback: CDriveShiftApi = {
   async executeForceDelete() {
     return { deleted: true, terminatedProcesses: [] };
   },
+  async analyzeForceDelete() {
+    throw new Error("AI 占用分析需要使用已配置 AI 服务的 Windows 桌面版");
+  },
   async openDeleteHelper(target) {
     const manualSteps = target === "task-manager"
       ? "请按 Ctrl + Shift + Esc 打开任务管理器"

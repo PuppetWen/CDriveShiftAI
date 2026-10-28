@@ -1,4 +1,5 @@
 import {
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
@@ -60,6 +61,7 @@ import { api } from "../lib/api";
 import { formatBytes, formatDate } from "../lib/format";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { useVirtualList } from "../lib/virtual-list";
+import { useResultSelection } from "../lib/result-selection";
 import {
   bookmarkConditionCount,
   bookmarkSignature,
@@ -70,6 +72,7 @@ import {
   regexTemplates,
   regexTokens,
   startOfPreset,
+  searchKeywords,
   validateRegexPattern,
   type DatePreset,
   type SearchMode
@@ -103,6 +106,8 @@ interface SearchViewProps {
 
 const NAME_PAGE_SIZE = 240;
 const CONTENT_PAGE_SIZE = 80;
+const EMPTY_CATEGORIES: SearchCategory[] = [];
+const EMPTY_STRINGS: string[] = [];
 const SEARCH_COLUMN_KEYS = [
   "name",
   "path",
@@ -185,11 +190,22 @@ export function SearchView({
   const { t, ui, runtimeText, formatNumber } = useI18n();
   const [mode, setMode] = useState<SearchMode>("name");
   const [query, setQuery] = useState("");
+  const [isComposing, setIsComposing] = useState(false);
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
   const [filters, setFilters] = useState<SearchFilters>(defaultFilters);
+  const keywords = filters.keywords ?? [];
+  const activeKeywords = useMemo(() => filters.keywords == null && mode === "name" && !filters.regex
+    ? searchKeywords(query.split(/\s+/))
+    : searchKeywords(filters.keywords, query), [filters.keywords, filters.regex, mode, query]);
+  const effectiveQuery = activeKeywords.join(" ");
+  const [editingKeyword, setEditingKeyword] = useState<number>();
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
   const [extensionInput, setExtensionInput] = useState("");
   const [datePreset, setDatePreset] = useState<DatePreset>("any");
   const [contentScope, setContentScope] = useState("*");
+  // Committing the draft to a chip does not change the query. Keep its request
+  // alive instead of repeating the same native lookup on every Enter press.
+  const searchRequestKey = JSON.stringify({ mode, activeKeywords, filters: { ...filters, keywords: undefined }, contentScope });
   const [results, setResults] = useState<SearchResult[]>([]);
   const [contentResults, setContentResults] = useState<ContentSearchResult[]>([]);
   const [nameCursor, setNameCursor] = useState<string>();
@@ -215,7 +231,16 @@ export function SearchView({
   const [loading, setLoading] = useState(false);
   const [elapsed, setElapsed] = useState<number>();
   const [error, setError] = useState("");
-  const [selectedPath, setSelectedPath] = useState("");
+  const activeResultCount = mode === "name" ? results.length : contentResults.length;
+  const virtualList = useVirtualList(activeResultCount, mode === "name" ? 58 : 82, 10);
+  const resultSelection = useResultSelection(
+    mode === "name" ? results : contentResults,
+    virtualList.containerRef,
+    mode === "name" ? 58 : 82,
+    searchRequestKey,
+    pageVisible
+  );
+  const { selectedPath, selectedPaths, setSelectedPath } = resultSelection;
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [restoredAt, setRestoredAt] = useState("");
   const [bookmarks, setBookmarks] = useState<SearchBookmark[]>([]);
@@ -268,9 +293,9 @@ export function SearchView({
     classNameFor: openClassNameFor
   } = usePathOpenFeedback(notify);
 
-  const categories = filters.categories ?? [];
-  const scopes = filters.scopes ?? [];
-  const extensions = filters.extensions ?? [];
+  const categories = filters.categories ?? EMPTY_CATEGORIES;
+  const scopes = filters.scopes ?? EMPTY_STRINGS;
+  const extensions = filters.extensions ?? EMPTY_STRINGS;
   const contentStatusMatchesScope =
     contentScope !== "*" &&
     normalizeScopePath(contentStatus.root) === normalizeScopePath(contentScope);
@@ -331,16 +356,25 @@ export function SearchView({
   const contentIndexingCurrentScope =
     mode === "content" && contentStatus.state === "indexing" && contentStatusMatchesScope;
   const regexValidation = useMemo(
-    () => validateRegexPattern(query),
-    [query]
+    () => activeKeywords.map(validateRegexPattern).find((validation) => !validation.valid) ?? validateRegexPattern(activeKeywords[0] ?? ""),
+    [activeKeywords]
   );
 
-  useEffect(() => api.onContentIndexerStatus(setContentStatus), []);
+  useEffect(() => {
+    const updateVisibility = () => setPageVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
+
+  useEffect(() => api.onContentIndexerStatus((status) => {
+    if (document.visibilityState !== "hidden") setContentStatus(status);
+  }), []);
 
   useEffect(() => {
-    if (!query.trim()) return;
+    if (!effectiveQuery) return;
     let timer: number | undefined;
     const unsubscribe = api.onSearchIndexChanged((event) => {
+      if (document.visibilityState === "hidden") return;
       if (mode === "content") {
         const currentScope = normalizeScopePath(contentScope);
         if (
@@ -354,6 +388,8 @@ export function SearchView({
       }
       if (timer != null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
+        if (document.visibilityState === "hidden") return;
+        setDirectorySizes(new Map());
         liveRefreshRef.current = true;
         setLiveIndexRevision((revision) => revision + 1);
       }, 240);
@@ -362,10 +398,10 @@ export function SearchView({
       if (timer != null) window.clearTimeout(timer);
       unsubscribe();
     };
-  }, [contentScope, mode, query]);
+  }, [contentScope, mode, effectiveQuery]);
 
   useEffect(() => {
-    if (!query.trim()) return;
+    if (!effectiveQuery) return;
     let lastRefresh = 0;
     const refreshWhenVisible = () => {
       if (document.visibilityState === "hidden") return;
@@ -381,7 +417,7 @@ export function SearchView({
       window.removeEventListener("focus", refreshWhenVisible);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [query]);
+  }, [effectiveQuery]);
 
   useEffect(() => {
     let cancelled = false;
@@ -426,7 +462,7 @@ export function SearchView({
         if (cancelled || !workspace) return;
         setMode(workspace.mode);
         setQuery(workspace.query);
-        setFilters(workspace.filters);
+        setFilters({ ...workspace.filters, keywordMatch: "any" });
         setFilterPanelOpen(workspace.filterPanelOpen);
         setExtensionInput(workspace.extensionInput);
         setDatePreset(workspace.datePreset);
@@ -446,7 +482,7 @@ export function SearchView({
           )
         );
         skipRestoredSearchRef.current =
-          Boolean(workspace.query.trim()) &&
+          Boolean(workspace.query.trim() || workspace.filters.keywords?.length) &&
           (workspace.mode === "name"
             ? workspace.results.length > 0
             : workspace.contentResults.length > 0);
@@ -535,6 +571,10 @@ export function SearchView({
       }
       const item = results.find((result) => result.path === selectedPath);
       if (!item) return;
+      if (selectedPaths.size > 1 && (event.key === "Delete" || event.key === "F2")) {
+        event.preventDefault();
+        return;
+      }
       if (event.key === "Enter" && event.altKey) {
         event.preventDefault();
         setPropertyPath(item.path);
@@ -581,10 +621,10 @@ export function SearchView({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [notify, openPath, results, selectedPath]);
+  }, [notify, openPath, results, selectedPath, selectedPaths]);
 
   useEffect(() => {
-    if (mode !== "content" || contentScope === "*") return;
+    if (!pageVisible || mode !== "content" || contentScope === "*") return;
     let cancelled = false;
     void api
       .contentIndexStatus(contentScope)
@@ -605,7 +645,7 @@ export function SearchView({
     return () => {
       cancelled = true;
     };
-  }, [contentScope, mode]);
+  }, [contentScope, mode, pageVisible]);
 
   useEffect(() => {
     if (!workspaceReady) return;
@@ -618,7 +658,17 @@ export function SearchView({
       );
       return;
     }
-    const value = query.trim();
+    const sequence = ++requestSequence.current;
+    ++pageRequestSequence.current;
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
+    setLoading(false);
+    setNameCursor(undefined);
+    setContentCursor(undefined);
+    setNameHasMore(false);
+    setContentHasMore(false);
+    if (!pageVisible || isComposing) return;
+    const value = effectiveQuery;
     if (!value) {
       setResults([]);
       setContentResults([]);
@@ -656,17 +706,12 @@ export function SearchView({
       return;
     }
 
-    const sequence = ++requestSequence.current;
-    ++pageRequestSequence.current;
-    loadingMoreRef.current = false;
-    setLoadingMore(false);
     const backgroundRefresh = liveRefreshRef.current;
     liveRefreshRef.current = false;
     const timer = window.setTimeout(() => {
       const started = performance.now();
       if (!backgroundRefresh) {
         setLoading(true);
-        setDirectorySizes(new Map());
       }
       setError("");
       const refreshLimit =
@@ -679,6 +724,7 @@ export function SearchView({
               value,
               {
                 ...filters,
+                keywords: activeKeywords,
                 kind: deriveKind(categories),
                 scope: scopes[0] ?? "*",
                 scopes
@@ -686,6 +732,8 @@ export function SearchView({
               { limit: backgroundRefresh ? refreshLimit : NAME_PAGE_SIZE }
             )
           : api.searchContentPage(value, contentScope, {
+              keywords: activeKeywords,
+              keywordMatch: "any",
               regex: filters.regex,
               caseSensitive: filters.caseSensitive,
               sortBy: filters.sortBy,
@@ -698,7 +746,8 @@ export function SearchView({
             });
       void request
         .then((page) => {
-          if (sequence !== requestSequence.current) return;
+          if (sequence !== requestSequence.current || document.visibilityState === "hidden") return;
+          startTransition(() => {
           if (mode === "name") {
             const next = page.items as SearchResult[];
             setResults((current) =>
@@ -727,6 +776,7 @@ export function SearchView({
             setNameTotal(undefined);
           }
           setElapsed(performance.now() - started);
+          });
         })
         .catch((reason) => {
           if (sequence !== requestSequence.current) return;
@@ -735,71 +785,22 @@ export function SearchView({
         .finally(() => {
           if (sequence === requestSequence.current && !backgroundRefresh) setLoading(false);
         });
-    }, mode === "name" ? 110 : 180);
-    return () => window.clearTimeout(timer);
+    }, mode === "name" ? 45 : 90);
+    return () => {
+      window.clearTimeout(timer);
+      if (sequence === requestSequence.current) ++requestSequence.current;
+    };
   }, [
-    categories,
     contentIndexingCurrentScope,
     contentReadyRevision,
-    contentScope,
-    filters,
     liveIndexRevision,
-    mode,
-    query,
+    pageVisible,
+    isComposing,
+    searchRequestKey,
     regexValidation.message,
     regexValidation.valid,
-    scopes,
     workspaceReady
   ]);
-
-  useEffect(() => {
-    if (!workspaceReady) return;
-    if (skipRestoredSizesRef.current) {
-      skipRestoredSizesRef.current = false;
-      setDirectorySizesLoading(false);
-      return;
-    }
-    const paths = results
-      .filter(
-        (item) =>
-          item.isDirectory && !directorySizes.has(normalizeScopePath(item.path))
-      )
-      .slice(0, 180)
-      .map((item) => item.path);
-    const sequence = ++sizeSequence.current;
-    if (paths.length === 0) {
-      setDirectorySizesLoading(false);
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setDirectorySizesLoading(true);
-      void api
-        .directorySizes(paths)
-        .then((items) => {
-          if (sequence !== sizeSequence.current) return;
-          setDirectorySizes((current) => {
-            const next = new Map(current);
-            for (const item of items) {
-              next.set(normalizeScopePath(item.path), item);
-            }
-            return next;
-          });
-        })
-        .catch((reason) => {
-          if (sequence === sizeSequence.current) {
-            notify(
-              "error",
-              ui("部分文件夹大小计算失败：", "Some folder sizes could not be calculated: ") +
-                (reason instanceof Error ? reason.message : String(reason))
-            );
-          }
-        })
-        .finally(() => {
-          if (sequence === sizeSequence.current) setDirectorySizesLoading(false);
-        });
-    }, 320);
-    return () => window.clearTimeout(timer);
-  }, [notify, results, workspaceReady]);
 
   const displayedResults = useMemo(() => {
     return results.map((item) => {
@@ -810,14 +811,7 @@ export function SearchView({
     });
   }, [directorySizes, results]);
 
-  const activeResultCount =
-    mode === "name" ? displayedResults.length : contentResults.length;
   const activeHasMore = mode === "name" ? nameHasMore : contentHasMore;
-  const virtualList = useVirtualList(
-    activeResultCount,
-    mode === "name" ? 58 : 82,
-    10
-  );
   const virtualNameResults = displayedResults.slice(
     virtualList.start,
     virtualList.end
@@ -827,14 +821,60 @@ export function SearchView({
     virtualList.end
   );
 
+  const visibleSizePaths = useMemo(() => results
+    .slice(virtualList.start, virtualList.end)
+    .filter((item) => item.isDirectory && !directorySizes.has(normalizeScopePath(item.path)))
+    .slice(0, 24)
+    .map((item) => item.path), [results, directorySizes, virtualList.start, virtualList.end]);
+
+  useEffect(() => {
+    const sequence = ++sizeSequence.current;
+    setDirectorySizesLoading(false);
+    if (!workspaceReady || !pageVisible || isComposing || loading || mode !== "name" || !effectiveQuery || error) return;
+    if (skipRestoredSizesRef.current) {
+      skipRestoredSizesRef.current = false;
+      return;
+    }
+    if (visibleSizePaths.length === 0) return;
+    // Let typing and the first result paint finish before optional disk work.
+    // Only size the visible rows, rather than recursively walking 180 folders.
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState === "hidden") return;
+      setDirectorySizesLoading(true);
+      void api.directorySizes(visibleSizePaths)
+        .then((items) => {
+          if (sequence !== sizeSequence.current || document.visibilityState === "hidden") return;
+          startTransition(() => setDirectorySizes((current) => {
+            const next = new Map(current);
+            for (const item of items) next.set(normalizeScopePath(item.path), item);
+            while (next.size > 512) next.delete(next.keys().next().value!);
+            return next;
+          }));
+        })
+        .catch((reason) => {
+          if (sequence === sizeSequence.current && document.visibilityState !== "hidden") {
+            notify("error", ui("部分文件夹大小计算失败：", "Some folder sizes could not be calculated: ") +
+              (reason instanceof Error ? reason.message : String(reason)));
+          }
+        })
+        .finally(() => {
+          if (sequence === sizeSequence.current) setDirectorySizesLoading(false);
+        });
+    }, 700);
+    return () => {
+      window.clearTimeout(timer);
+      if (sequence === sizeSequence.current) ++sizeSequence.current;
+    };
+  }, [effectiveQuery, error, filters, isComposing, loading, mode, notify, pageVisible, query, ui, visibleSizePaths, workspaceReady]);
+
   useEffect(() => {
     virtualList.resetScroll();
   }, [contentScope, filters, mode, query, virtualList.resetScroll]);
 
   const loadMoreResults = useCallback(async () => {
-    const value = query.trim();
+    const value = effectiveQuery;
     const hasMore = mode === "name" ? nameHasMore : contentHasMore;
-    if (!value || !hasMore || loading || loadingMoreRef.current) return;
+    if (!pageVisible || isComposing || !value || !hasMore || loading || loadingMoreRef.current) return;
     const sequence = ++pageRequestSequence.current;
     loadingMoreRef.current = true;
     setLoadingMore(true);
@@ -846,6 +886,7 @@ export function SearchView({
           value,
           {
             ...filters,
+            keywords: activeKeywords,
             kind: deriveKind(categories),
             scope: scopes[0] ?? "*",
             scopes
@@ -869,6 +910,8 @@ export function SearchView({
       } else {
         const restoredBootstrap = !contentCursor && contentResultsRef.current.length > 0;
         const page = await api.searchContentPage(value, contentScope, {
+          keywords: activeKeywords,
+          keywordMatch: "any",
           regex: filters.regex,
           caseSensitive: filters.caseSensitive,
           sortBy: filters.sortBy,
@@ -911,6 +954,8 @@ export function SearchView({
     loading,
     loadingMore,
     mode,
+    pageVisible,
+    isComposing,
     nameCursor,
     nameHasMore,
     query,
@@ -929,7 +974,7 @@ export function SearchView({
   );
 
   useEffect(() => {
-    if (!activeHasMore || loading || loadingMore) return;
+    if (!pageVisible || isComposing || !activeHasMore || loading || loadingMore) return;
     const frame = window.requestAnimationFrame(() => {
       const element = virtualList.containerRef.current;
       if (element && element.scrollHeight <= element.clientHeight + 360) {
@@ -943,6 +988,8 @@ export function SearchView({
     loadMoreResults,
     loading,
     loadingMore,
+    pageVisible,
+    isComposing,
     virtualList.containerRef
   ]);
 
@@ -1194,7 +1241,7 @@ export function SearchView({
   );
 
   const resetFilters = () => {
-    setFilters(defaultFilters());
+    setFilters((current) => ({ ...defaultFilters(), keywords: current.keywords }));
     setExtensionInput("");
     setDatePreset("any");
   };
@@ -1283,7 +1330,7 @@ export function SearchView({
           ui("全部收藏", "All saved searches");
 
   const saveBookmark = async () => {
-    if (!query.trim()) {
+    if (!effectiveQuery) {
       notify("error", ui("请先输入要保存的搜索内容", "Enter a query before saving this search"));
       return;
     }
@@ -1295,7 +1342,7 @@ export function SearchView({
       notify("success", ui("当前搜索和筛选条件已经在书签中", "This query and its filters are already saved"));
       return;
     }
-    const baseName = query.trim().slice(0, 48);
+    const baseName = effectiveQuery.slice(0, 48);
     const existingNames = new Set(
       bookmarks.map((bookmark) => bookmark.name.toLocaleLowerCase())
     );
@@ -1473,7 +1520,7 @@ export function SearchView({
   const applyBookmark = (bookmark: SearchBookmark) => {
     setMode(bookmark.mode);
     setQuery(bookmark.query);
-    setFilters(structuredClone(bookmark.filters));
+    setFilters({ ...structuredClone(bookmark.filters), keywordMatch: "any" });
     setFilterPanelOpen(bookmark.filterPanelOpen);
     setExtensionInput(bookmark.extensionInput);
     setDatePreset(bookmark.datePreset);
@@ -1505,7 +1552,7 @@ export function SearchView({
   const showResultMenu = (event: MouseEvent, item: SearchResult) => {
     event.preventDefault();
     event.stopPropagation();
-    setSelectedPath(item.path);
+    resultSelection.selectContextPath(item.path);
     setContextMenu({
       item,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 360)),
@@ -1807,11 +1854,60 @@ export function SearchView({
       <section className="search-console glass-card">
         <div className="search-input-wrap">
           {mode === "name" ? <Search size={23} /> : <FileText size={23} />}
+          <div className="search-keyword-editor">
+          {keywords.map((keyword, index) => (
+            <span className="search-keyword-chip" key={index}>
+              {editingKeyword === index ? (
+                <input
+                  autoFocus
+                  aria-label={ui("编辑关键词", "Edit keyword")}
+                  value={keyword}
+                  onCompositionStart={() => setIsComposing(true)}
+                  onCompositionEnd={() => setIsComposing(false)}
+                  maxLength={1024}
+                  onChange={(event) => setFilters((current) => ({ ...current, keywords: (current.keywords ?? []).map((term, position) => position === index ? event.target.value : term) }))}
+                  onBlur={() => setEditingKeyword(undefined)}
+                  onKeyDown={(event) => {
+                    if (!event.nativeEvent.isComposing && (event.key === "Enter" || event.key === "Escape")) {
+                      event.preventDefault();
+                      setEditingKeyword(undefined);
+                      setFilters((current) => ({ ...current, keywords: searchKeywords(current.keywords) }));
+                      searchInputRef.current?.focus();
+                    }
+                  }}
+                />
+              ) : (
+                <button type="button" onClick={() => setEditingKeyword(index)} title={ui("点击编辑关键词", "Click to edit keyword")}>{keyword || ui("输入关键词", "Enter keyword")}</button>
+              )}
+              <button type="button" className="search-keyword-remove" aria-label={ui(`移除关键词 ${keyword}`, `Remove keyword ${keyword}`)} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEditingKeyword(undefined); setFilters((current) => ({ ...current, keywords: (current.keywords ?? []).filter((_, position) => position !== index) })); }}><X size={13} /></button>
+            </span>
+          ))}
           <input
             ref={searchInputRef}
             autoFocus
             value={query}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
+            maxLength={1024}
+            readOnly={keywords.length >= 32}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (isComposing || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+              if ((event.key === "Backspace" || event.key === "Delete") && query.length === 0 && keywords.length > 0) {
+                event.preventDefault();
+                setEditingKeyword(undefined);
+                setFilters((current) => ({ ...current, keywords: (current.keywords ?? []).slice(0, -1) }));
+                return;
+              }
+              if (event.key !== "Enter" || !query.trim()) return;
+              event.preventDefault();
+              if (keywords.length >= 32) {
+                notify("error", ui("最多支持 32 个关键词", "Up to 32 keywords are supported"));
+                return;
+              }
+              setFilters((current) => ({ ...current, keywords: searchKeywords(current.keywords, query) }));
+              setQuery("");
+            }}
             placeholder={
               mode === "name"
                 ? filters.regex
@@ -1825,8 +1921,9 @@ export function SearchView({
             }
             spellCheck={false}
           />
+          </div>
           {loading && <span className="spinner" />}
-          {query && (
+          {effectiveQuery && (
             <button
               className="add-search-bookmark"
               type="button"
@@ -1837,13 +1934,14 @@ export function SearchView({
               <span>{savingBookmark ? ui("添加中…", "Saving…") : ui("添加书签", "Save search")}</span>
             </button>
           )}
-          {query && !loading && (
-            <button type="button" onClick={() => setQuery("")} aria-label={ui("清空搜索", "Clear search")}>
+          {effectiveQuery && !loading && (
+            <button type="button" onClick={() => { setQuery(""); setEditingKeyword(undefined); setFilters((current) => ({ ...current, keywords: [] })); }} aria-label={ui("清空搜索", "Clear search")}>
               <X size={18} />
             </button>
           )}
           <kbd>Ctrl K</kbd>
         </div>
+        <p className="search-keyword-hint">{ui("回车确认关键词，点击标签可编辑", "Press Enter to add a keyword; click a tag to edit")}</p>
 
         {mode === "name" ? (
           <>
@@ -2377,7 +2475,7 @@ export function SearchView({
         )}
       </section>
 
-      {query ? (
+      {effectiveQuery ? (
         <section className="results-panel glass-card">
           <div className="results-head">
             <span>{loading ? ui("正在查询…", "Searching…") : resultCountLabel}</span>
@@ -2471,11 +2569,17 @@ export function SearchView({
             </EmptyState>
           ) : mode === "name" && displayedResults.length > 0 ? (
             <div
-              className="result-list virtual-result-list"
+              className={`result-list virtual-result-list ${resultSelection.rectangle ? "search-selection-dragging" : ""}`}
               ref={virtualList.containerRef}
               onScroll={handleResultScroll}
+              onPointerDown={resultSelection.onPointerDown}
+              onClickCapture={resultSelection.onClickCapture}
+              onDoubleClickCapture={resultSelection.onDoubleClickCapture}
+              role="listbox"
+              aria-multiselectable="true"
               aria-busy={loadingMore}
             >
+              {resultSelection.rectangle && <div className="search-selection-marquee" style={resultSelection.rectangle} aria-hidden="true" />}
               {virtualList.paddingTop > 0 && (
                 <div className="virtual-list-spacer" style={{ height: virtualList.paddingTop }} />
               )}
@@ -2487,14 +2591,15 @@ export function SearchView({
                 return (
                   <div
                     className={`result-row result-grid-row path-openable ${
-                      selectedPath === item.path ? "selected" : ""
+                      selectedPaths.has(item.path) ? "selected" : ""
                     } ${openClassNameFor(item.path)}`}
                     style={resultGridStyle}
                     key={item.path}
-                    onClick={() => setSelectedPath(item.path)}
+                    onClick={(event) => resultSelection.selectPath(item.path, event.ctrlKey || event.metaKey)}
                     onDoubleClick={(event) => openFromDoubleClick(event, item.path)}
                     onContextMenu={(event) => showResultMenu(event, item)}
-                    aria-selected={selectedPath === item.path}
+                    role="option"
+                    aria-selected={selectedPaths.has(item.path)}
                   >
                     <div className="result-name-cell">
                       <div className={`file-type-icon ${item.isDirectory ? "folder" : "file"}`}>
@@ -2578,11 +2683,17 @@ export function SearchView({
                 <span>{ui("大小 / 修改时间", "Size / modified")}</span>
               </div>
               <div
-                className="result-list content-results virtual-result-list"
+                className={`result-list content-results virtual-result-list ${resultSelection.rectangle ? "search-selection-dragging" : ""}`}
                 ref={virtualList.containerRef}
                 onScroll={handleResultScroll}
+                onPointerDown={resultSelection.onPointerDown}
+                onClickCapture={resultSelection.onClickCapture}
+                onDoubleClickCapture={resultSelection.onDoubleClickCapture}
+                role="listbox"
+                aria-multiselectable="true"
                 aria-busy={loadingMore}
               >
+                {resultSelection.rectangle && <div className="search-selection-marquee" style={resultSelection.rectangle} aria-hidden="true" />}
                 {virtualList.paddingTop > 0 && (
                   <div
                     className="virtual-list-spacer"
@@ -2602,12 +2713,14 @@ export function SearchView({
                 return (
                   <div
                     className={`result-row content-row path-openable ${
-                      selectedPath === item.path ? "selected" : ""
+                      selectedPaths.has(item.path) ? "selected" : ""
                     } ${openClassNameFor(item.path)}`}
                     key={item.path}
-                    onClick={() => setSelectedPath(item.path)}
+                    onClick={(event) => resultSelection.selectPath(item.path, event.ctrlKey || event.metaKey)}
                     onDoubleClick={(event) => openFromDoubleClick(event, item.path)}
                     onContextMenu={(event) => showResultMenu(event, contextItem)}
+                    role="option"
+                    aria-selected={selectedPaths.has(item.path)}
                   >
                     <div className="file-type-icon file">
                       <FileText size={18} />

@@ -22,6 +22,7 @@ import {
 
 const RELEASE_API =
   "https://api.github.com/repos/PuppetWen/CDriveShiftAI/releases/latest";
+const RELEASE_BASE = "https://github.com/PuppetWen/CDriveShiftAI/releases";
 const CACHE_DURATION_MS = 15 * 60_000;
 const DOWNLOAD_RETRIES = 3;
 const MANIFEST_NAME = "update-manifest.json";
@@ -276,6 +277,12 @@ function githubHeaders(version: string): Record<string, string> {
   };
 }
 
+class ReleaseCheckError extends Error {
+  constructor(message: string, readonly code: string) {
+    super(message);
+  }
+}
+
 export function summarizeProxyRules(rules: string): Pick<UpdateNetworkRoute, "mode" | "label"> {
   const candidates = rules
     .split(";")
@@ -312,6 +319,7 @@ function safeManifest(value: unknown): UpdateManifest | undefined {
   if (
     input.schemaVersion !== 1 ||
     typeof input.version !== "string" ||
+    !/^\d+\.\d+\.\d+$/.test(input.version) ||
     !input.assets
   ) {
     return undefined;
@@ -319,8 +327,10 @@ function safeManifest(value: unknown): UpdateManifest | undefined {
   const validAsset = (asset: ManifestAsset | undefined) =>
     asset &&
     typeof asset.name === "string" &&
+    asset.name.length > 0 &&
     path.basename(asset.name) === asset.name &&
-    !/[\u0000-\u001f]/.test(asset.name) &&
+    !/[\u0000-\u001f<>:"/\\|?*]/.test(asset.name) &&
+    !/[. ]$/.test(asset.name) &&
     Number.isSafeInteger(asset.size) &&
     asset.size > 0 &&
     typeof asset.sha512 === "string" &&
@@ -338,6 +348,8 @@ export class UpdateService {
   private abortController?: AbortController;
   private lastProgressAt = 0;
   private networkResolvedAt = 0;
+  private checkInFlight?: Promise<AppUpdateInfo>;
+  private apiRetryAt = 0;
 
   constructor(
     private readonly onState: (state: AppUpdateInfo) => void,
@@ -412,15 +424,20 @@ export class UpdateService {
         const response = await this.networkFetch(
           url,
           {
-            headers: githubHeaders(currentVersion),
-            signal: AbortSignal.timeout(CHECK_REQUEST_TIMEOUT_MS)
+            headers: new URL(url).hostname === "api.github.com"
+              ? githubHeaders(currentVersion)
+              : { "User-Agent": `CDriveShiftAI/${currentVersion}`, Accept: "*/*" },
+            signal: AbortSignal.timeout(CHECK_REQUEST_TIMEOUT_MS),
+            cache: "no-store",
+            redirect: "follow"
           },
           refreshRoute && attempt === 1
         );
         if (
           attempt < CHECK_REQUEST_ATTEMPTS &&
-          (response.status === 408 || response.status === 429 || response.status >= 500)
+          (response.status === 408 || response.status >= 500)
         ) {
+          await response.body?.cancel();
           await delay(450 * attempt);
           continue;
         }
@@ -449,12 +466,96 @@ export class UpdateService {
   }
 
   async check(force = false): Promise<AppUpdateInfo> {
+    // Startup, Settings, and the sidebar can all request a check at once.
+    if (this.checkInFlight) return this.checkInFlight;
     const now = Date.now();
     if (!force && this.cached && now - this.cached.at < CACHE_DURATION_MS) {
       this.state = clone(this.cached.result);
       return this.getState();
     }
 
+    this.checkInFlight = this.performCheck();
+    try {
+      return await this.checkInFlight;
+    } finally {
+      this.checkInFlight = undefined;
+    }
+  }
+
+  private async releaseApiError(response: Response): Promise<ReleaseCheckError> {
+    const body = await response.text().catch(() => "");
+    const rateLimited = response.status === 429 ||
+      (response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || /rate.limit/i.test(body)));
+    if (rateLimited) {
+      const reset = Number(response.headers.get("x-ratelimit-reset")) * 1000;
+      const retryAfter = response.headers.get("retry-after");
+      const retry = retryAfter && /^\d+$/.test(retryAfter)
+        ? Date.now() + Number(retryAfter) * 1000
+        : Date.parse(retryAfter ?? "");
+      this.apiRetryAt = Math.max(Date.now() + 60_000, Number.isFinite(reset) ? reset : 0, Number.isFinite(retry) ? retry : 0);
+      return new ReleaseCheckError("GitHub API 请求额度已耗尽（当前网络出口共享限额），代理连接已到达 GitHub", "CHECK_RATE_LIMITED");
+    }
+    return new ReleaseCheckError(
+      response.status === 403
+        ? "GitHub API 拒绝访问（HTTP 403），可能是网络出口策略限制"
+        : `GitHub Release API 返回 HTTP ${response.status}`,
+      response.status === 403 ? "CHECK_FORBIDDEN" : "CHECK_FAILED"
+    );
+  }
+
+  private async fetchPublicRelease(currentVersion: string): Promise<{ release: GitHubRelease; manifest: UpdateManifest }> {
+    // net.fetch neither supports observing a manual redirect nor preserves the
+    // final Response.url in current Electron. ClientRequest exposes redirect
+    // events directly and uses the same Chromium/system-proxy network stack.
+    // Read only the official latest->tag redirect; no HTML parsing is required.
+    await this.resolveNetworkRoute(`${RELEASE_BASE}/latest`, true);
+    const location = await new Promise<string>((resolve, reject) => {
+      const request = net.request({ url: `${RELEASE_BASE}/latest`, redirect: "manual" });
+      let settled = false;
+      const finish = (error?: Error, redirectUrl?: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve(redirectUrl!);
+        request.abort();
+      };
+      const timer = setTimeout(() => finish(new Error("官方发布页面连接超时")), CHECK_REQUEST_TIMEOUT_MS);
+      request.on("redirect", (_status, _method, redirectUrl) => finish(undefined, redirectUrl));
+      request.on("response", (response) => finish(new Error(`官方发布页面返回 HTTP ${response.statusCode}，没有正式版本重定向`)));
+      request.on("error", (error) => finish(error));
+      request.setHeader("User-Agent", `CDriveShiftAI/${currentVersion}`);
+      request.setHeader("Cache-Control", "no-cache");
+      request.end();
+    });
+    const releaseUrl = new URL(location, RELEASE_BASE);
+    const prefix = `${new URL(RELEASE_BASE).pathname}/tag/`;
+    if (releaseUrl.origin !== "https://github.com" || !releaseUrl.pathname.startsWith(prefix) || releaseUrl.search || releaseUrl.hash) {
+      throw new Error("官方发布页面重定向地址无效");
+    }
+    const tag = decodeURIComponent(releaseUrl.pathname.slice(prefix.length));
+    if (!/^v?\d+\.\d+\.\d+$/.test(tag)) {
+      throw new Error("官方发布页面版本地址无效");
+    }
+    const manifestResponse = await this.fetchForUpdateCheck(`${RELEASE_BASE}/download/${encodeURIComponent(tag)}/${MANIFEST_NAME}`, currentVersion);
+    if (!manifestResponse.ok) throw new Error(`官方发布清单返回 HTTP ${manifestResponse.status}`);
+    const manifest = safeManifest(await manifestResponse.json());
+    if (!manifest || manifest.version !== tag.replace(/^v/, "")) throw new Error("官方发布清单校验失败或版本不一致");
+    return {
+      manifest,
+      release: {
+        tag_name: tag,
+        name: `CDriveShiftAI ${manifest.version}`,
+        html_url: `${RELEASE_BASE}/tag/${encodeURIComponent(tag)}`,
+        assets: [manifest.assets.installer, manifest.assets.portable].map((asset) => ({
+          name: asset.name,
+          size: asset.size,
+          browser_download_url: `${RELEASE_BASE}/download/${encodeURIComponent(tag)}/${encodeURIComponent(asset.name)}`
+        }))
+      }
+    };
+  }
+
+  private async performCheck(): Promise<AppUpdateInfo> {
     const currentVersion = app.getVersion();
     const checkedAt = new Date().toISOString();
     this.setState({
@@ -464,15 +565,27 @@ export class UpdateService {
       errorCode: undefined
     });
     try {
-      const response = await this.fetchForUpdateCheck(
-        RELEASE_API,
-        currentVersion,
-        true
-      );
-      if (!response.ok) {
-        throw new Error(`GitHub Release 返回 HTTP ${response.status}`);
+      let release: GitHubRelease;
+      let manifest: UpdateManifest | undefined;
+      let usedPublicManifest = false;
+      try {
+        if (Date.now() < this.apiRetryAt) throw new ReleaseCheckError("GitHub API 仍在限流冷却期", "CHECK_RATE_LIMITED");
+        const response = await this.fetchForUpdateCheck(RELEASE_API, currentVersion, true);
+        if (!response.ok) throw await this.releaseApiError(response);
+        release = (await response.json()) as GitHubRelease;
+      } catch (apiError) {
+        logger.warn("update.api_unavailable", { error: serializeError(apiError) });
+        try {
+          ({ release, manifest } = await this.fetchPublicRelease(currentVersion));
+          usedPublicManifest = true;
+          logger.info("update.public_manifest_fallback", { version: manifest.version });
+        } catch (fallbackError) {
+          throw new ReleaseCheckError(
+            `${apiError instanceof Error ? apiError.message : String(apiError)}；官方发布清单也未能获取：${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+            apiError instanceof ReleaseCheckError ? apiError.code : "CHECK_FAILED"
+          );
+        }
       }
-      const release = (await response.json()) as GitHubRelease;
       if (release.draft || release.prerelease || !release.tag_name) {
         throw new Error("尚未找到可用的正式版本");
       }
@@ -495,8 +608,7 @@ export class UpdateService {
       const manifestReleaseAsset = assets.find(
         (asset) => asset.name.toLocaleLowerCase() === MANIFEST_NAME
       );
-      let manifest: UpdateManifest | undefined;
-      if (updateAvailable && manifestReleaseAsset) {
+      if (!manifest && updateAvailable && manifestReleaseAsset) {
         try {
           const manifestResponse = await this.fetchForUpdateCheck(
             manifestReleaseAsset.downloadUrl,
@@ -542,16 +654,18 @@ export class UpdateService {
         releaseSections: releaseNotes.sections,
         assets,
         selectedAsset,
-        message: updateAvailable
+        message: (updateAvailable
           ? canAutoUpdate
             ? `发现新版本 ${latestVersion}，可自动下载并更新`
-            : `发现新版本 ${latestVersion}，但该 Release 缺少自动更新清单`
-          : `当前已是最新版本 ${currentVersion}`,
+            : distribution === "development"
+              ? `发现新版本 ${latestVersion}，开发模式请前往发布页下载`
+              : `发现新版本 ${latestVersion}，但该 Release 缺少自动更新清单`
+          : `当前已是最新版本 ${currentVersion}`) + (usedPublicManifest ? "（已通过 GitHub 官方发布清单检查）" : ""),
         checkedAt,
         network: this.state.network
       };
       this.state = result;
-      this.cached = { at: now, result: clone(result) };
+      this.cached = { at: Date.now(), result: clone(result) };
       this.onState(this.getState());
       return this.getState();
     } catch (error) {
@@ -573,7 +687,7 @@ export class UpdateService {
           ? `已知新版本 ${this.state.latestVersion}；本次联网复查失败：${errorMessage}`
           : `暂时无法检查更新：${errorMessage}`,
         checkedAt,
-        errorCode: /超时/.test(errorMessage) ? "CHECK_TIMEOUT" : "CHECK_FAILED"
+        errorCode: error instanceof ReleaseCheckError ? error.code : /超时/.test(errorMessage) ? "CHECK_TIMEOUT" : "CHECK_FAILED"
       });
     }
   }

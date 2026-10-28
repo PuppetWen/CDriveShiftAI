@@ -59,6 +59,36 @@ describe("controlled force deletion", () => {
     expect(matches[0]?.canTerminate).toBe(false);
   });
 
+  it("allows SCM stopping of a verified non-critical third-party service", () => {
+    const matches = matchProcessesForTarget([{
+      pid: 4101, name: "vendor.exe", executablePath: "E:\\Tools\\Vendor\\vendor.exe", creationTime: "1230",
+      fileHandleMatch: true, protectedProcess: true, critical: false, serviceName: "VendorWorker", serviceCanStop: true
+    }], "E:\\Tools\\Vendor", true);
+    expect(matches[0]).toMatchObject({ canTerminate: true, serviceName: "VendorWorker" });
+  });
+
+  it.each([
+    { executablePath: "C:\\Windows\\System32\\vendor.exe", critical: false, serviceCanStop: true },
+    { executablePath: "E:\\Tools\\Vendor\\vendor.exe", critical: true, serviceCanStop: true },
+    { executablePath: "E:\\Tools\\Vendor\\vendor.exe", critical: false, serviceCanStop: false },
+    { executablePath: "E:\\Tools\\Vendor\\vendor.exe", critical: undefined, serviceCanStop: true }
+  ])("protects system, critical, unverified or non-stoppable services (%j)", (properties) => {
+    const matches = matchProcessesForTarget([{
+      pid: 4101, name: "vendor.exe", creationTime: "1230", fileHandleMatch: true, protectedProcess: true,
+      serviceName: "VendorWorker", ...properties
+    }], "E:\\Target", true);
+    expect(matches[0]).toMatchObject({ canTerminate: false });
+  });
+
+  it("does not kill a service merely because a user-session lock is otherwise unprotected", () => {
+    const matches = matchProcessesForTarget([{
+      pid: 4101, name: "vendor.exe", creationTime: "1230", fileHandleMatch: true,
+      protectedProcess: false, critical: false, serviceName: "VendorWorker", serviceCanStop: false,
+      executablePath: "E:\\Tools\\Vendor\\vendor.exe"
+    }], "E:\\Target", true);
+    expect(matches[0]).toMatchObject({ canTerminate: false, serviceName: "VendorWorker" });
+  });
+
   it("canonicalizes long-path prefixes before applying protection", () => {
     expect(normalizeForceDeletePath("\\\\?\\C:\\Windows\\System32")).toBe("C:\\Windows\\System32");
     expect(normalizeForceDeletePath("\\\\?\\UNC\\server\\share\\folder")).toBe("\\\\server\\share\\folder");
@@ -110,6 +140,24 @@ function busyError(target: string, code = "EBUSY") {
 }
 
 windowsDescribe("force deletion filesystem and process boundaries", () => {
+  it("stops a confirmed third-party service through SCM without killing its process", async () => {
+    const fixture = await createFixture();
+    const record = { ...fixture.records[0], executablePath: path.join(fixture.target, "worker.exe"),
+      serviceName: "VendorWorker", serviceCanStop: true, protectedProcess: true };
+    const stopService = vi.fn(async () => true);
+    fixture.operations.remove.mockRejectedValueOnce(busyError(fixture.target));
+    const service = new ForceDeleteService(fixture.options, { ...fixture.operations, stopService,
+      listProcesses: async () => [record], listFileLocks: async () => ({ processes: [{ pid: record.pid,
+        name: record.name, creationTime: record.creationTime, protected: true, critical: false }], warnings: [] })
+    });
+    const preview = await service.preview(fixture.target);
+    expect(preview.processes[0]).toMatchObject({ canTerminate: true, serviceName: "VendorWorker" });
+    const result = await service.execute(preview.verificationId);
+    expect(result.deleted).toBe(true);
+    expect(stopService).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ pid: record.pid, serviceName: "VendorWorker" }));
+    expect(fixture.operations.terminateProcess).not.toHaveBeenCalled();
+  });
+
   it("requests elevation only after ordinary deletion and its retry fail", async () => {
     const fixture = await createFixture();
     const removeElevated = vi.fn(async (request: { path: string }) => { await rm(request.path, { recursive: true }); });
@@ -215,9 +263,18 @@ windowsDescribe("force deletion filesystem and process boundaries", () => {
       { ...records[0], pid: 541002 }
     ]);
     operations.remove.mockRejectedValue(busyError(target));
-    await expect(service.execute(preview.verificationId)).rejects.toThrow("EBUSY");
+    await expect(service.execute(preview.verificationId)).rejects.toThrow("新增或身份变化的占用进程");
     expect(operations.terminateProcess).not.toHaveBeenCalled();
     expect(await readFile(path.join(target, "test.txt"), "utf8")).toBe("payload");
+  });
+
+  it("keeps the same confirmed Windows process eligible when metadata changes name casing", async () => {
+    const { service, target, operations, records } = await createFixture();
+    const preview = await service.preview(target);
+    operations.listProcesses.mockResolvedValue([{ ...records[0], name: "EDITOR.EXE" }]);
+    operations.remove.mockRejectedValueOnce(busyError(target));
+    await expect(service.execute(preview.verificationId)).resolves.toMatchObject({ deleted: true });
+    expect(operations.terminateProcess).toHaveBeenCalledExactlyOnceWith(541001, "123");
   });
 
   it("retries deletion even if an unrelated listed process could not be stopped", async () => {

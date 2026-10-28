@@ -15,7 +15,7 @@ export interface ElevatedDeleteRequest {
   applicationExecutable: string;
   applicationDataRoot: string;
   applicationProcessId?: number;
-  processes?: Array<{ pid: number; creationTime: string; name: string; executablePath?: string }>;
+  processes?: Array<{ pid: number; creationTime: string; name: string; executablePath?: string; serviceName?: string }>;
 }
 
 interface DeletePayload extends ElevatedDeleteRequest {
@@ -61,10 +61,19 @@ public static class CShiftElevatedDelete {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, IntPtr data, uint size);
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessCritical(IntPtr process, out bool critical);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint desired, out IntPtr token);
   [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool LookupPrivilegeValue(string system, string name, out Luid luid);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disable, ref Privileges privileges, uint size, IntPtr previous, IntPtr length);
-  static void Fail(int code, string operation, string name) { throw new Win32Exception(code, operation + ": " + name); }
+  static void Fail(int code, string operation, string name) {
+    var error=new Win32Exception(code, operation + ": " + name);
+    error.Data["path"]=name; error.Data["operation"]=operation;
+    throw error;
+  }
+  public static bool CanTerminate(IntPtr process) {
+    bool critical;
+    return IsProcessCritical(process, out critical) && !critical;
+  }
   static string Clean(string name) { return name.StartsWith(@"\\?\", StringComparison.Ordinal) ? name.Substring(4) : name; }
   static bool Same(string first, string second) { return String.Equals(first.TrimEnd('\\'), second.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
   static bool Within(string candidate, string parent) { return Same(candidate, parent) || candidate.StartsWith(parent.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase); }
@@ -157,7 +166,8 @@ public static class CShiftElevatedDelete {
       if(!Same(FinalName(handle,name),name)) Fail(125,"Parent path changed",name);
       if(expected!=null) Identity(info,expected,name);
       bool link=(info.Attributes & Reparse)!=0;
-      if(!link && (info.Attributes & DirectoryFlag)!=0) {
+      bool directory=!link && (info.Attributes & DirectoryFlag)!=0;
+      if(directory) {
         List<string> children;
         // Only directory enumeration needs LIST_DIRECTORY. A second handle
         // shares DELETE with our already-pinned primary handle, which continues
@@ -174,12 +184,29 @@ public static class CShiftElevatedDelete {
       try {
         // Modern Windows can ignore ReadOnly for this unlink without changing
         // attributes shared by a hard link outside the selected tree.
-        Marshal.WriteInt32(deletion,0x13); // DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
-        if(!SetFileInformationByHandle(handle,21,deletion,4)) {
+        for(int attempt=0; ; attempt++) {
+          Marshal.WriteInt32(deletion,0x13); // DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
+          if(SetFileInformationByHandle(handle,21,deletion,4)) break;
           int code=Marshal.GetLastWin32Error();
-          if(code!=1 && code!=50 && code!=87) Fail(code,"Delete exact file object",name);
-          Marshal.WriteByte(deletion,1);
-          if(!SetFileInformationByHandle(handle,4,deletion,1)) Fail(Marshal.GetLastWin32Error(),"Delete exact file object",name);
+          if(code==1 || code==50 || code==87) {
+            Marshal.WriteByte(deletion,1);
+            if(SetFileInformationByHandle(handle,4,deletion,1)) break;
+            code=Marshal.GetLastWin32Error();
+          }
+          // Indexers, sync clients and antivirus can release handles shortly
+          // after the confirmed writer exits. Keep this exact directory pinned
+          // and retry a bounded number of times, including newly arrived files.
+          if(directory && code==145 && attempt<3) {
+            System.Threading.Thread.Sleep(100*(attempt+1));
+            List<string> remaining;
+            using(var enumeration=Open(name,1,7)) { remaining=Children(enumeration,name); }
+            foreach(string child in remaining) {
+              try { RemoveNode(child,null,roots,depth+1); }
+              catch(Win32Exception ex) { if(ex.NativeErrorCode!=2 && ex.NativeErrorCode!=3) throw; }
+            }
+            continue;
+          }
+          Fail(code,"Delete exact file object",name);
         }
       } finally { Marshal.FreeHGlobal(deletion); }
     }
@@ -207,6 +234,7 @@ public static class CShiftElevatedDelete {
 
 const CHILD_SCRIPT = String.raw`
 $ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new()
 function Expand-Text([string]$value) {
   $inputBytes=[IO.MemoryStream]::new([Convert]::FromBase64String($value))
@@ -249,19 +277,38 @@ try {
       $actualPath=$processItem.MainModule.FileName
       $ticks=$processItem.StartTime.ToUniversalTime().Ticks.ToString()
       $expectedTicks=[string]$record.creationTime
-      $protectedExecutable=[string]::IsNullOrEmpty($actualPath)
-      foreach($root in @($request.protectedRoots)) {
-        if($actualPath -ieq [string]$root -or $actualPath.StartsWith(([string]$root).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { $protectedExecutable=$true; break }
+      # A normal terminal/editor can live under Windows. File deletion roots
+      # are not a process denylist; verify its live critical/session status.
+      $isService=-not [string]::IsNullOrEmpty([string]$record.serviceName)
+      $protectedExecutable=[string]::IsNullOrEmpty($actualPath) -or (-not $isService -and $processItem.SessionId -eq 0) -or -not [CShiftElevatedDelete]::CanTerminate($processItem.Handle)
+      if($isService) {
+        foreach($root in @($request.protectedRoots)) {
+          if($actualPath -ieq [string]$root -or $actualPath.StartsWith(([string]$root).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { $protectedExecutable=$true; break }
+        }
       }
       if($actualName -in $never -or $actualName -ine [string]$record.name -or $protectedExecutable -or (-not [string]::IsNullOrEmpty([string]$record.executablePath) -and $actualPath -ine [string]$record.executablePath) -or $actualPath.StartsWith($appRoot,[StringComparison]::OrdinalIgnoreCase) -or $ticks.Substring(0,$ticks.Length-1) -ne $expectedTicks.Substring(0,$expectedTicks.Length-1)) { continue }
-      $processItem.Kill()
-      $null=$processItem.WaitForExit(5000)
+      if($isService) {
+        $services=@(Get-CimInstance Win32_Service -Filter ('ProcessId='+[int]$record.pid))
+        if($services.Count -ne 1 -or $services[0].Name -ine [string]$record.serviceName -or -not $services[0].AcceptStop -or $services[0].State -ne 'Running') { continue }
+        $controller=[ServiceProcess.ServiceController]::new([string]$record.serviceName)
+        try {
+          if(@($controller.DependentServices | Where-Object {$_.Status -ne 'Stopped'}).Count -gt 0) { continue }
+          $controller.Stop()
+          $controller.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(8))
+          $null=$processItem.WaitForExit(5000)
+        } finally { $controller.Dispose() }
+      } else {
+        $processItem.Kill()
+        $null=$processItem.WaitForExit(5000)
+      }
     } catch { } finally { if($null -ne $processItem) { $processItem.Dispose() } }
   }
   [CShiftElevatedDelete]::Delete([string]$request.canonicalPath,[string]$request.expectedIdentity,[string[]]$request.protectedRoots)
   exit 0
 } catch {
-  [Console]::Error.WriteLine($_.Exception.ToString())
+  $failure=$_.Exception
+  while($null -ne $failure.InnerException) { $failure=$failure.InnerException }
+  [Console]::Error.WriteLine('CSHIFT_DELETE_ERROR:'+(ConvertTo-Json -Compress -InputObject @{ code=(Error-Code $_); path=[string]$failure.Data['path']; operation=[string]$failure.Data['operation'] }))
   exit (Error-Code $_)
 }
 `;
@@ -314,7 +361,21 @@ function normalizeLocalTarget(value: string): string {
   return normalized;
 }
 
-function elevatedFailure(error: unknown): Error {
+function nativeFailurePath(error: unknown, target: string): string | undefined {
+  const stderr = (error as { stderr?: unknown }).stderr;
+  if (typeof stderr !== "string") return undefined;
+  for (const line of stderr.split(/\r?\n/)) {
+    if (!line.startsWith("CSHIFT_DELETE_ERROR:")) continue;
+    try {
+      const value = JSON.parse(line.slice("CSHIFT_DELETE_ERROR:".length)) as { code?: unknown; path?: unknown };
+      if (Number(value.code) === Number((error as { code?: unknown }).code) && typeof value.path === "string" &&
+          value.path.length <= 32768 && /^[a-z]:\\/i.test(value.path) && isPathWithin(value.path, target)) return value.path;
+    } catch { /* Ignore malformed or interrupted helper output. */ }
+  }
+  return undefined;
+}
+
+function elevatedFailure(error: unknown, failedPath?: string): Error {
   const code = Number((error as { code?: unknown }).code);
   const messages: Record<number, string> = {
     5: "管理员 PowerShell 仍被访问权限或系统保护拒绝（Win32 5），请检查目标权限或使用对应应用卸载程序",
@@ -326,14 +387,15 @@ function elevatedFailure(error: unknown): Error {
     1223: "DELETE_ELEVATION_CANCELLED：已取消管理员权限授权（UAC），未继续管理员删除；重新检查后可再次确认并允许权限请求"
   };
   const message = messages[code] ?? `管理员 PowerShell 删除失败${Number.isFinite(code) ? `（Win32 ${code}）` : ""}：系统未能完成此操作，请检查目标状态后重试`;
-  return new Error([125, 126, 1223].includes(code) ? message : `DELETE_ELEVATION_FAILED：${message}`);
+  const detail = failedPath ? `${message}；失败位置：${failedPath}` : message;
+  return new Error([125, 126, 1223].includes(code) ? detail : `DELETE_ELEVATION_FAILED：${detail}`);
 }
 
 const DEFAULT_OPERATIONS: ElevatedDeleteOperations = {
   run: async (executable, args) => {
     // No timeout: killing just the UAC launcher could leave an elevated deletion
     // running while the UI incorrectly offers a second operation on this path.
-    await execFileAsync(executable, args, { windowsHide: true, maxBuffer: 1024 * 1024 });
+    await execFileAsync(executable, args, { cwd: path.dirname(executable), windowsHide: true, maxBuffer: 1024 * 1024 });
   }
 };
 
@@ -372,16 +434,17 @@ async function deleteUsingPowerShell(request: ElevatedDeleteRequest, elevate: bo
     await operations.run(path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args);
   } catch (error) {
     const nativeCode = Number((error as { code?: unknown }).code);
+    const failedPath = nativeFailurePath(error, canonicalPath);
     if ([2, 3].includes(nativeCode)) {
       try { await lstat(normalized); }
       catch (inspectionError) { if ((inspectionError as NodeJS.ErrnoException).code === "ENOENT") return; }
     }
-    if (elevate) throw elevatedFailure(error);
+    if (elevate) throw elevatedFailure(error, failedPath);
     const errorCode: Record<number, string> = { 5: "EPERM", 32: "EBUSY", 33: "EBUSY", 145: "ENOTEMPTY" };
     if (errorCode[nativeCode]) {
-      throw Object.assign(new Error(`PowerShell 精确删除失败（Win32 ${nativeCode}）：${normalized}`), { code: errorCode[nativeCode], path: normalized });
+      throw Object.assign(new Error(`PowerShell 精确删除失败（Win32 ${nativeCode}）：${failedPath ?? normalized}`), { code: errorCode[nativeCode], path: failedPath ?? normalized });
     }
-    throw elevatedFailure(error);
+    throw elevatedFailure(error, failedPath);
   }
   try {
     await lstat(normalized);
@@ -397,4 +460,40 @@ export async function deleteWithElevation(request: ElevatedDeleteRequest, operat
 
 export async function deleteWithoutElevation(request: ElevatedDeleteRequest, operations: ElevatedDeleteOperations = DEFAULT_OPERATIONS): Promise<void> {
   return deleteUsingPowerShell({ ...request, processes: undefined }, false, operations);
+}
+
+/** Stop a single confirmed third-party service through SCM; never kill it. */
+export async function stopConfirmedService(record: { pid: number; name: string; creationTime: string; executablePath: string; serviceName: string }): Promise<boolean> {
+  if (!Number.isInteger(record.pid) || record.pid <= 4 || !/^\d{2,}$/.test(record.creationTime) ||
+      !record.serviceName || record.serviceName.length > 256 || protectedReason(record.executablePath)) return false;
+  const data = Buffer.from(JSON.stringify(record), "utf8").toString("base64");
+  const script = String.raw`
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+$record=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}')) | ConvertFrom-Json
+Add-Type 'using System; using System.Runtime.InteropServices; public static class CShiftServiceSafety { [DllImport("kernel32.dll")] public static extern bool IsProcessCritical(IntPtr process, out bool critical); }'
+$target=$null; $controller=$null
+try {
+  $target=[Diagnostics.Process]::GetProcessById([int]$record.pid)
+  $critical=$true
+  if(-not [CShiftServiceSafety]::IsProcessCritical($target.Handle,[ref]$critical) -or $critical) { exit 2 }
+  $ticks=$target.StartTime.ToUniversalTime().Ticks.ToString(); $expected=[string]$record.creationTime
+  if($ticks.Substring(0,$ticks.Length-1) -ne $expected.Substring(0,$expected.Length-1) -or $target.ProcessName+'.exe' -ine [string]$record.name -or $target.MainModule.FileName -ine [string]$record.executablePath) { exit 2 }
+  $services=@(Get-CimInstance Win32_Service -Filter ('ProcessId='+[int]$record.pid))
+  if($services.Count -ne 1 -or $services[0].Name -ine [string]$record.serviceName -or -not $services[0].AcceptStop -or $services[0].State -ne 'Running') { exit 2 }
+  $controller=[ServiceProcess.ServiceController]::new([string]$record.serviceName)
+  if(@($controller.DependentServices | Where-Object {$_.Status -ne 'Stopped'}).Count -gt 0) { exit 2 }
+  $controller.Stop()
+  $controller.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(8))
+  $null=$target.WaitForExit(5000)
+  exit 0
+} catch { exit 1 } finally { if($null -ne $controller) { $controller.Dispose() }; if($null -ne $target) { $target.Dispose() } }
+`;
+  const powershell = path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  try {
+    await execFileAsync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+      cwd: path.dirname(powershell), windowsHide: true, timeout: 20_000, maxBuffer: 256 * 1024
+    });
+    return true;
+  } catch { return false; }
 }

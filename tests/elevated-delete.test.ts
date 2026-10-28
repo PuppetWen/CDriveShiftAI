@@ -136,7 +136,7 @@ describe.skipIf(process.platform !== "win32")("administrator PowerShell deletion
 describe.skipIf(process.platform !== "win32")("fixed deletion script with disposable Windows fixtures (no UAC)", () => {
   async function direct(request: ElevatedDeleteRequest) {
     const args = buildElevatedDeleteCommand({
-      ...request, protectedRoots: [path.dirname(request.applicationExecutable), request.applicationDataRoot], applicationProcessId: process.pid
+      ...request, protectedRoots: [process.env.SystemRoot || "C:\\Windows", path.dirname(request.applicationExecutable), request.applicationDataRoot], applicationProcessId: process.pid
     }, true);
     return execute(path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args,
       { windowsHide: true, maxBuffer: 1024 * 1024, timeout: 25_000 });
@@ -228,6 +228,7 @@ describe.skipIf(process.platform !== "win32")("fixed deletion script with dispos
         lock.stdout.once("data", (value) => String(value).includes("READY") ? resolve() : reject(new Error("Fixture lock did not start")));
       });
       await expect(direct(request)).rejects.toMatchObject({ code: 32 });
+      await expect(deleteWithoutElevation(request)).rejects.toMatchObject({ code: "EBUSY", path: selected });
       expect((await lstat(selected)).isFile()).toBe(true);
     } finally {
       lock.stdin.end("release\n");
@@ -262,6 +263,30 @@ describe.skipIf(process.platform !== "win32")("fixed deletion script with dispos
         expect(holder.exitCode).toBeNull();
       }
       await direct({ ...request, processes: [{ pid: holder.pid!, name: path.basename(executable), creationTime: stdout.trim() }] });
+      await stopped;
+      await expect(lstat(request.path)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (holder.exitCode === null) holder.stdin.end("release\n");
+      await stopped;
+    }
+  }, 30_000);
+
+  it("can finish a confirmed ordinary PowerShell lock holder even though its executable is installed under Windows", async () => {
+    const request = await requestFor();
+    const powershell = path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const source = "$file=[IO.File]::Open($env:CSHIFT_FIXTURE_FILE,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); try { [Console]::WriteLine([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString()); [Console]::ReadLine() | Out-Null } finally { $file.Dispose() }";
+    const holder = spawn(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(source, "utf16le").toString("base64")], {
+      windowsHide: true, env: { ...process.env, CSHIFT_FIXTURE_FILE: path.join(request.path, "file.txt") }
+    });
+    const stopped = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
+    try {
+      const creationTime = await new Promise<string>((resolve, reject) => {
+        holder.once("error", reject);
+        holder.once("exit", (code) => reject(new Error(`Fixture exited early: ${code}`)));
+        holder.stdout.once("data", (value) => resolve(String(value).trim()));
+      });
+      expect(creationTime).toMatch(/^\d+$/);
+      await direct({ ...request, processes: [{ pid: holder.pid!, name: "powershell.exe", creationTime, executablePath: powershell }] });
       await stopped;
       await expect(lstat(request.path)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {

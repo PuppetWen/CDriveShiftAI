@@ -11,6 +11,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    strictPort: true
+    strictPort: true,
+    // Browser profiles and native build caches contain exclusively locked files.
+    // Test fixtures can still be served without watching their generated data.
+    watch: { ignored: ["**/.test-tmp/**", "**/.task-tmp/**", "**/.cache/**"] }
   }
 });

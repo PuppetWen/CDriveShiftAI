@@ -7,62 +7,42 @@ export interface BundledReleaseNote {
 }
 
 export const bundledReleaseNotes: BundledReleaseNote = {
-  "version": "0.1.8",
-  "summary": "本版补强文件和目录占用检测，删除前显示所属应用、进程和占用路径，并修复搜索索引持有工作目录及后台扫描句柄的问题。",
+  "version": "0.1.12",
+  "summary": "搜索支持键盘删除整颗关键词、Ctrl 多选与拖动框选，输入焦点改为主题荧光效果。",
   "sections": [
     {
-      "title": "找出占用应用",
+      "title": "关键词输入",
       "items": [
-        "删除预检显示应用名称、进程名、PID、程序位置和可识别的占用路径，区分实际句柄占用与启动路径、命令行关联。",
-        "增加系统文件句柄扫描，补充大目录遍历上限之外的占用；进程查询不可用时仍可通过原生进程身份识别占用应用。",
-        "排除命名管道，避免句柄查询阻塞；检测超时时保留已经完成的结果并提示列表可能不完整。"
+        "输入框为空时按 Backspace 或 Delete 删除上一颗完整关键词，连续按键可继续删除；输入法组词时避免误删。",
+        "输入框和标签编辑采用主题荧光效果，提示精简为“回车确认关键词，点击标签可编辑”。"
       ]
     },
     {
-      "title": "确认后处理占用并删除",
+      "title": "结果选择",
       "items": [
-        "普通删除失败后，核对本次确认中进程的 PID 与启动时间，只结束身份一致且允许结束的进程，再重试删除。",
-        "必要时继续使用管理员权限重试，删除后检查目标确实消失；结束应用前明确提醒未保存内容可能丢失。",
-        "保留系统进程、受保护路径和迁移事务保护；系统或驱动锁无法解除时显示实际失败原因。"
-      ]
-    },
-    {
-      "title": "搜索不阻碍文件操作",
-      "items": [
-        "应用和索引子进程使用应用数据目录作为工作目录，避免继承待删除或待移动的文件夹。",
-        "名称扫描和内容索引在后台暂停、读取文件或等待队列前释放目录枚举句柄；实时搜索与目录统计同步释放枚举句柄。",
-        "内容读取明确允许共享读写和删除，并对实际读取字节数设限，避免增长中的日志突破单文件限制。"
+        "名称与文件内容搜索结果支持 Ctrl 加左键增减选择和拖动框选。",
+        "框选兼容虚拟列表与滚动，拖动结束后保留选择；隐藏窗口或结束拖动后停止框选处理。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: BundledReleaseNote = {
-  "version": "0.1.8",
-  "summary": "This release improves file and folder lock detection, identifies the owning app before deletion, and releases working-directory and background-scan handles used by search.",
+  "version": "0.1.12",
+  "summary": "Delete keyword chips from the keyboard, select results with Ctrl-click or a drag box, and enjoy theme-aware focus glow.",
   "sections": [
     {
-      "title": "Identify apps using files",
+      "title": "Keyword input",
       "items": [
-        "Show application name, process name, PID, executable location, and detected open path; distinguish open handles from executable and command-line matches.",
-        "Scan system file handles beyond the directory traversal limit and use native process identities when CIM process discovery is unavailable.",
-        "Skip named pipes to avoid blocked name queries and retain completed discovery results if a later query times out."
+        "Press Backspace or Delete in an empty draft to remove the previous chip; IME composition never removes chips.",
+        "Use a theme-aware glow for search and tag editing, with a shorter keyword hint."
       ]
     },
     {
-      "title": "Handle confirmed locks before deletion",
+      "title": "Result selection",
       "items": [
-        "After ordinary deletion fails, recheck the confirmed PID and process start time, stop only permitted unchanged processes, and retry deletion.",
-        "Retry with administrator privileges when needed and verify that the target is gone; warn that stopping apps can lose unsaved work.",
-        "Keep system-process, protected-path, and migration safeguards, and report failures when Windows or driver locks cannot be released."
-      ]
-    },
-    {
-      "title": "Keep search from obstructing file operations",
-      "items": [
-        "Use the application data directory as the working directory for the app and indexer instead of inheriting a folder the user may want to move or delete.",
-        "Close directory enumeration before background pauses, file reads, or queue waits; apply the same approach to live search and directory statistics.",
-        "Explicitly share content reads with writes and deletion, and bound the actual bytes read from growing log files."
+        "Ctrl-click toggles selected results and dragging draws a selection box in name and content search.",
+        "Selection works across virtual rows and scrolling; drag handling stops when the gesture ends or the window is hidden."
       ]
     }
   ]

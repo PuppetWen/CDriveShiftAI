@@ -112,6 +112,8 @@ function sanitizeFilters(value: unknown): SearchFilters {
   const wholeWord = !regex && !fuzzy && Boolean(input.wholeWord);
   return {
     kind,
+    keywords: strings(input.keywords, 32)?.map((item) => item.trim().slice(0, 1024)).filter(Boolean),
+    keywordMatch: "any",
     scope: safeString(input.scope, 32_768) || "*",
     scopes: strings(input.scopes, 32),
     categories: categories as SearchFilters["categories"],
@@ -200,17 +202,21 @@ function sanitizeSearchWorkspace(value: unknown): SearchWorkspaceState | undefin
   const datePreset = searchDatePresets.has(String(input.datePreset))
     ? (input.datePreset as SearchWorkspaceState["datePreset"])
     : "any";
+  const filters = sanitizeFilters(input.filters);
+  const previousMatch = (input.filters as { keywordMatch?: unknown } | undefined)?.keywordMatch;
+  const changedKeywordSemantics = previousMatch !== "any" &&
+    ((filters.keywords?.length ?? 0) > 1 || (!filters.regex && safeString(input.query, 4_096).trim().split(/\s+/).length > 1));
   return {
     version: 1,
     mode: input.mode === "content" ? "content" : "name",
     query: safeString(input.query, 4_096),
-    filters: sanitizeFilters(input.filters),
+    filters,
     filterPanelOpen: Boolean(input.filterPanelOpen),
     extensionInput: safeString(input.extensionInput, 1_024),
     datePreset,
     contentScope: safeString(input.contentScope, 32_768) || "*",
-    results,
-    contentResults,
+    results: changedKeywordSemantics ? [] : results,
+    contentResults: changedKeywordSemantics ? [] : contentResults,
     directorySizes,
     selectedPath: safeString(input.selectedPath, 32_768),
     elapsed: typeof input.elapsed === "number" ? Math.max(0, safeNumber(input.elapsed)) : undefined,
@@ -225,7 +231,7 @@ function sanitizeSearchBookmark(value: unknown): SearchBookmark | undefined {
   const id = safeString(input.id, 128).trim();
   const name = safeString(input.name, 80).trim();
   const query = safeString(input.query, 4_096).trim();
-  if (!id || !name || !query) return undefined;
+  if (!id || !name || (!query && !sanitizeFilters(input.filters).keywords?.length)) return undefined;
   const datePreset = searchDatePresets.has(String(input.datePreset))
     ? (input.datePreset as SearchBookmark["datePreset"])
     : "any";

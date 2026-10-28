@@ -164,6 +164,7 @@ struct Request {
     cache_path: Option<String>,
     content_cache_dir: Option<String>,
     query: Option<String>,
+    keywords: Option<Vec<String>>,
     kind: Option<String>,
     scope: Option<String>,
     scopes: Option<Vec<String>>,
@@ -1467,7 +1468,29 @@ fn name_signature(value: &str) -> u64 {
 }
 
 fn lowercase_name_signature(value: &str) -> u64 {
-    name_signature_from_chars(value.chars().flat_map(char::to_lowercase))
+    // Match str::to_lowercase used by query matching, including contextual
+    // Unicode mappings such as a final Greek sigma.
+    name_signature(&value.to_lowercase())
+}
+
+fn compare_folded(first: &str, second: &str, path_mode: bool) -> CompareOrdering {
+    // Most indexed paths are ASCII. Comparators run repeatedly while selecting
+    // a page; avoid allocating two normalized Strings for every comparison.
+    if first.is_ascii() && second.is_ascii() {
+        let fold = |byte: u8| if path_mode && byte == b'/' { b'\\' } else { byte.to_ascii_lowercase() };
+        return first.bytes().map(fold).cmp(second.bytes().map(fold));
+    }
+    if path_mode { normalized(first).cmp(&normalized(second)) }
+    else { first.to_lowercase().cmp(&second.to_lowercase()) }
+}
+
+fn folded_path_ends_with(value: &str, needle: &str) -> bool {
+    if value.is_ascii() && needle.is_ascii() {
+        return value.len() >= needle.len() && value.as_bytes()[value.len() - needle.len()..].iter()
+            .map(|byte| if *byte == b'/' { b'\\' } else { byte.to_ascii_lowercase() })
+            .eq(needle.bytes());
+    }
+    normalized(value).ends_with(needle)
 }
 
 impl SearchIndex {
@@ -1674,6 +1697,8 @@ impl SearchIndex {
     fn query(
         &self,
         text: &str,
+        keywords: &[String],
+        match_any: bool,
         kind: &str,
         scopes: &[String],
         categories: &[String],
@@ -1692,15 +1717,12 @@ impl SearchIndex {
         offset: usize,
         limit: usize,
     ) -> Result<SearchPage, String> {
-        let needle = if case_sensitive {
-            text.to_string()
+        let raw_terms: Vec<String> = if keywords.is_empty() {
+            if regex_mode { vec![text.to_string()] } else { text.split_whitespace().map(str::to_string).collect() }
         } else {
-            text.to_lowercase()
+            keywords.iter().take(32).map(|term| term.trim().to_string()).filter(|term| !term.is_empty()).collect()
         };
-        let tokens: Vec<&str> = needle
-            .split_whitespace()
-            .filter(|part| !part.is_empty())
-            .collect();
+        let tokens: Vec<String> = raw_terms.iter().map(|term| if case_sensitive { term.clone() } else { term.to_lowercase() }).collect();
         if tokens.is_empty() {
             return Ok(SearchPage {
                 results: Vec::new(),
@@ -1721,27 +1743,27 @@ impl SearchIndex {
             .map(|extension| extension.trim().trim_start_matches('.').to_lowercase())
             .filter(|extension| !extension.is_empty())
             .collect();
-        let expression = if regex_mode {
-            Some(
-                RegexBuilder::new(text)
+        let expressions = if regex_mode {
+            Some(raw_terms.iter().map(|term|
+                RegexBuilder::new(term)
                     .case_insensitive(!case_sensitive)
                     .build()
-                    .map_err(|error| format!("正则表达式无效：{}", error))?,
-            )
+                    .map_err(|error| format!("正则表达式无效：{}", error))
+            ).collect::<Result<Vec<_>, _>>()?)
         } else {
             None
         };
 
-        let first_token_lower = tokens[0].to_lowercase();
-        let query_signature = if !regex_mode
-            && !fuzzy_mode
-            && !match_path
-            && first_token_lower.chars().count() >= 3
-        {
-            name_signature(&first_token_lower)
-        } else {
-            0
-        };
+        // OR needs the union of each term's possible candidates. Disabling the
+        // filter for OR made even single-term input decode/fold every path.
+        // A short term has signature zero and therefore admits every entry;
+        // this retains matches for 1/2-character and mixed-length queries.
+        let query_signatures: Vec<u64> = if !regex_mode && !fuzzy_mode && !match_path
+            // Contextual Unicode lowercasing need not preserve a case-sensitive
+            // substring (e.g. uppercase Greek sigma before a following letter).
+            && (!case_sensitive || raw_terms.iter().all(|term| term.is_ascii())) {
+            raw_terms.iter().map(|term| lowercase_name_signature(term)).collect()
+        } else { Vec::new() };
 
         let keep = offset.saturating_add(limit).saturating_add(1).max(1);
         let prune_at = keep.saturating_mul(2).max(4_096);
@@ -1756,12 +1778,11 @@ impl SearchIndex {
             if !self.live.get(index).copied().unwrap_or(false) {
                 return None;
             }
-            if query_signature != 0
-                && self.name_signatures.get(index).map_or(true, |candidate| {
-                    candidate & query_signature != query_signature
-                })
-            {
-                return None;
+            if !query_signatures.is_empty() {
+                let signature = *self.name_signatures.get(index)?;
+                let could_match = |query: &u64| signature & query == *query;
+                if !(if match_any { query_signatures.iter().any(could_match) }
+                    else { query_signatures.iter().all(could_match) }) { return None; }
             }
             let entry = self.entries.get(index).copied()?;
             let path_value = self.path(index)?;
@@ -1815,31 +1836,34 @@ impl SearchIndex {
                 &folded_target
             };
             let fuzzy_score = if fuzzy_mode {
-                let mut total = 0.0;
-                for token in &tokens {
-                    total += fuzzy_subsequence_score(target, token)?;
-                }
-                Some(total / tokens.len().max(1) as f64)
+                let (sum, count) = tokens.iter().filter_map(|token| fuzzy_subsequence_score(target, token))
+                    .fold((0.0, 0usize), |(sum, count), score| (sum + score, count + 1));
+                if count == 0 || (!match_any && count != tokens.len()) { None }
+                else { Some(sum / count as f64) }
             } else {
                 None
             };
-            let matches_query = if let Some(regex) = &expression {
-                regex.is_match(original_target)
+            let matches_query = if let Some(expressions) = &expressions {
+                if match_any { expressions.iter().any(|regex| regex.is_match(original_target)) }
+                else { expressions.iter().all(|regex| regex.is_match(original_target)) }
             } else if fuzzy_mode {
                 fuzzy_score.is_some()
             } else if whole_word {
-                tokens
-                    .iter()
-                    .all(|token| contains_whole_word(target, token))
+                if match_any { tokens.iter().any(|token| contains_whole_word(target, token)) }
+                else { tokens.iter().all(|token| contains_whole_word(target, token)) }
             } else {
-                tokens.iter().all(|token| target.contains(token))
+                if match_any { tokens.iter().any(|token| target.contains(token.as_str())) }
+                else { tokens.iter().all(|token| target.contains(token.as_str())) }
             };
             if !matches_query {
                 return None;
             }
 
             let mut score = fuzzy_score.unwrap_or(60.0);
-            let entry_name_lower = file_name(path_value).to_lowercase();
+            let name_folded;
+            let entry_name_lower = if !match_path && !case_sensitive { target } else {
+                name_folded = file_name(path_value).to_lowercase(); &name_folded
+            };
             if entry_name_lower == scoring_needle.as_str() {
                 score = 100.0;
             } else if entry_name_lower.starts_with(scoring_needle.as_str()) {
@@ -1849,7 +1873,7 @@ impl SearchIndex {
             } else if entry_path_lower
                 .as_deref()
                 .is_some_and(|path_value| path_value.ends_with(scoring_needle.as_str()))
-                || (!match_path && normalized(path_value).ends_with(scoring_needle.as_str()))
+                || (!match_path && folded_path_ends_with(path_value, scoring_needle.as_str()))
             {
                 score = 76.0;
             }
@@ -1892,7 +1916,7 @@ impl SearchIndex {
                 count = count.saturating_add(1);
                 partial.push(candidate);
                 if partial.len() >= prune_at {
-                    partial.sort_by(|first, second| {
+                    partial.select_nth_unstable_by(keep, |first, second| {
                         self.compare_search_candidates(first, second, sort_by, sort_direction)
                     });
                     partial.truncate(keep);
@@ -1928,10 +1952,12 @@ impl SearchIndex {
             for (mut partial, count) in partials {
                 merged_count = merged_count.saturating_add(count);
                 merged.append(&mut partial);
-                merged.sort_by(|first, second| {
-                    self.compare_search_candidates(first, second, sort_by, sort_direction)
-                });
-                merged.truncate(keep);
+                if merged.len() > keep {
+                    merged.select_nth_unstable_by(keep, |first, second| {
+                        self.compare_search_candidates(first, second, sort_by, sort_direction)
+                    });
+                    merged.truncate(keep);
+                }
             }
             (merged, merged_count)
         } else {
@@ -1989,8 +2015,8 @@ impl SearchIndex {
             .get(second.index)
             .is_some_and(|entry| entry.is_directory());
         let primary = match sort_by {
-            "name" => first_name.to_lowercase().cmp(&second_name.to_lowercase()),
-            "path" => normalized(first_path).cmp(&normalized(second_path)),
+            "name" => compare_folded(first_name, second_name, false),
+            "path" => compare_folded(first_path, second_path, true),
             "size" => first.size.cmp(&second.size),
             "modified" => first.modified_ms.cmp(&second.modified_ms),
             "type" => file_category(first_directory, first_path)
@@ -2006,7 +2032,7 @@ impl SearchIndex {
         } else {
             primary
         };
-        directed.then_with(|| normalized(first_path).cmp(&normalized(second_path)))
+        directed.then_with(|| compare_folded(first_path, second_path, true))
     }
 
     fn executable_catalog(&self, limit: usize) -> Vec<SearchResult> {
@@ -2795,10 +2821,16 @@ fn start_content_index(
     Ok(())
 }
 
+fn content_keyword_expression(terms: &[&str], match_any: bool) -> String {
+    terms.iter().map(|term| format!("\"{}\"", term.replace('"', "\"\""))).collect::<Vec<_>>().join(if match_any { " OR " } else { " AND " })
+}
+
 fn query_content(
     state: &SharedState,
     root_input: &str,
     query: &str,
+    keywords: &[String],
+    match_any: bool,
     regex_mode: bool,
     case_sensitive: bool,
     sort_by: &str,
@@ -2827,24 +2859,23 @@ fn query_content(
     let keep = offset.saturating_add(limit).saturating_add(1).max(1);
     let prune_at = keep.saturating_mul(2).max(4_096);
 
+    let terms: Vec<&str> = if keywords.is_empty() { vec![query.trim()] }
+        else { keywords.iter().take(32).map(|term| term.trim()).filter(|term| !term.is_empty()).collect() };
+    if terms.is_empty() || terms.iter().any(|term| term.is_empty()) { return Err("搜索关键词不能为空".to_string()); }
+
     if regex_mode {
-        let pattern = query.trim();
-        if pattern.is_empty() {
-            return Err("正则表达式不能为空".to_string());
-        }
-        if pattern.chars().count() > 1024 {
-            return Err("正则表达式过长，请控制在 1024 个字符以内".to_string());
-        }
-        let expression = RegexBuilder::new(pattern)
+        let expressions = terms.iter().map(|pattern| {
+            if pattern.chars().count() > 1024 { return Err("正则表达式过长，请控制在 1024 个字符以内".to_string()); }
+            let expression = RegexBuilder::new(pattern)
             .case_insensitive(!case_sensitive)
             .unicode(true)
             .size_limit(8 * 1024 * 1024)
             .dfa_size_limit(16 * 1024 * 1024)
             .build()
             .map_err(|error| format!("正则表达式无效：{}", error))?;
-        if expression.is_match("") {
-            return Err("该正则可以匹配空内容，会产生过多结果；请增加至少一个明确条件".to_string());
-        }
+            if expression.is_match("") { return Err("该正则可以匹配空内容，会产生过多结果；请增加至少一个明确条件".to_string()); }
+            Ok(expression)
+        }).collect::<Result<Vec<_>, String>>()?;
 
         let mut statement = connection
             .prepare(
@@ -2861,7 +2892,9 @@ fn query_content(
             let content: String = row.get(2).map_err(|error| error.to_string())?;
             let size = row.get::<_, i64>(3).unwrap_or(0).max(0) as u64;
             let modified_at_ms = row.get::<_, i64>(4).unwrap_or(0).max(0) as u64;
-            let Some(found) = expression.find(&content) else {
+            let found_matches: Vec<_> = expressions.iter().filter_map(|expression| expression.find(&content)).collect();
+            if !match_any && found_matches.len() != expressions.len() { continue; }
+            let Some(found) = found_matches.into_iter().min_by_key(|found| found.start()) else {
                 continue;
             };
             if min_size.is_some_and(|minimum| size < minimum)
@@ -2892,7 +2925,7 @@ fn query_content(
         ));
     }
 
-    let expression = format!("\"{}\"", query.trim().replace('"', "\"\""));
+    let expression = content_keyword_expression(&terms, match_any);
     let mut statement = connection
         .prepare(
             "SELECT path, name, snippet(docs, 2, '[', ']', ' … ', 22), bm25(docs),
@@ -4442,6 +4475,8 @@ fn run_server() -> io::Result<()> {
                     .unwrap_or_else(|error| error.into_inner())
                     .query(
                         &query,
+                        request.keywords.as_deref().unwrap_or(&[]),
+                        true, // Multiple keywords always form a union, including old clients.
                         &kind,
                         &scopes,
                         &categories,
@@ -4558,6 +4593,8 @@ fn run_server() -> io::Result<()> {
                         &shared,
                         &root,
                         &query,
+                        request.keywords.as_deref().unwrap_or(&[]),
+                        true, // Ignore obsolete all/any preferences from saved clients.
                         regex_mode,
                         case_sensitive,
                         &sort_by,
@@ -4794,6 +4831,107 @@ mod tests {
     }
 
     #[test]
+    fn keyword_queries_preserve_global_paging_and_matching_modes() {
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let index = SearchIndex::from_entries_controlled(
+            ["alpha-beta.txt", "alpha.txt", "beta.txt"].iter().map(|name| Entry {
+                path: format!(r"E:\Fixture\{}", name), is_directory: false, size: 1,
+            }).collect(), &backgrounded, &stopping,
+        ).expect("index");
+        let query = |terms: &[String], any, whole, fuzzy, regex, offset| index.query(
+            "alpha beta", terms, any, "file", &[], &[], &[], false, whole, fuzzy, false,
+            regex, "name", "asc", None, None, None, None, offset, 1,
+        ).expect("keyword query");
+        let terms = vec!["alpha".to_string(), "beta".to_string()];
+        let both = query(&terms, false, false, false, false, 0);
+        assert_eq!(both.total_matches, 1);
+        assert_eq!(both.results[0].name, "alpha-beta.txt");
+        let any = query(&terms, true, false, false, false, 0);
+        assert_eq!(any.total_matches, 3);
+        assert!(any.has_more);
+        assert_eq!(query(&terms, true, false, false, false, 2).results[0].name, "beta.txt");
+        assert_eq!(query(&terms, false, true, false, false, 0).total_matches, 1);
+        assert_eq!(query(&["alh".into(), "bta".into()], true, false, true, false, 0).total_matches, 3);
+        assert_eq!(query(&["^alpha".into(), "^beta".into()], true, false, false, true, 0).total_matches, 3);
+        assert_eq!(query(&["^alpha".into(), "beta".into()], false, false, false, true, 0).total_matches, 1);
+    }
+
+    #[test]
+    fn keyword_prefilter_keeps_short_terms_and_unicode_matches() {
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let names = ["Alpha.txt", "x.txt", "阿尔法报告.txt", "ΑΟΣΑ.txt", "other.txt"];
+        let index = SearchIndex::from_entries_controlled(names.iter().map(|name| Entry {
+            path: format!(r"E:\Fixture\{}", name), is_directory: false, size: 1,
+        }).collect(), &backgrounded, &stopping).expect("index");
+        for (terms, case_sensitive) in [
+            (vec!["alpha", "x"], false),
+            (vec!["missing", "阿尔法"], false),
+            (vec!["ΑΟΣ", "Alpha"], true),
+            (vec!["αοσ", "absent"], false),
+        ] {
+            let keywords: Vec<String> = terms.iter().map(|term| term.to_string()).collect();
+            let page = index.query("", &keywords, true, "file", &[], &[], &[], case_sensitive,
+                false, false, false, false, "name", "asc", None, None, None, None, 0, 30).expect("query");
+            let expected = names.iter().filter(|name| terms.iter().any(|term|
+                if case_sensitive { name.contains(term) } else { name.to_lowercase().contains(&term.to_lowercase()) }
+            )).count();
+            assert_eq!(page.total_matches, expected, "terms: {:?}", terms);
+        }
+    }
+
+    #[test]
+    fn bounded_candidate_selection_preserves_complete_sorted_pages() {
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let mut names: Vec<String> = (0..12_000).map(|i| format!("{}-{:05}.txt",
+            if i % 37 == 0 { "alpha-beta" } else if i % 2 == 0 { "alpha" } else { "beta" },
+            (i * 7_919) % 12_000)).collect();
+        let index = SearchIndex::from_entries_controlled(names.iter().map(|name| Entry {
+            path: format!(r"E:\Fixture\{}", name), is_directory: false, size: 1,
+        }).collect(), &backgrounded, &stopping).expect("index");
+        names.sort();
+        for offset in [0, 240, 4_300, 11_900] {
+            let page = index.query("alpha beta", &["alpha".into(), "beta".into()], true, "file",
+                &[], &[], &[], false, false, false, false, false, "name", "asc",
+                None, None, None, None, offset, 240).expect("query");
+            assert_eq!(page.total_matches, names.len());
+            assert_eq!(page.results.iter().map(|item| &item.name).collect::<Vec<_>>(),
+                names.iter().skip(offset).take(240).collect::<Vec<_>>());
+            assert_eq!(page.has_more, offset + 240 < names.len());
+        }
+    }
+
+    #[test]
+    fn allocation_free_ascii_comparison_preserves_unicode_fallback_and_path_order() {
+        let values = ["Alpha.txt", "alpha.TXT", "ΑΟΣ.txt", "ΑΟΣΑ.txt", "E:/Path/File.txt", r"e:\path\FILE.txt", "文件.txt"];
+        for first in values {
+            for second in values {
+                assert_eq!(super::compare_folded(first, second, false), first.to_lowercase().cmp(&second.to_lowercase()));
+                assert_eq!(super::compare_folded(first, second, true), super::normalized(first).cmp(&super::normalized(second)));
+                for needle in ["file.txt", "αος.txt", "文件.txt", "absent"] {
+                    assert_eq!(super::folded_path_ends_with(first, needle), super::normalized(first).ends_with(needle));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn content_keywords_match_separated_terms_and_quote_literals() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory database");
+        connection.execute_batch("CREATE VIRTUAL TABLE docs USING fts5(content, tokenize='trigram'); INSERT INTO docs VALUES ('alpha far apart beta'), ('alpha only'), ('beta only'), ('say \"hello\"');").expect("fixtures");
+        let count = |terms: &[&str], any| connection.query_row(
+            "SELECT count(*) FROM docs WHERE docs MATCH ?1", [super::content_keyword_expression(terms, any)],
+            |row| row.get::<_, i64>(0),
+        ).expect("FTS keyword query");
+        assert_eq!(count(&["alpha", "beta"], false), 1);
+        assert_eq!(count(&["alpha", "beta"], true), 3);
+        assert_eq!(count(&["say \"hello\""], false), 1);
+        assert_eq!(count(&["alpha beta"], false), 0);
+    }
+
+    #[test]
     fn paged_query_keeps_global_sort_and_reports_more_results() {
         let backgrounded = AtomicBool::new(false);
         let stopping = AtomicBool::new(false);
@@ -4823,6 +4961,8 @@ mod tests {
         let first = index
             .query(
                 "match-",
+                &[],
+                false,
                 "file",
                 &[],
                 &[],
@@ -4845,6 +4985,8 @@ mod tests {
         let second = index
             .query(
                 "match-",
+                &[],
+                false,
                 "file",
                 &[],
                 &[],
@@ -4904,6 +5046,8 @@ mod tests {
             index
                 .query(
                     "redscope",
+                    &[],
+                    false,
                     "all",
                     &[],
                     &[],
@@ -4931,6 +5075,8 @@ mod tests {
             index
                 .query(
                     "other",
+                    &[],
+                    false,
                     "all",
                     &[],
                     &[],

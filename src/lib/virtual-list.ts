@@ -98,7 +98,7 @@ export function useVirtualList(
   const resetScroll = useCallback(() => {
     const container = containerRef.current;
     if (container) container.scrollTop = 0;
-    setState((current) => ({ ...current, scrollTop: 0 }));
+    setState((current) => current.scrollTop === 0 ? current : ({ ...current, scrollTop: 0 }));
   }, []);
 
   return {

@@ -3,7 +3,7 @@ import type { BigIntStats } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { deleteWithElevation, deleteWithoutElevation, type ElevatedDeleteRequest } from "./elevated-delete";
+import { deleteWithElevation, deleteWithoutElevation, stopConfirmedService, type ElevatedDeleteRequest } from "./elevated-delete";
 import { listFileLockProcesses, sameProcessStartTime, type FileLockScan } from "./file-locks";
 import { logger, serializeError } from "./logger";
 import {
@@ -47,6 +47,9 @@ interface WindowsProcessRecord {
   creationTime?: string;
   fileHandleMatch?: boolean;
   protectedProcess?: boolean;
+  critical?: boolean;
+  serviceName?: string;
+  serviceCanStop?: boolean;
 }
 
 interface VerificationRecord {
@@ -61,6 +64,7 @@ interface VerificationRecord {
 interface ForceDeleteOperations {
   listProcesses: () => Promise<WindowsProcessRecord[]>;
   terminateProcess: (pid: number, creationTime: string) => Promise<boolean>;
+  stopService?: (service: { pid: number; name: string; creationTime: string; executablePath: string; serviceName: string }) => Promise<boolean>;
   remove?: (targetPath: string, retry: boolean) => Promise<void>;
   removeDirect?: (request: ElevatedDeleteRequest) => Promise<void>;
   listFileLocks?: (targetPath: string) => Promise<FileLockScan>;
@@ -86,7 +90,9 @@ function parseProcessList(raw: string): WindowsProcessRecord[] {
       executablePath: optionalString(item.executablePath ?? item.ExecutablePath),
       commandLine: optionalString(item.commandLine ?? item.CommandLine),
       parentPid: Number(item.parentPid ?? item.ParentProcessId) || undefined,
-      creationTime: optionalString(item.creationTime)
+      creationTime: optionalString(item.creationTime),
+      serviceName: optionalString(item.serviceName), serviceCanStop: item.serviceCanStop === true,
+      protectedProcess: Number(item.sessionId) === 0 || Number(item.serviceCount) > 0
     }];
   });
 }
@@ -151,10 +157,13 @@ export function matchProcessesForTarget(
       ? commandLineReferencesTarget(processRecord.commandLine, targetPath)
       : false;
     if (!executableMatch && !commandLineMatch && !processRecord.fileHandleMatch) return [];
+    const stoppableService = Boolean(processRecord.serviceName && processRecord.serviceCanStop && processRecord.critical === false &&
+      processRecord.executablePath && !protectedReason(processRecord.executablePath));
     const protectedProcess =
       processRecord.pid <= 4 ||
       excludedPids.has(processRecord.pid) ||
-      processRecord.protectedProcess ||
+      (Boolean(processRecord.serviceName) && !stoppableService) ||
+      (processRecord.protectedProcess && !stoppableService) ||
       NEVER_TERMINATE.has(processRecord.name.toLocaleLowerCase());
     return [{
       pid: processRecord.pid,
@@ -162,6 +171,7 @@ export function matchProcessesForTarget(
       appName: processRecord.appName,
       lockedPath: processRecord.lockedPath,
       executablePath: processRecord.executablePath,
+      ...(processRecord.serviceName ? { serviceName: processRecord.serviceName } : {}),
       matchReason: processRecord.fileHandleMatch ? "file-handle" : executableMatch ? "executable" : "command-line",
       canTerminate: !protectedProcess && Boolean(processRecord.creationTime)
     }];
@@ -173,8 +183,9 @@ async function listWindowsProcesses(): Promise<WindowsProcessRecord[]> {
   const script = [
     "$ErrorActionPreference='Stop'",
     "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()",
+    "$serviceMap=@{}; try { Get-CimInstance Win32_Service -Filter 'ProcessId > 4' | ForEach-Object { $key=[int]$_.ProcessId; if (-not $serviceMap.ContainsKey($key)) { $serviceMap[$key]=@() }; $serviceMap[$key]+=$_ } } catch { }",
     "$items=@(Get-CimInstance Win32_Process | ForEach-Object {",
-    "[PSCustomObject]@{pid=[int]$_.ProcessId;name=[string]$_.Name;executablePath=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine;parentPid=[int]$_.ParentProcessId;creationTime=if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().Ticks.ToString()} else {''}}",
+    "$services=@($serviceMap[[int]$_.ProcessId]); [PSCustomObject]@{pid=[int]$_.ProcessId;name=[string]$_.Name;executablePath=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine;parentPid=[int]$_.ParentProcessId;sessionId=[int]$_.SessionId;serviceCount=@($services | Where-Object {$null -ne $_}).Count;serviceName=if($services.Count -eq 1 -and $null -ne $services[0]) {[string]$services[0].Name} else {''};serviceCanStop=($services.Count -eq 1 -and $null -ne $services[0] -and $services[0].AcceptStop -and $services[0].State -eq 'Running');creationTime=if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().Ticks.ToString()} else {''}}",
     "})",
     "ConvertTo-Json -Compress -InputObject $items"
   ].join("; ");
@@ -229,7 +240,8 @@ function identity(stats: BigIntStats): string {
 
 function sameProcess(previous: WindowsProcessRecord, current: WindowsProcessRecord): boolean {
   return Boolean(current.creationTime && sameProcessStartTime(previous.creationTime, current.creationTime)) &&
-    previous.pid === current.pid && previous.name === current.name &&
+    previous.pid === current.pid && previous.name.toLocaleLowerCase() === current.name.toLocaleLowerCase() &&
+    (previous.serviceName ?? "").toLocaleLowerCase() === (current.serviceName ?? "").toLocaleLowerCase() &&
     (!previous.executablePath || !current.executablePath || samePath(previous.executablePath, current.executablePath));
 }
 
@@ -275,6 +287,7 @@ export class ForceDeleteService {
       listProcesses: listWindowsProcesses,
       listFileLocks: listFileLockProcesses,
       terminateProcess,
+      stopService: stopConfirmedService,
       removeDirect: deleteWithoutElevation,
       removeElevated: deleteWithElevation
     }
@@ -335,16 +348,18 @@ export class ForceDeleteService {
         const record = records.find((item) => item.pid === lock.pid);
         if (record && sameProcessStartTime(record.creationTime, lock.creationTime)) {
           record.fileHandleMatch = true;
-          record.protectedProcess = lock.protected;
+          record.protectedProcess ||= lock.protected;
+          record.critical = lock.critical;
           record.appName = lock.appName;
           record.lockedPath = lock.lockedPath;
           record.executablePath ??= lock.executablePath;
-        } else if (record && !record.creationTime && lock.name === record.name) {
+        } else if (record && !record.creationTime && lock.name?.toLocaleLowerCase() === record.name.toLocaleLowerCase()) {
           // The native snapshot supplies the identity. Do not retain path or
           // command-line metadata from a CIM record without a start time.
           record.creationTime = lock.creationTime;
           record.fileHandleMatch = true;
-          record.protectedProcess = lock.protected;
+          record.protectedProcess ||= lock.protected;
+          record.critical = lock.critical;
           record.appName = lock.appName;
           record.lockedPath = lock.lockedPath;
           record.executablePath = lock.executablePath;
@@ -449,6 +464,7 @@ export class ForceDeleteService {
     const normalized = verification.path;
     const terminated: ForceDeleteProcess[] = [];
     const failed: ForceDeleteProcess[] = [];
+    const unconfirmed: ForceDeleteProcess[] = [];
     let usedElevation = false;
     const deleteRequest: ElevatedDeleteRequest = {
       path: normalized,
@@ -477,9 +493,17 @@ export class ForceDeleteService {
         for (const processRecord of matches.filter((item) => item.canTerminate)) {
           const previous = verification.processes.find((item) => item.pid === processRecord.pid);
           const current = records.find((item) => item.pid === processRecord.pid)!;
-          if (!verification.terminablePids.has(processRecord.pid) || !previous || !sameProcess(previous, current)) continue;
+          if (!verification.terminablePids.has(processRecord.pid) || !previous || !sameProcess(previous, current)) {
+            unconfirmed.push(processRecord);
+            continue;
+          }
           if (!await this.revalidate(verification)) return { deleted: true, terminatedProcesses: terminated };
-          if (await this.operations.terminateProcess(processRecord.pid, current.creationTime!)) terminated.push(processRecord);
+          const stopped = processRecord.serviceName
+            ? Boolean(this.operations.stopService && current.executablePath && await this.operations.stopService({
+              pid: current.pid, name: current.name, creationTime: current.creationTime!, executablePath: current.executablePath, serviceName: processRecord.serviceName
+            }))
+            : await this.operations.terminateProcess(processRecord.pid, current.creationTime!);
+          if (stopped) terminated.push(processRecord);
           else failed.push(processRecord);
         }
         // An unkillable process may not hold a file open; retry deletion anyway.
@@ -495,7 +519,7 @@ export class ForceDeleteService {
             processes: failed.flatMap((item) => {
               const previous = verification.processes.find((record) => record.pid === item.pid);
               return previous?.creationTime ? [{ pid: previous.pid, name: previous.name,
-                creationTime: previous.creationTime, executablePath: previous.executablePath }] : [];
+                creationTime: previous.creationTime, executablePath: previous.executablePath, serviceName: item.serviceName }] : [];
             })
           });
           usedElevation = true;
@@ -522,13 +546,16 @@ export class ForceDeleteService {
       const code = (error as NodeJS.ErrnoException).code;
       const errorPath = (error as NodeJS.ErrnoException).path;
       const details = `${code ? `（${code}）` : ""}${errorPath ? `：${errorPath}` : ""}`;
-      const processDetails = failed.length ? `；未能结束：${failed.map((item) => `${item.name} (PID ${item.pid})`).join("、")}` : "";
+      const processDetails = [
+        failed.length ? `；未能结束：${failed.map((item) => `${item.name} (PID ${item.pid})`).join("、")}` : "",
+        unconfirmed.length ? `；发现预检后新增或身份变化的占用进程：${unconfirmed.map((item) => `${item.name} (PID ${item.pid})`).join("、")}。请重新检查后确认这些进程` : ""
+      ].join("");
       throw new Error(
         code === "EPERM" || code === "EACCES" || code === "EBUSY"
           ? `强制删除失败${details}：目标可能被文件句柄占用或访问控制权限拒绝。文件占用查询有范围限制，目录句柄、驱动锁或新启动进程可能未列出；管理员权限也不能解除所有文件锁或受保护进程。请关闭占用程序并检查目标权限后重新预检${processDetails}`
           : code === "ENOTEMPTY"
             ? `强制删除失败${details}：目录仍有文件，可能有后台程序持续写入；请停止写入后重新预检${processDetails}`
-          : `强制删除失败：${error instanceof Error ? error.message : String(error)}`
+          : `强制删除失败：${error instanceof Error ? error.message : String(error)}${processDetails}`
       );
     }
   }

@@ -10,6 +10,7 @@ import {
   FolderX,
   LoaderCircle,
   ShieldAlert,
+  Sparkles,
   Trash2,
   X
 } from "lucide-react";
@@ -40,6 +41,9 @@ export function ForceDeleteDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState("");
   const [previewRequest, setPreviewRequest] = useState(0);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysis, setAnalysis] = useState("");
+  const analysisRequest = useRef(0);
   const deletingRef = useRef(false);
 
   useEffect(() => {
@@ -49,6 +53,8 @@ export function ForceDeleteDialog({
     setPreview(undefined);
     setLastPreview(undefined);
     setConfirmed(false);
+    setAnalysis("");
+    setAnalyzing(false);
     void api
       .previewForceDelete(path)
       .then((value) => {
@@ -69,6 +75,7 @@ export function ForceDeleteDialog({
       });
     return () => {
       active = false;
+      analysisRequest.current++;
     };
   }, [path, previewRequest, ui]);
 
@@ -81,7 +88,7 @@ export function ForceDeleteDialog({
   }, [deleting, onClose]);
 
   const execute = async () => {
-    if (!preview || previewForPath !== path || !confirmed || deletingRef.current || loading) return;
+    if (!preview || previewForPath !== path || !confirmed || deletingRef.current || loading || analyzing) return;
     deletingRef.current = true;
     setDeleting(true);
     setError("");
@@ -118,10 +125,33 @@ export function ForceDeleteDialog({
     }
   };
 
+  const diagnose = async () => {
+    if (analyzing || deletingRef.current || loading) return;
+    const request = ++analysisRequest.current;
+    setAnalyzing(true);
+    setConfirmed(false);
+    setAnalysis("");
+    try {
+      const result = await api.analyzeForceDelete(path, error.slice(0, 4_000));
+      if (analysisRequest.current !== request) return;
+      setPreview(result.preview);
+      setLastPreview(result.preview);
+      setPreviewForPath(path);
+      setAnalysis(result.analysis);
+      setError("");
+    } catch (reason) {
+      if (analysisRequest.current === request) notify("error", reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (analysisRequest.current === request) setAnalyzing(false);
+    }
+  };
+
   const guidance = error ? forceDeleteGuidance(error, lastPreview, ui) : undefined;
-  const confirmationDisabled = deleting || loading || previewForPath !== path;
+  const confirmationDisabled = deleting || loading || analyzing || previewForPath !== path;
   const status = deleting
     ? ui("正在执行删除，请稍候。若出现系统授权窗口，请完成 UAC 授权。", "Deleting, please wait. Complete UAC if Windows requests authorization.")
+    : analyzing
+    ? ui("正在重新检查占用并请求 AI 分析…", "Rechecking locks and requesting AI analysis…")
     : loading
     ? ui("检查完成后，请勾选确认框。", "Check the confirmation box after the preview is ready.")
     : !preview || previewForPath !== path
@@ -221,8 +251,8 @@ export function ForceDeleteDialog({
                 <div>
                   <strong>{ui("目标不会进入回收站", "The target will not go to the Recycle Bin")}</strong>
                   <span>{ui(
-                    "会先尝试删除；失败且有必要时，结束本次预检列出且身份未变化的进程，再重试。仍失败时会尝试管理员 PowerShell，使用管理员删除权限处理所选目标及其内容，并检查是否删除成功。",
-                    "Deletion is attempted first. If needed after a failure, the unchanged processes listed here are stopped before retrying. If it still fails, administrator PowerShell retries with administrator deletion privileges for the selected target and its contents, then verifies the result."
+                    "会先尝试删除；失败且有必要时，核对并结束本次预检列出的占用进程，或停止列出的独立第三方服务，再重试。仍失败时通过管理员 PowerShell 处理所选目标及其内容，并核验实际删除结果。",
+                    "Deletion is attempted first. If needed, the listed processes are verified and stopped, or a listed dedicated third-party service is stopped, before retrying. Administrator PowerShell retries for the selected target and its contents when needed, then verifies that the target is gone."
                   )}</span>
                 </div>
               </div>
@@ -255,9 +285,10 @@ export function ForceDeleteDialog({
                             : processItem.matchReason === "executable" ? ui("程序位于目标中", "Executable inside target") : ui("命令行引用目标", "Command line references target")}</span>
                           <span title={processItem.executablePath}>{processItem.executablePath ?? ui("进程路径不可读", "Process path unavailable")}</span>
                           {processItem.lockedPath && <span title={processItem.lockedPath}>{ui("占用路径", "Open path")}: {processItem.lockedPath}</span>}
+                          {processItem.serviceName && <span>{ui("关联服务", "Related service")}: {processItem.serviceName}</span>}
                         </div>
                         <small>PID {processItem.pid}</small>
-                        <em>{processItem.canTerminate ? ui("必要时结束", "Stop if needed") : ui("受保护或身份不可读", "Protected or identity unavailable")}</em>
+                        <em>{processItem.canTerminate ? processItem.serviceName ? ui("必要时停止服务", "Stop service if needed") : ui("必要时结束", "Stop if needed") : ui("受保护或身份不可读", "Protected or identity unavailable")}</em>
                       </article>
                     ))}
                   </div>
@@ -280,10 +311,23 @@ export function ForceDeleteDialog({
                   <strong>{confirmed
                     ? ui("已勾选确认", "Confirmation checked")
                     : ui("点击勾选，确认永久删除", "Check to confirm permanent deletion")}</strong>
-                  <span>{ui("我确认永久删除当前选中的这一项，并同意必要时结束上方进程、通过管理员 PowerShell 重试删除。结束应用可能丢失未保存的内容。", "I confirm permanent deletion of this selected item and allow the listed processes to be stopped and administrator PowerShell to retry deletion if needed. Unsaved work in those apps may be lost.")}</span>
+                  <span>{ui("我确认永久删除当前选中的这一项，并同意必要时结束上方进程或停止列出的服务、通过管理员 PowerShell 重试。结束应用可能丢失未保存的内容，服务停止后对应功能将中断。", "I confirm permanent deletion of this selected item and allow the listed processes or services to be stopped and administrator PowerShell to retry if needed. Unsaved work may be lost and service functionality will be interrupted.")}</span>
                 </span>
               </label>
             </>
+          )}
+
+          {!loading && (preview || guidance?.canRetry) && (
+            <section className="force-delete-ai">
+              <div className="force-delete-help-actions">
+                <button type="button" disabled={deleting || analyzing} onClick={() => void diagnose()}>
+                  {analyzing ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
+                  {analyzing ? ui("正在分析…", "Analyzing…") : ui("AI 分析占用原因", "Analyze locks with AI")}
+                </button>
+              </div>
+              <p>{ui("使用已配置的 AI 分析所选路径、检测到的进程和错误信息，不读取文件正文。分析后刷新占用名单，确认后再停用并删除。", "Uses your configured AI to analyze the selected path, detected processes, and errors without reading file contents. Review the refreshed process list and confirm before stopping processes and deleting.")}</p>
+              {analysis && <div className="force-delete-ai-report" role="status">{analysis}</div>}
+            </section>
           )}
 
           {error && preview && (
@@ -301,7 +345,7 @@ export function ForceDeleteDialog({
             <button
               type="button"
               className="danger"
-              disabled={!preview || previewForPath !== path || !confirmed || deleting || loading}
+              disabled={!preview || previewForPath !== path || !confirmed || deleting || loading || analyzing}
               aria-describedby="force-delete-status"
               onClick={() => void execute()}
             >
@@ -309,7 +353,7 @@ export function ForceDeleteDialog({
               {deleting ? ui("正在删除或等待系统授权…", "Deleting or waiting for authorization…") : ui("强制永久删除", "Force delete")}
             </button>
             {!loading && !preview && error && guidance?.canRetry && (
-              <button type="button" disabled={deleting} onClick={() => setPreviewRequest((value) => value + 1)}>
+              <button type="button" disabled={deleting || analyzing} onClick={() => setPreviewRequest((value) => value + 1)}>
                 {ui("重新检查", "Check again")}
               </button>
             )}

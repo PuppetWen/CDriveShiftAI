@@ -1,4 +1,7 @@
 node_modules/
+.cache/
+.task-tmp/
+.test-tmp/
 dist/
 dist-electron/
 release*/

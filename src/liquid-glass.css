@@ -184,10 +184,15 @@
   box-shadow: var(--glass-inset);
 }
 
-:root[data-effect] :is(.path-input, .ownership-search, .search-input-wrap, .provider-picker-search, .language-picker-search):focus-within {
+:root[data-effect] :is(.path-input, .ownership-search, .provider-picker-search, .language-picker-search):focus-within {
   outline: 2px solid var(--mint);
   outline-offset: -2px;
   box-shadow: var(--glass-inset), 0 0 0 3px color-mix(in srgb, var(--mint) 12%, transparent);
+}
+
+:root[data-effect] .search-input-wrap:focus-within {
+  outline: none;
+  box-shadow: var(--glass-inset), var(--search-focus-glow);
 }
 
 :root[data-effect] :is(.ai-model-discovery input, .ai-connection-grid input,
@@ -337,6 +342,11 @@
   /* The containing field already supplies the full rounded focus ring. */
   outline: none;
 }
+:root[data-effect] .search-keyword-chip button:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--search-focus-color) 72%, transparent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
 :root[data-effect] ::selection { color: var(--text); background: color-mix(in srgb, var(--mint) 28%, var(--surface-solid)); }
 
 @media (hover: hover) and (prefers-reduced-motion: no-preference) {
@@ -409,4 +419,9 @@
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }
+  :root[data-effect] .search-input-wrap:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  :root[data-effect] .search-selection-marquee { border-color: Highlight; }
 }
