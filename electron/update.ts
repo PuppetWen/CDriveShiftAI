@@ -1024,7 +1024,7 @@ async function removeEmptyLegacyUpdateRunner(): Promise<void> {
   }
 }
 
-export async function completePendingUpdate(): Promise<void> {
+export async function completePendingUpdate(canAcknowledge: () => boolean = () => true): Promise<void> {
   await removeEmptyLegacyUpdateRunner();
   const markerIndex = process.argv.indexOf("--update-staging");
   if (markerIndex < 0) return;
@@ -1041,6 +1041,7 @@ export async function completePendingUpdate(): Promise<void> {
     ) {
       return;
     }
+    if (!canAcknowledge()) return;
     await writeFile(
       plan.successMarker,
       JSON.stringify({
@@ -1050,6 +1051,7 @@ export async function completePendingUpdate(): Promise<void> {
       }),
       "utf8"
     );
+    logger.info("update.startup_confirmed", { version: app.getVersion(), stagingDir });
     const cleanup = async (remaining = 20): Promise<void> => {
       try {
         await rm(stagingDir, { recursive: true, force: true });

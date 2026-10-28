@@ -9,6 +9,10 @@ const RETRY_DELAYS_MS = [0, 300, 900];
 const INTERNAL_RUNNER_DIRECTORY = ".cdriveshiftai-update-runner";
 
 type SpawnProcess = typeof spawn;
+interface UpdateLaunchContext {
+  cwd: string;
+  environment: NodeJS.ProcessEnv;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,7 +64,7 @@ function spawnAndConfirm(
   executable: string,
   args: string[],
   spawnProcess: SpawnProcess,
-  environment?: NodeJS.ProcessEnv
+  context: UpdateLaunchContext
 ): Promise<ChildProcess> {
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
@@ -69,7 +73,8 @@ function spawnAndConfirm(
         detached: true,
         windowsHide: true,
         stdio: "ignore",
-        env: environment ?? process.env
+        cwd: context.cwd,
+        env: context.environment
       });
     } catch (error) {
       reject(error);
@@ -92,7 +97,7 @@ function spawnAndWait(
   executable: string,
   args: string[],
   spawnProcess: SpawnProcess,
-  environment: NodeJS.ProcessEnv
+  context: UpdateLaunchContext
 ): Promise<ChildProcess> {
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
@@ -100,7 +105,8 @@ function spawnAndWait(
       child = spawnProcess(executable, args, {
         windowsHide: true,
         stdio: "ignore",
-        env: environment
+        cwd: context.cwd,
+        env: context.environment
       });
     } catch (error) {
       reject(error);
@@ -119,7 +125,8 @@ async function directLaunch(
   planPath: string,
   spawnProcess: SpawnProcess,
   forcedFailure: boolean,
-  retryDelaysMs: number[]
+  retryDelaysMs: number[],
+  context: UpdateLaunchContext
 ): Promise<ChildProcess> {
   let lastError: unknown;
   for (let index = 0; index < retryDelaysMs.length; index += 1) {
@@ -133,7 +140,8 @@ async function directLaunch(
       const child = await spawnAndConfirm(
         candidate,
         ["--plan", planPath],
-        spawnProcess
+        spawnProcess,
+        context
       );
       logger.info("update.helper_spawned", {
         strategy: "direct",
@@ -158,24 +166,26 @@ async function directLaunch(
 async function powershellLaunch(
   candidate: string,
   planPath: string,
-  spawnProcess: SpawnProcess
+  spawnProcess: SpawnProcess,
+  context: UpdateLaunchContext
 ): Promise<ChildProcess> {
   const environment = {
-    ...process.env,
+    ...context.environment,
     CDRIVESHIFTAI_UPDATE_HELPER: candidate,
-    CDRIVESHIFTAI_UPDATE_PLAN: planPath
+    CDRIVESHIFTAI_UPDATE_PLAN: planPath,
+    CDRIVESHIFTAI_UPDATE_WORKDIR: context.cwd
   };
   const script = [
     "$ErrorActionPreference='Stop'",
     "$plan='\"'+$env:CDRIVESHIFTAI_UPDATE_PLAN.Replace('\"','\\\"')+'\"'",
-    "$p=Start-Process -FilePath $env:CDRIVESHIFTAI_UPDATE_HELPER -ArgumentList @('--plan',$plan) -WindowStyle Hidden -PassThru",
+    "$p=Start-Process -FilePath $env:CDRIVESHIFTAI_UPDATE_HELPER -ArgumentList @('--plan',$plan) -WorkingDirectory $env:CDRIVESHIFTAI_UPDATE_WORKDIR -WindowStyle Hidden -PassThru",
     "if($null -eq $p){exit 7}"
   ].join(";");
   const child = await spawnAndWait(
     "powershell.exe",
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
     spawnProcess,
-    environment
+    { ...context, environment }
   );
   logger.info("update.helper_spawned", {
     strategy: "powershell-start-process",
@@ -202,16 +212,31 @@ export async function launchUpdaterHelper(
   const retryDelaysMs = options.retryDelaysMs?.length
     ? options.retryDelaysMs
     : RETRY_DELAYS_MS;
+  const planPath = path.resolve(options.planPath);
+  const cwd = path.dirname(planPath);
+  const temporary = path.join(cwd, "temp");
+  await mkdir(temporary, { recursive: true });
+  // The main app works inside its data directory, which the updater must move.
+  // Keep every launch strategy outside that directory and make NSIS inherit a
+  // staging-local temporary directory instead of the Windows profile on C:.
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !["TEMP", "TMP"].includes(key.toUpperCase()))
+  );
+  const context: UpdateLaunchContext = {
+    cwd,
+    environment: { ...environment, TEMP: temporary, TMP: temporary }
+  };
   const failures: unknown[] = [];
   for (const [index, candidate] of [options.primaryPath, options.fallbackPath].entries()) {
     try {
       const child = await directLaunch(
         candidate,
-        options.planPath,
+        planPath,
         spawnProcess,
         options.forceAllDirectFailures === true ||
           (index === 0 && options.forcePrimaryFailure === true),
-        retryDelaysMs
+        retryDelaysMs,
+        context
       );
       child.on("error", (error) => {
         logger.error("update.helper_post_spawn_error", {
@@ -232,8 +257,9 @@ export async function launchUpdaterHelper(
   try {
     const child = await powershellLaunch(
       options.fallbackPath,
-      options.planPath,
-      spawnProcess
+      planPath,
+      spawnProcess,
+      context
     );
     child.unref();
     return {

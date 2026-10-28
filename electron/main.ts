@@ -56,6 +56,7 @@ import {
   UpdateService,
   type AppUpdateInfo
 } from "./update";
+import { isVisibleUpdateWindow, waitForVisibleUpdateWindow } from "./update-startup";
 import {
   getDriveInfo,
   getLocalDriveRoots,
@@ -467,7 +468,7 @@ function initializeUiScale(window: BrowserWindow, scale: AppSettings["uiScale"])
   });
 }
 
-function createWindow(): BrowserWindow {
+function createWindow(confirmUpdatedStartup = false): BrowserWindow {
   const settings = store.getSettings();
   const effect = settings.effectMode;
   const strings = nativeStrings(settings.language);
@@ -542,6 +543,11 @@ function createWindow(): BrowserWindow {
     if (!allowed) event.preventDefault();
   });
 
+  if (confirmUpdatedStartup) {
+    void waitForVisibleUpdateWindow(window)
+      .then(() => completePendingUpdate(() => isVisibleUpdateWindow(window)))
+      .catch((error) => logger.error("update.startup_confirmation_failed", { error: serializeError(error) }));
+  }
   loadRenderer(window, effect);
   return window;
 }
@@ -2288,7 +2294,10 @@ if (!singleInstance) {
     });
     await store.init();
     applyNativeEffect(store.getSettings().effectMode);
-    await completePendingUpdate();
+    const pendingUpdateStartup = process.argv.includes("--update-staging");
+    // Ordinary launches still remove legacy runner directories. An update must
+    // wait for the new main window to load and become visible before confirming.
+    if (!pendingUpdateStartup) await completePendingUpdate();
     const currentSettings = store.getSettings();
     searchService = new SearchService(
       (status) => {
@@ -2339,10 +2348,13 @@ if (!singleInstance) {
     registerIpc();
     fileRequestWindowReady = true;
     const startupMinimized =
+      !pendingUpdateStartup &&
       process.argv.includes("--startup-minimized") &&
       currentSettings.launchAtLogin &&
       currentSettings.launchMinimized;
-    if (!startupMinimized && !forceDeleteStartup && !forceDeleteLaunches.pending) mainWindow = createWindow();
+    if (pendingUpdateStartup || (!startupMinimized && !forceDeleteStartup && !forceDeleteLaunches.pending)) {
+      mainWindow = createWindow(pendingUpdateStartup);
+    }
     showForceDeleteRequests();
     createTray();
     syncSearchBackgroundMode();

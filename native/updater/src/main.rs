@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -301,16 +302,83 @@ fn ensure_preserved_data_restored(plan: &UpdatePlan, installed: &Path) -> Result
     fs::rename(&preserved, &data).map_err(|error| error.to_string())
 }
 
+fn distribution_directory(plan: &UpdatePlan) -> io::Result<&Path> {
+    plan.staging_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid staging directory"))
+}
+
+fn prepare_updater_environment(plan: &UpdatePlan) -> io::Result<()> {
+    // The old app runs from its data directory. Release that inherited Windows
+    // current-directory handle before moving the data out of the installation.
+    env::set_current_dir(&plan.staging_dir)?;
+    let temporary = plan.staging_dir.join("temp");
+    fs::create_dir_all(&temporary)?;
+    if !temporary.canonicalize()?.starts_with(plan.staging_dir.canonicalize()?) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "installer temp is outside staging"));
+    }
+    Ok(())
+}
+
+fn installer_command(plan: &UpdatePlan, installed: &Path) -> Command {
+    let mut command = Command::new(&plan.package_path);
+    command
+        .current_dir(&plan.staging_dir)
+        .env("TEMP", plan.staging_dir.join("temp"))
+        .env("TMP", plan.staging_dir.join("temp"))
+        .arg("/S")
+        .arg("--updated")
+        .arg(format!("/D={}", installed.display()));
+    command
+}
+
+fn application_temporary_directory(plan: &UpdatePlan, configured_data: Option<&OsStr>) -> io::Result<PathBuf> {
+    let data_root = match configured_data {
+        Some(value) if !value.to_string_lossy().trim().is_empty() => {
+            let candidate = PathBuf::from(value.to_string_lossy().trim());
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                distribution_directory(plan)?.join(candidate)
+            }
+        }
+        _ => plan.target_path
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent"))?
+            .join(DATA_DIRECTORY),
+    };
+    Ok(data_root.join("temp"))
+}
+
+fn application_command(plan: &UpdatePlan) -> io::Result<Command> {
+    let configured_data = env::var_os("CDRIVESHIFTAI_DATA_DIR");
+    application_command_with_data(plan, configured_data.as_deref())
+}
+
+fn application_command_with_data(plan: &UpdatePlan, configured_data: Option<&OsStr>) -> io::Result<Command> {
+    let temporary = application_temporary_directory(plan, configured_data)?;
+    fs::create_dir_all(&temporary)?;
+    let mut command = Command::new(&plan.target_path);
+    command
+        // The new process must not keep the version staging directory open:
+        // completePendingUpdate removes it after the startup acknowledgement.
+        .current_dir(distribution_directory(plan)?)
+        .env("TEMP", &temporary)
+        .env("TMP", &temporary)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(command)
+}
+
 fn launch_updated(plan: &UpdatePlan) -> io::Result<Child> {
-    Command::new(&plan.target_path)
+    application_command(plan)?
         .arg("--updated")
         .arg("--update-staging")
         .arg(&plan.staging_dir)
         .arg("--update-version")
         .arg(&plan.expected_version)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .spawn()
 }
 
@@ -331,13 +399,9 @@ fn wait_for_success(child: &mut Child, marker: &Path) -> bool {
 }
 
 fn launch_restored(plan: &UpdatePlan, reason: &str) {
-    let _ = Command::new(&plan.target_path)
-        .arg("--update-failed")
-        .arg(reason)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    if let Ok(mut command) = application_command(plan) {
+        let _ = command.arg("--update-failed").arg(reason).spawn();
+    }
 }
 
 fn restore_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
@@ -363,12 +427,7 @@ fn update_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
     preserve_application_data(plan, installed)?;
 
     logger.line("starting silent NSIS update");
-    let status = match Command::new(&plan.package_path)
-        .arg("/S")
-        .arg("--updated")
-        .arg(format!("/D={}", installed.display()))
-        .status()
-    {
+    let status = match installer_command(plan, installed).status() {
         Ok(status) => status,
         Err(error) => {
             restore_installed(plan, logger)?;
@@ -431,9 +490,22 @@ fn update_portable(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
 }
 
 fn run(plan_path: &Path) -> Result<(), String> {
-    let plan_text = fs::read_to_string(plan_path).map_err(|error| error.to_string())?;
-    let plan: UpdatePlan = serde_json::from_str(&plan_text).map_err(|error| error.to_string())?;
+    let original_directory = env::current_dir().map_err(|error| error.to_string())?;
+    let plan_path = original_directory.join(plan_path);
+    let plan_text = fs::read_to_string(&plan_path).map_err(|error| error.to_string())?;
+    let mut plan: UpdatePlan = serde_json::from_str(&plan_text).map_err(|error| error.to_string())?;
+    // Preserve resolution of any legacy relative paths before changing cwd.
+    for candidate in [
+        &mut plan.package_path, &mut plan.target_path, &mut plan.staging_dir,
+        &mut plan.backup_path, &mut plan.success_marker, &mut plan.log_path,
+    ] {
+        if !candidate.is_absolute() { *candidate = original_directory.join(&*candidate); }
+    }
+    if let Some(installed) = plan.installed_dir.as_mut() {
+        if !installed.is_absolute() { *installed = original_directory.join(&*installed); }
+    }
     validate_plan(&plan)?;
+    prepare_updater_environment(&plan).map_err(|error| error.to_string())?;
     let logger = Logger {
         path: plan.log_path.clone(),
     };
@@ -456,7 +528,7 @@ fn run(plan_path: &Path) -> Result<(), String> {
         Ok(()) => {
             let _ = remove_entry(&plan.package_path);
             let _ = remove_entry(&plan.backup_path);
-            let _ = remove_entry(plan_path);
+            let _ = remove_entry(&plan_path);
             logger.line("update completed and package/backup were removed");
             Ok(())
         }
@@ -501,6 +573,71 @@ mod tests {
             "cdriveshiftai-updater-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    fn installed_plan(root: &Path) -> UpdatePlan {
+        let installed = root.join("CDriveShiftAI");
+        let staging = root.join(".cdriveshiftai-update").join("0.2.1");
+        UpdatePlan {
+            schema_version: 1,
+            mode: "installed".to_string(),
+            parent_pid: 0,
+            package_path: staging.join("installer.exe"),
+            target_path: installed.join("CDriveShiftAI.exe"),
+            installed_dir: Some(installed),
+            staging_dir: staging.clone(),
+            backup_path: staging.join("previous-version"),
+            success_marker: staging.join("success.json"),
+            expected_version: "0.2.1".to_string(),
+            expected_sha512: "a".repeat(128),
+            log_path: staging.join("update.log"),
+        }
+    }
+
+    #[test]
+    fn installer_uses_staging_for_working_directory_and_temporary_files() {
+        let root = fixture("installer-environment");
+        let plan = installed_plan(&root);
+        let command = installer_command(&plan, plan.installed_dir.as_ref().unwrap());
+        assert_eq!(command.get_current_dir(), Some(plan.staging_dir.as_path()));
+        for key in ["TEMP", "TMP"] {
+            let value = command.get_envs().find(|(name, _)| *name == key).unwrap().1.unwrap();
+            assert_eq!(Path::new(value), plan.staging_dir.join("temp"));
+        }
+    }
+
+    #[test]
+    fn restarted_application_does_not_hold_updater_staging_open() {
+        let root = fixture("restart-environment");
+        let plan = installed_plan(&root);
+        let command = application_command_with_data(&plan, None).unwrap();
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
+        let temporary = application_temporary_directory(&plan, None).unwrap();
+        assert!(!temporary.starts_with(&plan.staging_dir));
+        for key in ["TEMP", "TMP"] {
+            let value = command.get_envs().find(|(name, _)| *name == key).unwrap().1.unwrap();
+            assert_eq!(Path::new(value), temporary);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn application_temporary_files_follow_the_data_root_override() {
+        let root = fixture("data-root-override");
+        let plan = installed_plan(&root);
+        let override_root = root.join("separate-profile");
+        assert_eq!(
+            application_temporary_directory(&plan, Some(override_root.as_os_str())).unwrap(),
+            override_root.join("temp")
+        );
+        assert_eq!(
+            application_temporary_directory(&plan, Some(OsStr::new("relative-profile"))).unwrap(),
+            root.join("relative-profile").join("temp")
+        );
+        assert_eq!(
+            application_temporary_directory(&plan, None).unwrap(),
+            plan.installed_dir.as_ref().unwrap().join(DATA_DIRECTORY).join("temp")
+        );
     }
 
     #[test]
