@@ -96,6 +96,8 @@ import type {
 } from "../types";
 
 interface SearchViewProps {
+  initialWorkspace?: SearchWorkspaceState;
+  onWorkspaceRestored?: (workspace: SearchWorkspaceState) => void;
   indexer: IndexerStatus;
   drives: DriveInfo[];
   onAnalyze: (path: string) => void;
@@ -188,6 +190,8 @@ export function SearchView({
   onMigrate,
   notify,
   onRequestForceDelete,
+  initialWorkspace,
+  onWorkspaceRestored,
   standalone = false
 }: SearchViewProps) {
   const { t, ui, runtimeText, formatNumber } = useI18n();
@@ -279,6 +283,7 @@ export function SearchView({
   const resultsPanelRef = useRef<HTMLElement>(null);
   const bookmarkPanelRef = useRef<HTMLElement>(null);
   const workspaceSnapshotRef = useRef<SearchWorkspaceState | undefined>(undefined);
+  const initialWorkspaceRef = useRef(initialWorkspace);
   const submittedWorkspaceRef = useRef<SearchWorkspaceState | undefined>(undefined);
   const liveRefreshRef = useRef(false);
   const resultsRef = useRef<SearchResult[]>([]);
@@ -469,8 +474,8 @@ export function SearchView({
 
   useEffect(() => {
     let cancelled = false;
-    void api
-      .getSearchWorkspace()
+    const handoff = initialWorkspaceRef.current;
+    void (handoff ? Promise.resolve(handoff) : api.getSearchWorkspace())
       .then((workspace) => {
         if (cancelled || !workspace) return;
         setMode(workspace.mode);
@@ -504,6 +509,7 @@ export function SearchView({
         setSelectedPath(workspace.selectedPath);
         setElapsed(workspace.elapsed);
         setRestoredAt(workspace.savedAt);
+        if (handoff) onWorkspaceRestored?.(handoff);
       })
       .catch((reason) => {
         console.warn("Unable to restore search workspace", reason);
@@ -514,7 +520,7 @@ export function SearchView({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [onWorkspaceRestored]);
 
   const saveWorkspace = useCallback((workspace: SearchWorkspaceState) => {
     if (submittedWorkspaceRef.current === workspace) return;

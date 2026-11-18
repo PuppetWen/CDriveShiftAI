@@ -183,7 +183,7 @@ function sanitizeDirectorySize(value: unknown): DirectorySizeResult | undefined 
   };
 }
 
-function sanitizeSearchWorkspace(value: unknown): SearchWorkspaceState | undefined {
+export function sanitizeSearchWorkspace(value: unknown): SearchWorkspaceState | undefined {
   if (!value || typeof value !== "object") return undefined;
   const input = value as Record<string, unknown>;
   if (input.version !== 1) return undefined;

@@ -36,9 +36,11 @@ import {
   serializeError
 } from "./logger";
 import { MigrationService } from "./migration";
+import { NativeQuickSearchHost } from "./native-quick-search";
 import { SearchService } from "./search";
+import { readContentOptions, readSearchFilters, readSearchPage } from "./search-input";
 import { normalizeStoredUiScale } from "./settings-normalization";
-import { AppStore } from "./store";
+import { AppStore, sanitizeSearchWorkspace } from "./store";
 import { createTrayMenuIcon, type TrayIconKind } from "./tray-icons";
 import { applyWindowMaterial, getWindowMaterial } from "./window-material";
 import {
@@ -64,11 +66,8 @@ import type {
   AiProviderId,
   ShortcutCheckResult,
   ShortcutTarget,
-  SearchCategory,
   SearchContextActionResult,
-  SearchFilters,
-  SearchSortDirection,
-  SearchSortField,
+  SearchWorkspaceState,
   WindowLayoutBounds
 } from "./types";
 
@@ -97,6 +96,8 @@ process.on("unhandledRejection", (reason) => {
 
 let mainWindow: BrowserWindow | undefined;
 let quickSearchWindow: BrowserWindow | undefined;
+let nativeQuickSearch: NativeQuickSearchHost | undefined;
+const nativeResultPaths = new Map<number, Set<string>>();
 let uninstallRestoreWindow: BrowserWindow | undefined;
 let forceDeleteWindow: BrowserWindow | undefined;
 let searchService: SearchService | undefined;
@@ -181,7 +182,7 @@ function applyLoginSettings(settings: AppSettings): void {
 }
 
 function syncSearchBackgroundMode(force = false): void {
-  const hasVisibleWindow = [mainWindow, quickSearchWindow, uninstallRestoreWindow].some(
+  const hasVisibleWindow = nativeQuickSearch?.visible || [mainWindow, quickSearchWindow, uninstallRestoreWindow].some(
     (window) =>
       window != null &&
       !window.isDestroyed() &&
@@ -305,11 +306,6 @@ function loadRenderer(
       windowParameters
     )
   );
-}
-
-function sanitizeSearchKeywords(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim().slice(0, 1024)).filter(Boolean))].slice(0, 32);
 }
 
 function assertString(value: unknown, label: string, maxLength = 32_768): string {
@@ -483,7 +479,7 @@ function initializeUiScale(window: BrowserWindow, scale: AppSettings["uiScale"])
   });
 }
 
-function createWindow(confirmUpdatedStartup = false): BrowserWindow {
+function createWindow(confirmUpdatedStartup = false, initialView?: string): BrowserWindow {
   const settings = store.getSettings();
   const effect = settings.effectMode;
   const strings = nativeStrings(settings.language);
@@ -563,7 +559,7 @@ function createWindow(confirmUpdatedStartup = false): BrowserWindow {
       .then(() => completePendingUpdate(() => isVisibleUpdateWindow(window)))
       .catch((error) => logger.error("update.startup_confirmation_failed", { error: serializeError(error) }));
   }
-  loadRenderer(window, effect);
+  loadRenderer(window, effect, initialView ? { view: initialView } : undefined);
   return window;
 }
 
@@ -655,7 +651,7 @@ function assertUpdateCanInstall(): Promise<void> {
 
 function sendNavigation(
   window: BrowserWindow,
-  event: { view: string; path?: string; focus?: "ai-settings" | "search-input" }
+  event: { view: string; path?: string; focus?: "ai-settings" | "search-input"; searchWorkspace?: SearchWorkspaceState }
 ): void {
   const send = () => {
     if (!window.isDestroyed()) window.webContents.send("app:navigate", event);
@@ -756,14 +752,14 @@ function acceptForceDeleteLaunch(argv: readonly string[], additionalData?: unkno
 
 function showMainView(
   view: "overview" | "search" | "ownership-map" | "analyze" | "migrate" | "history" | "settings",
-  options: { path?: string; focus?: "ai-settings" | "search-input" } = {}
+  options: { path?: string; focus?: "ai-settings" | "search-input"; searchWorkspace?: SearchWorkspaceState } = {}
 ): void {
   const shouldCheckForUpdates =
     !mainWindow ||
     mainWindow.isDestroyed() ||
     !mainWindow.isVisible() ||
     mainWindow.isMinimized();
-  if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow(false, view);
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -827,6 +823,136 @@ function createQuickSearchWindow(): BrowserWindow {
   });
   loadRenderer(window, settings.effectMode, { mode: "quick-search" });
   return window;
+}
+
+function openQuickSearch(): void {
+  if (isQuitting) return;
+  // If startup fails, the host opens the existing browser window instead.
+  if (resolveNativeLanguage(store.getSettings().language) === "zh-CN" && nativeQuickSearch?.open()) return;
+  createQuickSearchWindow();
+}
+
+async function dispatchNativeQuickSearch(owner: number, request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (isQuitting || !searchService) throw new Error("应用即将关闭");
+  switch (request.op) {
+    case "query":
+    case "contentQuery": {
+      const text = assertString(request.query, "搜索词", 33_000);
+      await searchService.start();
+      const page = request.op === "query"
+        ? await searchService.searchPage(text, readSearchFilters(request), readSearchPage(request, 120), owner)
+        : await searchService.searchContentPage(
+            text,
+            assertString(request.scope, "内容搜索目录"),
+            { ...readContentOptions(request), ...readSearchPage(request, 80) },
+            owner
+          );
+      // Store only the latest page for operations originating from this window.
+      if (nativeResultPaths.has(owner)) nativeResultPaths.set(owner, new Set(page.items.map((item) => item.path)));
+      return {
+        results: page.items.map((item) => ({
+          ...item,
+          size: item.size ?? 0,
+          modifiedAtMs: item.modifiedAt ? Date.parse(item.modifiedAt) || undefined : undefined
+        })),
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor ?? null,
+        totalMatches: page.totalMatches ?? null,
+        generation: page.generation,
+        cursorReset: page.cursorReset === true
+      };
+    }
+    case "contentIndex":
+      await searchService.start();
+      await searchService.indexContent(assertString(request.scope, "内容索引目录"));
+      return {};
+    case "contentStatus": {
+      await searchService.start();
+      const status = await searchService.contentIndexStatus(assertString(request.scope, "内容索引目录"));
+      return { status: { ...status, message: status.message ?? "" } };
+    }
+    case "bookmarksList":
+      return { bookmarks: store.listSearchBookmarks() };
+    case "bookmarkFoldersList":
+      return { folders: store.listSearchBookmarkFolders() };
+    case "bookmarkSave": {
+      if (!request.value || typeof request.value !== "object" || Array.isArray(request.value)) {
+        throw new Error("搜索书签无效");
+      }
+      const value = request.value as Record<string, unknown>;
+      return { bookmark: await store.saveSearchBookmark({
+        ...value,
+        filters: readSearchFilters(value.filters),
+        id: typeof value.id === "string" ? value.id : randomUUID()
+      }) };
+    }
+    case "bookmarkDelete":
+      return { deleted: await store.deleteSearchBookmark(assertString(request.bookmarkId, "搜索书签 ID", 128)) };
+    case "openFullSearch": {
+      const value = request.value && typeof request.value === "object" && !Array.isArray(request.value)
+        ? request.value as Record<string, unknown> : undefined;
+      const searchWorkspace = value && sanitizeSearchWorkspace({ ...value, version: 1, filters: readSearchFilters(value.filters) });
+      if (searchWorkspace && (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading())) {
+        await store.saveSearchWorkspace(searchWorkspace);
+      }
+      showMainView("search", { focus: "search-input", searchWorkspace });
+      return {};
+    }
+    case "fileAction": {
+      const target = assertString(request.path, "路径");
+      if (!nativeResultPaths.get(owner)?.has(target)) throw new Error("请先在当前搜索结果中选中该路径");
+      const stats = await lstat(target);
+      switch (request.action) {
+        case "open": {
+          const error = await shell.openPath(target);
+          if (error) throw new Error(error);
+          return { action: "opened" };
+        }
+        case "reveal":
+          shell.showItemInFolder(target);
+          return { action: "revealed" };
+        case "copyPath":
+          clipboard.writeText(target);
+          return { action: "copied", message: "已复制完整路径" };
+        case "menu": {
+          showMainView("search");
+          const result = await showSearchContextMenu(mainWindow!, target, stats.isDirectory());
+          if (result.action === "analyze") showMainView("analyze", { path: target });
+          if (result.action === "error") throw new Error(result.message);
+          return { ...result };
+        }
+        case "forceDelete":
+          forceDeleteLaunches.enqueue(target);
+          showForceDeleteRequests();
+          return { action: "review" };
+        default:
+          throw new Error("文件操作无效");
+      }
+    }
+    default:
+      throw new Error("原生搜索操作无效");
+  }
+}
+
+function createNativeQuickSearchHost(): NativeQuickSearchHost {
+  return new NativeQuickSearchHost({
+    executable: app.isPackaged
+      ? path.join(process.resourcesPath, "bin", "cshift-quick-search.exe")
+      : path.resolve(__dirname, "..", "native", "quick-search-prototype", "target", "release", "cshift-quick-search-prototype.exe"),
+    cwd: applicationDataRoot,
+    dispatch: dispatchNativeQuickSearch,
+    visibilityChanged: (owner, visible) => {
+      if (visible && !nativeResultPaths.has(owner)) nativeResultPaths.set(owner, new Set());
+      if (!visible) searchService?.cancelWindowSearch(owner);
+      syncSearchBackgroundMode();
+      if (visible && searchService) nativeQuickSearch?.sendEvent("indexStatus", searchService.getStatus());
+    },
+    closed: (owner) => {
+      nativeResultPaths.delete(owner);
+      if (!isQuitting && !store.getSettings().minimizeToTray && BrowserWindow.getAllWindows().length === 0) app.quit();
+    },
+    fallback: () => { if (!isQuitting) createQuickSearchWindow(); }
+  });
 }
 
 function createUninstallRestoreWindow(): BrowserWindow {
@@ -948,7 +1074,7 @@ function createTray(): void {
     {
       label: strings.quickSearch,
       icon: createTrayMenuIcon("search", "#45aaba"),
-      click: () => createQuickSearchWindow()
+      click: openQuickSearch
     },
     { type: "separator" },
     {
@@ -1048,7 +1174,7 @@ function applyGlobalShortcuts(settings: AppSettings): string[] {
     [
       settings.quickSearchShortcut,
       "独立极速搜索",
-      () => createQuickSearchWindow()
+      openQuickSearch
     ]
   ];
   for (const [accelerator, label, handler] of registrations) {
@@ -1448,7 +1574,7 @@ function registerIpc(): void {
       mainWindow.show();
       mainWindow.focus();
     } else {
-      createQuickSearchWindow();
+      openQuickSearch();
     }
     return true;
   });
@@ -1468,7 +1594,7 @@ function registerIpc(): void {
     if (status.button === "disabled") {
       throw new Error("请先选择一个鼠标按键");
     }
-    createQuickSearchWindow();
+    openQuickSearch();
     return true;
   });
   ipcMain.handle("shortcut:magnifier-status", () =>
@@ -1948,84 +2074,13 @@ function registerIpc(): void {
   ipcMain.handle(
     "search:query",
     async (event, query: unknown, filters: unknown, pageOptions?: unknown) => {
-      const value = assertString(query, "搜索词", 33_000);
-      const raw = (filters ?? {}) as Partial<SearchFilters>;
-      const allowedCategories = new Set<SearchCategory>([
-        "folder",
-        "document",
-        "image",
-        "video",
-        "audio",
-        "archive",
-        "executable",
-        "code",
-        "other"
-      ]);
-      const allowedSortFields = new Set<SearchSortField>([
-        "relevance",
-        "name",
-        "path",
-        "size",
-        "modified",
-        "type"
-      ]);
-      const allowedSortDirections = new Set<SearchSortDirection>(["asc", "desc"]);
-      const regex = raw.regex === true;
-      const fuzzy = !regex && raw.fuzzy === true;
-      const wholeWord = !regex && !fuzzy && raw.wholeWord === true;
-      const safeFilters: SearchFilters = {
-        keywords: sanitizeSearchKeywords(raw.keywords),
-        keywordMatch: "any",
-        kind: ["all", "folder", "file"].includes(raw.kind ?? "") ? raw.kind! : "all",
-        scope: typeof raw.scope === "string" && raw.scope ? raw.scope : "*",
-        scopes: Array.isArray(raw.scopes)
-          ? raw.scopes
-              .filter((item): item is string => typeof item === "string" && item.length <= 32_768)
-              .slice(0, 32)
-          : undefined,
-        categories: Array.isArray(raw.categories)
-          ? raw.categories
-              .filter((item): item is SearchCategory => allowedCategories.has(item))
-              .slice(0, allowedCategories.size)
-          : undefined,
-        extensions: Array.isArray(raw.extensions)
-          ? raw.extensions
-              .filter(
-                (item): item is string =>
-                  typeof item === "string" && /^[a-z0-9_+-]{1,24}$/i.test(item)
-              )
-              .slice(0, 64)
-          : undefined,
-        minSize: typeof raw.minSize === "number" ? Math.max(0, raw.minSize) : undefined,
-        maxSize: typeof raw.maxSize === "number" ? Math.max(0, raw.maxSize) : undefined,
-        modifiedAfter: typeof raw.modifiedAfter === "string" ? raw.modifiedAfter : undefined,
-        modifiedBefore: typeof raw.modifiedBefore === "string" ? raw.modifiedBefore : undefined,
-        caseSensitive: raw.caseSensitive === true,
-        wholeWord,
-        fuzzy,
-        matchPath: raw.matchPath === true,
-        regex,
-        sortBy:
-          raw.sortBy && allowedSortFields.has(raw.sortBy) ? raw.sortBy : "relevance",
-        sortDirection:
-          raw.sortDirection && allowedSortDirections.has(raw.sortDirection)
-            ? raw.sortDirection
-            : "desc"
-      };
-      if (pageOptions && typeof pageOptions === "object") {
-        const rawPage = pageOptions as { cursor?: unknown; limit?: unknown };
-        return searchService!.searchPage(value, safeFilters, {
-          cursor:
-            typeof rawPage.cursor === "string" && rawPage.cursor.length <= 256
-              ? rawPage.cursor
-              : undefined,
-          limit:
-            typeof rawPage.limit === "number"
-              ? Math.min(10_000, Math.max(1, Math.trunc(rawPage.limit)))
-              : undefined
-        }, event.sender.id);
-      }
-      return (await searchService!.searchPage(value, safeFilters, {}, event.sender.id)).items;
+      const page = await searchService!.searchPage(
+        assertString(query, "搜索词", 33_000),
+        readSearchFilters(filters),
+        readSearchPage(pageOptions, 10_000),
+        event.sender.id
+      );
+      return pageOptions && typeof pageOptions === "object" ? page : page.items;
     }
   );
   ipcMain.handle("search:status", () => searchService!.getStatus());
@@ -2075,81 +2130,23 @@ function registerIpc(): void {
   );
   ipcMain.handle(
     "search:content-query",
-    async (event, query: unknown, scope: unknown, options: unknown) => {
-      const raw =
-        options && typeof options === "object"
-          ? (options as { regex?: unknown; caseSensitive?: unknown; keywords?: unknown; keywordMatch?: unknown })
-          : {};
-      return (await searchService!.searchContentPage(
+    async (event, query: unknown, scope: unknown, options: unknown) =>
+      (await searchService!.searchContentPage(
         assertString(query, "内容搜索词", 33_000),
         assertString(scope, "内容搜索目录"),
-        {
-          keywords: sanitizeSearchKeywords(raw.keywords),
-          keywordMatch: "any",
-          regex: raw.regex === true,
-          caseSensitive: raw.caseSensitive === true
-        },
+        readContentOptions(options),
         event.sender.id
-      )).items;
-    }
+      )).items
   );
-
   ipcMain.handle(
     "search:content-query-page",
-    (event, query: unknown, scope: unknown, options: unknown, pageOptions: unknown) => {
-      const raw =
-        options && typeof options === "object"
-          ? (options as {
-              keywords?: unknown;
-              keywordMatch?: unknown;
-              regex?: unknown;
-              caseSensitive?: unknown;
-              sortBy?: unknown;
-              sortDirection?: unknown;
-              minSize?: unknown;
-              maxSize?: unknown;
-              modifiedAfter?: unknown;
-              modifiedBefore?: unknown;
-            })
-          : {};
-      const rawPage =
-        pageOptions && typeof pageOptions === "object"
-          ? (pageOptions as { cursor?: unknown; limit?: unknown })
-          : {};
-      return searchService!.searchContentPage(
+    (event, query: unknown, scope: unknown, options: unknown, pageOptions: unknown) =>
+      searchService!.searchContentPage(
         assertString(query, "内容搜索词", 33_000),
         assertString(scope, "内容搜索目录"),
-        {
-          keywords: sanitizeSearchKeywords(raw.keywords),
-          keywordMatch: "any",
-          regex: raw.regex === true,
-          caseSensitive: raw.caseSensitive === true,
-          sortBy: ["relevance", "name", "path", "size", "modified", "type"].includes(
-            String(raw.sortBy)
-          )
-            ? (raw.sortBy as SearchSortField)
-            : "relevance",
-          sortDirection: ["asc", "desc"].includes(String(raw.sortDirection))
-            ? (raw.sortDirection as SearchSortDirection)
-            : "desc",
-          minSize: typeof raw.minSize === "number" ? Math.max(0, raw.minSize) : undefined,
-          maxSize: typeof raw.maxSize === "number" ? Math.max(0, raw.maxSize) : undefined,
-          modifiedAfter:
-            typeof raw.modifiedAfter === "string" ? raw.modifiedAfter : undefined,
-          modifiedBefore:
-            typeof raw.modifiedBefore === "string" ? raw.modifiedBefore : undefined,
-          cursor:
-            typeof rawPage.cursor === "string" && rawPage.cursor.length <= 256
-              ? rawPage.cursor
-              : undefined,
-          limit:
-            typeof rawPage.limit === "number"
-              ? Math.min(2_000, Math.max(1, Math.trunc(rawPage.limit)))
-              : undefined
-        },
+        { ...readContentOptions(options), ...readSearchPage(pageOptions, 2_000) },
         event.sender.id
-      );
-    }
+      )
   );
 
   ipcMain.handle("analysis:summarize", (_event, targetPath: unknown) => {
@@ -2301,6 +2298,10 @@ if (!singleInstance) {
   const forceDeleteStartup = acceptForceDeleteLaunch(process.argv);
   app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
     if (acceptForceDeleteLaunch(argv, additionalData)) return;
+    if (searchService && argv.includes("--quick-search")) {
+      openQuickSearch();
+      return;
+    }
     // The renderer is intentionally destroyed while resident in the tray.
     // Launching the executable again must therefore recreate the main window,
     // not silently return just because no BrowserWindow currently exists.
@@ -2329,6 +2330,7 @@ if (!singleInstance) {
     const currentSettings = store.getSettings();
     searchService = new SearchService(
       (status) => {
+        nativeQuickSearch?.sendEvent("indexStatus", status);
         for (const window of [mainWindow, quickSearchWindow]) {
           if (window && !window.isDestroyed()) {
             window.webContents.send("indexer:status", status);
@@ -2336,6 +2338,7 @@ if (!singleInstance) {
         }
       },
       (status) => {
+        nativeQuickSearch?.sendEvent("contentStatus", { ...status, message: status.message ?? "" });
         for (const window of [mainWindow, quickSearchWindow]) {
           if (window && !window.isDestroyed()) {
             window.webContents.send("content-indexer:status", status);
@@ -2343,6 +2346,7 @@ if (!singleInstance) {
         }
       },
       (event) => {
+        if (nativeQuickSearch?.visible) nativeQuickSearch.sendEvent("indexChanged", event);
         for (const window of [mainWindow, quickSearchWindow]) {
           if (
             window &&
@@ -2354,7 +2358,7 @@ if (!singleInstance) {
           }
         }
       },
-      () => createQuickSearchWindow(),
+      openQuickSearch,
       {
         button: currentSettings.mouseQuickSearchButton,
         holdMs: currentSettings.mouseQuickSearchHoldMs
@@ -2366,6 +2370,7 @@ if (!singleInstance) {
         height: currentSettings.magnifierHeight
       }
     );
+    nativeQuickSearch = createNativeQuickSearchHost();
     migrationService = new MigrationService(store, (record, message) => {
       for (const window of [mainWindow, uninstallRestoreWindow]) {
         if (window && !window.isDestroyed()) window.webContents.send("migration:progress", { record, message });
@@ -2380,7 +2385,11 @@ if (!singleInstance) {
       process.argv.includes("--startup-minimized") &&
       currentSettings.launchAtLogin &&
       currentSettings.launchMinimized;
-    if (pendingUpdateStartup || (!startupMinimized && !forceDeleteStartup && !forceDeleteLaunches.pending)) {
+    const quickSearchStartup = !pendingUpdateStartup && !forceDeleteStartup && !forceDeleteLaunches.pending &&
+      process.argv.includes("--quick-search");
+    if (quickSearchStartup) {
+      openQuickSearch();
+    } else if (pendingUpdateStartup || (!startupMinimized && !forceDeleteStartup && !forceDeleteLaunches.pending)) {
       mainWindow = createWindow(pendingUpdateStartup);
     }
     showForceDeleteRequests();
@@ -2437,7 +2446,7 @@ app.on("window-all-closed", () => {
     store.getSettings().minimizeToTray &&
     tray != null &&
     !tray.isDestroyed();
-  if (process.platform !== "darwin" && !keepInTray) app.quit();
+  if (process.platform !== "darwin" && !keepInTray && !nativeQuickSearch?.opened) app.quit();
 });
 
 app.on("before-quit", (event) => {
@@ -2458,6 +2467,7 @@ app.on("before-quit", (event) => {
   if (!shutdownPromise) {
     shutdownPromise = (async () => {
       try {
+        await nativeQuickSearch?.stop();
         await migrationService?.whenIdle();
         await forceDeleteService?.whenIdle();
         await Promise.allSettled([...pendingFileMutations]);

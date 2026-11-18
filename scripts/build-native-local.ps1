@@ -1,7 +1,7 @@
 ﻿param(
   [switch]$Test,
   [switch]$AllowDownloads,
-  [ValidateSet("all", "indexer", "updater")][string]$Project = "all",
+  [ValidateSet("all", "indexer", "updater", "quick-search-prototype")][string]$Project = "all",
   [string]$RustRoot = "E:\Environment\rust\1.99.0",
   [string]$LlvmBin = "E:\Environment\ndk\30.0.16248370\toolchains\llvm\prebuilt\windows-x86_64\bin",
   [string]$SdkRoot,
@@ -32,7 +32,7 @@ Write-Host "Read-only SDK: $SdkRoot"
 Write-Host "Project dependency cache: $cargoCache"
 Write-Host "Project temporary files: $temporaryPath"
 New-Item -ItemType Directory -Path $cargoCache, $temporaryPath -Force | Out-Null
-$projects = if ($Project -eq "all") { @("indexer", "updater") } else { @($Project) }
+$projects = if ($Project -eq "all") { @("indexer", "updater", "quick-search-prototype") } else { @($Project) }
 
 # Seed only locked package archives. Cargo extracts sources into the project cache.
 $seedIndex = Join-Path $CacheSeedRoot "registry\index"

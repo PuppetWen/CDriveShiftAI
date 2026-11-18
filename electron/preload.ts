@@ -4,7 +4,8 @@ import type {
   DirectoryDialogPurpose,
   IndexerStatus,
   MigrationRecord,
-  SearchIndexChangedEvent
+  SearchIndexChangedEvent,
+  SearchWorkspaceState
 } from "./types";
 import type { AppUpdateInfo } from "./update";
 
@@ -192,6 +193,7 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
       view: string;
       path?: string;
       focus?: "ai-settings" | "search-input";
+      searchWorkspace?: SearchWorkspaceState;
     }) => void
   ) => {
     const handler = (
@@ -200,6 +202,7 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
         view: string;
         path?: string;
         focus?: "ai-settings" | "search-input";
+        searchWorkspace?: SearchWorkspaceState;
       }
     ) => listener(payload);
     ipcRenderer.on("app:navigate", handler);

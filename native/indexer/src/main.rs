@@ -7,6 +7,7 @@ use regex::RegexBuilder;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::cmp::Ordering as CompareOrdering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -17,6 +18,17 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod compact_path_pool;
+mod mapped_tables;
+use compact_path_pool::CompactPathPool;
+use mapped_tables::MappedTables;
+
+#[cfg(any(windows, test))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+mod usn_journal;
+#[cfg(windows)]
+mod usn_refresh;
 
 const CACHE_MAGIC: &[u8; 8] = b"CSIDX02\0";
 const CONTENT_INDEX_VERSION: u32 = 3;
@@ -130,6 +142,9 @@ fn reserve_live_slot<T>(table: &mut Vec<T>) {
 #[derive(Default)]
 struct SearchIndex {
     storage: PathStorage,
+    mapped: Option<MappedTables>,
+    mapped_removed: Vec<u64>,
+    mapped_sizes: HashMap<usize, u64>,
     delta_paths: Vec<u8>,
     entries: Vec<IndexedEntry>,
     name_signatures: Vec<u64>,
@@ -932,6 +947,21 @@ fn normalized(value: &str) -> String {
     value.replace('/', "\\").to_lowercase()
 }
 
+fn path_matches_scope(value: &str, scope: &str) -> bool {
+    let bytes = value.as_bytes();
+    if let Some(prefix) = bytes.get(..scope.len()) {
+        if scope.is_ascii() && prefix.is_ascii() {
+            let is_within = bytes.get(scope.len()).map_or(true, |byte| matches!(byte, b'\\' | b'/'));
+            return is_within && prefix.iter().zip(scope.bytes()).all(|(&actual, expected)| {
+                let folded = if actual == b'/' { b'\\' } else { actual.to_ascii_lowercase() };
+                folded == expected
+            });
+        }
+    }
+    normalized(value).strip_prefix(scope)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(['\\', '/']))
+}
+
 fn normalized_path_hash(value: &str) -> u64 {
     // FNV-1a over the normalized UTF-8 representation is stable across runs,
     // compact, and sufficient for local path identity. Exact paths are still
@@ -1178,9 +1208,9 @@ fn path_belongs_to_root(path_value: &str, root: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(root))
 }
 
-fn validate_global_entry_count<'a>(
+fn validate_global_entry_count<T: AsRef<str>>(
     roots: &[String],
-    paths: impl Iterator<Item = &'a str>,
+    paths: impl Iterator<Item = T>,
 ) -> io::Result<()> {
     let Some(system_root) = system_drive_root() else {
         return Ok(());
@@ -1194,7 +1224,7 @@ fn validate_global_entry_count<'a>(
     }
 
     let system_entries = paths
-        .filter(|path_value| path_belongs_to_root(path_value, &system_root))
+        .filter(|path_value| path_belongs_to_root(path_value.as_ref(), &system_root))
         .take(MINIMUM_SYSTEM_DRIVE_ENTRIES)
         .count();
     if system_entries < MINIMUM_SYSTEM_DRIVE_ENTRIES {
@@ -1211,12 +1241,9 @@ fn validate_global_entry_count<'a>(
 fn validate_entry_cache(roots: &[String], index: &SearchIndex) -> io::Result<()> {
     validate_global_entry_count(
         roots,
-        index
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(entry_index, _)| index.live.get(*entry_index).copied().unwrap_or(false))
-            .filter_map(|(entry_index, _)| index.path(entry_index)),
+        (0..index.entry_count())
+            .filter(|entry_index| index.is_live(*entry_index))
+            .filter_map(|entry_index| index.path(entry_index)),
     )
 }
 
@@ -1522,8 +1549,87 @@ fn folded_path_ends_with(value: &str, needle: &str) -> bool {
 }
 
 impl SearchIndex {
-    fn path(&self, index: usize) -> Option<&str> {
-        let entry = *self.entries.get(index)?;
+    fn from_mapped(mapped: MappedTables) -> Self {
+        let live_count = mapped.len();
+        Self { mapped: Some(mapped), live_count, ..Self::default() }
+    }
+
+    #[inline]
+    fn mapped_count(&self) -> usize {
+        self.mapped.as_ref().map_or(0, MappedTables::len)
+    }
+
+    #[inline]
+    fn entry_count(&self) -> usize {
+        self.mapped_count() + self.entries.len()
+    }
+
+    #[inline]
+    fn entry_at(&self, index: usize) -> Option<IndexedEntry> {
+        let base_count = self.mapped_count();
+        if index < base_count {
+            return self.mapped.as_ref()?.entry(index);
+        }
+        self.entries.get(index - base_count).copied()
+    }
+
+    #[inline]
+    fn signature_at(&self, index: usize) -> Option<u64> {
+        let base_count = self.mapped_count();
+        if index < base_count {
+            return self.mapped.as_ref()?.signatures().get(index).copied();
+        }
+        self.name_signatures.get(index - base_count).copied()
+    }
+
+    #[inline]
+    fn is_live(&self, index: usize) -> bool {
+        let base_count = self.mapped_count();
+        if index < base_count {
+            return !self.mapped_removed.get(index / 64)
+                .is_some_and(|bits| bits & (1 << (index % 64)) != 0);
+        }
+        self.live.get(index - base_count).copied().unwrap_or(false)
+    }
+
+    fn entry_size(&self, index: usize, entry: IndexedEntry) -> u64 {
+        if self.mapped_sizes.is_empty() {
+            return entry.size();
+        }
+        self.mapped_sizes.get(&index).copied().unwrap_or_else(|| entry.size())
+    }
+
+    fn path_pool(&self) -> Option<CompactPathPool<'_>> {
+        self.mapped.as_ref()?.path_pool().ok()
+    }
+
+    fn path(&self, index: usize) -> Option<Cow<'_, str>> {
+        let entry = self.entry_at(index)?;
+        if index < self.mapped_count() {
+            let mut scratch = Vec::new();
+            let pool = self.path_pool()?;
+            let bytes = pool.decode(index, &mut scratch)?;
+            return Some(Cow::Owned(std::str::from_utf8(bytes).ok()?.to_owned()));
+        }
+        self.path_from_entry(entry).map(Cow::Borrowed)
+    }
+
+    fn path_into<'a>(
+        &'a self,
+        pool: Option<&CompactPathPool<'a>>,
+        index: usize,
+        entry: IndexedEntry,
+        scratch: &'a mut Vec<u8>,
+    ) -> Option<&'a str> {
+        if let Some(pool) = pool {
+            if index < pool.len() {
+                return std::str::from_utf8(pool.decode(index, scratch)?).ok();
+            }
+        }
+        self.path_from_entry(entry)
+    }
+
+    fn path_from_entry(&self, entry: IndexedEntry) -> Option<&str> {
         let start = usize::try_from(entry.offset).ok()?;
         let end = start.checked_add(entry.length())?;
         let bytes = if entry.is_delta() {
@@ -1536,6 +1642,19 @@ impl SearchIndex {
             }
         };
         std::str::from_utf8(bytes).ok()
+    }
+
+    fn name_into<'a>(
+        &'a self,
+        pool: Option<&CompactPathPool<'a>>,
+        index: usize,
+        entry: IndexedEntry,
+        scratch: &'a mut Vec<u8>,
+    ) -> Option<&'a str> {
+        if let Some(name) = pool.and_then(|pool| pool.name(index)) {
+            return std::str::from_utf8(name).ok();
+        }
+        self.path_into(pool, index, entry, scratch).map(file_name)
     }
 
     fn from_parts_controlled(
@@ -1557,6 +1676,7 @@ impl SearchIndex {
             removed_trees: HashSet::new(),
             live_count: count,
             entries,
+            ..Self::default()
         };
         for entry_index in 0..index.entries.len() {
             if entry_index % 4_096 == 0 && wait_while_backgrounded(backgrounded, stopping) {
@@ -1565,8 +1685,8 @@ impl SearchIndex {
             let (signature, path_hash) = {
                 let path_value = index.path(entry_index)?;
                 (
-                    lowercase_name_signature(file_name(path_value)),
-                    normalized_path_hash(path_value),
+                    lowercase_name_signature(file_name(&path_value)),
+                    normalized_path_hash(&path_value),
                 )
             };
             index.name_signatures.push(signature);
@@ -1617,23 +1737,22 @@ impl SearchIndex {
         if let Some(index) = self.delta_positions.get(&hash).copied() {
             if self
                 .path(index as usize)
-                .is_some_and(|candidate| compare_folded(candidate, path_value, true).is_eq())
+                .is_some_and(|candidate| compare_folded(&candidate, path_value, true).is_eq())
             {
                 return Some(index as usize);
             }
         }
-        let start = self
-            .path_positions
-            .partition_point(|position| position.hash < hash);
-        for position in self.path_positions[start..]
+        let positions = self.mapped.as_ref().map_or(self.path_positions.as_slice(), MappedTables::positions);
+        let start = positions.partition_point(|position| position.hash < hash);
+        for position in positions[start..]
             .iter()
             .take_while(|position| position.hash == hash)
         {
             let index = position.index as usize;
-            if self.live.get(index).copied().unwrap_or(false)
+            if self.is_live(index)
                 && self
                     .path(index)
-                    .is_some_and(|candidate| compare_folded(candidate, path_value, true).is_eq())
+                    .is_some_and(|candidate| compare_folded(&candidate, path_value, true).is_eq())
             {
                 return Some(index);
             }
@@ -1643,7 +1762,7 @@ impl SearchIndex {
 
     fn path_is_directory(&self, path_value: &str) -> Option<bool> {
         self.find_path(path_value)
-            .and_then(|index| self.entries.get(index))
+            .and_then(|index| self.entry_at(index))
             .map(|entry| entry.is_directory())
     }
 
@@ -1667,11 +1786,21 @@ impl SearchIndex {
     }
 
     fn remove_entry(&mut self, index: usize, path_value: &str) {
-        self.live[index] = false;
-        self.live_count -= 1;
-        if self.entries[index].is_delta() {
-            self.delta_positions.remove(&normalized_path_hash(path_value));
+        let base_count = self.mapped_count();
+        if index < base_count {
+            if self.mapped_removed.is_empty() {
+                self.mapped_removed.resize(base_count.div_ceil(64), 0);
+            }
+            self.mapped_removed[index / 64] |= 1 << (index % 64);
+            self.mapped_sizes.remove(&index);
+        } else {
+            let index = index - base_count;
+            self.live[index] = false;
+            if self.entries[index].is_delta() {
+                self.delta_positions.remove(&normalized_path_hash(path_value));
+            }
         }
+        self.live_count -= 1;
     }
 
     fn remove_tree(&mut self, path_value: &str) -> bool {
@@ -1694,16 +1823,26 @@ impl SearchIndex {
             && !self.removed_trees.is_empty()
             && self.removed_trees.remove(&normalized(path));
         if let Some(index) = self.find_path(path) {
-            if self.path(index) == Some(path) && self.entries[index].is_directory() == is_directory {
+            let entry = self.entry_at(index).expect("indexed path");
+            if self.path(index).as_deref() == Some(path) && entry.is_directory() == is_directory {
                 // Frequent file writes should not leave dead copies of the
                 // same path, name signature and lookup entry in memory.
-                let resized = self.entries[index].size() != size;
-                self.entries[index].size = size;
+                let resized = self.entry_size(index, entry) != size;
+                if resized {
+                    let base_count = self.mapped_count();
+                    if index >= base_count {
+                        self.entries[index - base_count].size = size;
+                    } else if size == entry.size() {
+                        self.mapped_sizes.remove(&index);
+                    } else {
+                        self.mapped_sizes.insert(index, size);
+                    }
+                }
                 return restored || resized;
             }
             self.remove_entry(index, path);
         }
-        let index = self.entries.len() as u32;
+        let index = self.entry_count() as u32;
         let offset = self.delta_paths.len() as u64;
         self.delta_paths.extend_from_slice(path.as_bytes());
         // The first live file change must not double and copy full-size tables
@@ -1808,21 +1947,18 @@ impl SearchIndex {
             || modified_after_ms.is_some()
             || modified_before_ms.is_some();
         let scoring_needle = text.to_lowercase();
-        let candidate_at = |index: usize| -> Option<SearchCandidate> {
-            if !self.live.get(index).copied().unwrap_or(false) {
+        let pool = self.path_pool();
+        let candidate_at = |index: usize, buffers: &mut [Vec<u8>; 2]| -> Option<SearchCandidate> {
+            if !self.is_live(index) {
                 return None;
             }
             if !query_signatures.is_empty() {
-                let signature = *self.name_signatures.get(index)?;
+                let signature = self.signature_at(index)?;
                 let could_match = |query: &u64| signature & query == *query;
                 if !(if match_any { query_signatures.iter().any(could_match) }
                     else { query_signatures.iter().all(could_match) }) { return None; }
             }
-            let entry = self.entries.get(index).copied()?;
-            let path_value = self.path(index)?;
-            if self.path_is_removed(path_value) {
-                return None;
-            }
+            let entry = self.entry_at(index)?;
             let is_directory = entry.is_directory();
             if kind == "folder" && !is_directory {
                 return None;
@@ -1830,40 +1966,42 @@ impl SearchIndex {
             if kind == "file" && is_directory {
                 return None;
             }
-            let entry_path_lower = if !scope_values.is_empty() || match_path {
-                Some(normalized(path_value))
+            let cached_name = if match_path {
+                None
+            } else {
+                pool.as_ref()
+                    .and_then(|pool| pool.name(index))
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            };
+            let [early_buffer, late_buffer] = buffers;
+            let early_path = if cached_name.is_none() {
+                Some(self.path_into(pool.as_ref(), index, entry, early_buffer)?)
             } else {
                 None
             };
+            let name = cached_name.or_else(|| early_path.map(file_name))?;
             if !scope_values.is_empty()
-                && !scope_values.iter().any(|scope| {
-                    entry_path_lower.as_deref() == Some(scope.as_str())
-                        || entry_path_lower
-                            .as_deref()
-                            .unwrap_or_default()
-                            .strip_prefix(scope)
-                            .is_some_and(|suffix| suffix.starts_with(['\\', '/']))
-                })
+                && early_path.is_some_and(|path| !scope_values.iter().any(|scope| path_matches_scope(path, scope)))
             {
                 return None;
             }
             if !category_values.is_empty()
-                && !category_values.contains(file_category(is_directory, path_value))
+                && !category_values.contains(file_category(is_directory, name))
             {
                 return None;
             }
             if !extension_values.is_empty()
-                && (is_directory || !extension_values.contains(&extension_name(path_value)))
+                && (is_directory || !extension_values.contains(&extension_name(name)))
             {
                 return None;
             }
             let original_target = if match_path {
-                path_value
+                early_path?
             } else {
-                file_name(path_value)
+                name
             };
             let folded_target;
-            let target = if case_sensitive {
+            let target = if case_sensitive || regex_mode {
                 original_target
             } else {
                 folded_target = original_target.to_lowercase();
@@ -1892,11 +2030,21 @@ impl SearchIndex {
             if !matches_query {
                 return None;
             }
+            // Name scans can reject most rows without paging in the full-path
+            // pool. Matching rows still honor scope, tombstones and ranking.
+            let path_value = early_path
+                .or_else(|| self.path_into(pool.as_ref(), index, entry, late_buffer))?;
+            if self.path_is_removed(path_value)
+                || (early_path.is_none() && !scope_values.is_empty()
+                    && !scope_values.iter().any(|scope| path_matches_scope(path_value, scope)))
+            {
+                return None;
+            }
 
             let mut score = fuzzy_score.unwrap_or(60.0);
             let name_folded;
-            let entry_name_lower = if !match_path && !case_sensitive { target } else {
-                name_folded = file_name(path_value).to_lowercase(); &name_folded
+            let entry_name_lower = if !match_path && !case_sensitive && !regex_mode { target } else {
+                name_folded = name.to_lowercase(); &name_folded
             };
             if entry_name_lower == scoring_needle.as_str() {
                 score = 100.0;
@@ -1904,11 +2052,7 @@ impl SearchIndex {
                 score = 92.0;
             } else if entry_name_lower.contains(scoring_needle.as_str()) {
                 score = 82.0;
-            } else if entry_path_lower
-                .as_deref()
-                .is_some_and(|path_value| path_value.ends_with(scoring_needle.as_str()))
-                || (!match_path && folded_path_ends_with(path_value, scoring_needle.as_str()))
-            {
+            } else if folded_path_ends_with(path_value, scoring_needle.as_str()) {
                 score = 76.0;
             }
             score -= (path_value.len().min(400) as f64) * 0.01;
@@ -1923,7 +2067,7 @@ impl SearchIndex {
                     .unwrap_or(0);
                 (if is_directory { 0 } else { metadata.len() }, modified_ms)
             } else {
-                (entry.size(), 0)
+                (self.entry_size(index, entry), 0)
             };
             if min_size.is_some_and(|minimum| size < minimum)
                 || max_size.is_some_and(|maximum| size > maximum)
@@ -1942,23 +2086,26 @@ impl SearchIndex {
         };
         let process_range = |range: std::ops::Range<usize>| {
             let mut partial = Vec::with_capacity(keep.min(4_096));
+            let mut buffers = [Vec::new(), Vec::new()];
             let mut count = 0usize;
             for index in range {
-                let Some(candidate) = candidate_at(index) else {
+                let Some(candidate) = candidate_at(index, &mut buffers) else {
                     continue;
                 };
                 count = count.saturating_add(1);
                 partial.push(candidate);
                 if partial.len() >= prune_at {
                     partial.select_nth_unstable_by(keep, |first, second| {
-                        self.compare_search_candidates(first, second, sort_by, sort_direction)
+                        self.compare_search_candidates(
+                            first, second, sort_by, sort_direction, pool.as_ref(), &mut buffers
+                        )
                     });
                     partial.truncate(keep);
                 }
             }
             (partial, count)
         };
-        let entry_count = self.entries.len();
+        let entry_count = self.entry_count();
         let worker_count = thread::available_parallelism()
             .map(|count| count.get().clamp(2, 8))
             .unwrap_or(4)
@@ -1968,6 +2115,7 @@ impl SearchIndex {
             .step_by(chunk_size.max(1))
             .map(|start| start..(start + chunk_size).min(entry_count))
             .collect::<Vec<_>>();
+        let mut buffers = [Vec::new(), Vec::new()];
         let (mut matches, total_matches) = if entry_count >= 250_000 && ranges.len() > 1 {
             let partials = thread::scope(|scope| {
                 let process = &process_range;
@@ -1988,7 +2136,9 @@ impl SearchIndex {
                 merged.append(&mut partial);
                 if merged.len() > keep {
                     merged.select_nth_unstable_by(keep, |first, second| {
-                        self.compare_search_candidates(first, second, sort_by, sort_direction)
+                        self.compare_search_candidates(
+                            first, second, sort_by, sort_direction, pool.as_ref(), &mut buffers
+                        )
                     });
                     merged.truncate(keep);
                 }
@@ -1998,7 +2148,9 @@ impl SearchIndex {
             process_range(0..entry_count)
         };
         matches.sort_by(|first, second| {
-            self.compare_search_candidates(first, second, sort_by, sort_direction)
+            self.compare_search_candidates(
+                first, second, sort_by, sort_direction, pool.as_ref(), &mut buffers
+            )
         });
         matches.truncate(keep);
 
@@ -2009,8 +2161,8 @@ impl SearchIndex {
             matches[offset..page_end]
                 .iter()
                 .filter_map(|candidate| {
-                    let entry = self.entries.get(candidate.index).copied()?;
-                    let path_value = self.path(candidate.index)?;
+                    let entry = self.entry_at(candidate.index)?;
+                    let path_value = self.path_into(pool.as_ref(), candidate.index, entry, &mut buffers[0])?;
                     Some(SearchResult {
                         path: path_value.to_string(),
                         name: file_name(path_value).to_string(),
@@ -2035,27 +2187,43 @@ impl SearchIndex {
         second: &SearchCandidate,
         sort_by: &str,
         sort_direction: &str,
+        pool: Option<&CompactPathPool<'_>>,
+        buffers: &mut [Vec<u8>; 2],
     ) -> CompareOrdering {
-        let first_path = self.path(first.index).unwrap_or_default();
-        let second_path = self.path(second.index).unwrap_or_default();
-        let first_name = file_name(first_path);
-        let second_name = file_name(second_path);
-        let first_directory = self
-            .entries
-            .get(first.index)
-            .is_some_and(|entry| entry.is_directory());
-        let second_directory = self
-            .entries
-            .get(second.index)
-            .is_some_and(|entry| entry.is_directory());
+        let first_entry = self.entry_at(first.index);
+        let second_entry = self.entry_at(second.index);
+        let path_order = |buffers: &mut [Vec<u8>; 2]| {
+            let [first_buffer, second_buffer] = buffers;
+            let first_path = first_entry
+                .and_then(|entry| self.path_into(pool, first.index, entry, first_buffer))
+                .unwrap_or_default();
+            let second_path = second_entry
+                .and_then(|entry| self.path_into(pool, second.index, entry, second_buffer))
+                .unwrap_or_default();
+            compare_folded(first_path, second_path, true)
+        };
         let primary = match sort_by {
-            "name" => compare_folded(first_name, second_name, false),
-            "path" => compare_folded(first_path, second_path, true),
+            "name" | "type" => {
+                let [first_buffer, second_buffer] = buffers;
+                let first_name = first_entry
+                    .and_then(|entry| self.name_into(pool, first.index, entry, first_buffer))
+                    .unwrap_or_default();
+                let second_name = second_entry
+                    .and_then(|entry| self.name_into(pool, second.index, entry, second_buffer))
+                    .unwrap_or_default();
+                if sort_by == "name" {
+                    compare_folded(first_name, second_name, false)
+                } else {
+                    let first_directory = first_entry.is_some_and(|entry| entry.is_directory());
+                    let second_directory = second_entry.is_some_and(|entry| entry.is_directory());
+                    file_category(first_directory, first_name)
+                        .cmp(file_category(second_directory, second_name))
+                        .then_with(|| extension_name(first_name).cmp(&extension_name(second_name)))
+                }
+            }
+            "path" => path_order(buffers),
             "size" => first.size.cmp(&second.size),
             "modified" => first.modified_ms.cmp(&second.modified_ms),
-            "type" => file_category(first_directory, first_path)
-                .cmp(file_category(second_directory, second_path))
-                .then_with(|| extension_name(first_path).cmp(&extension_name(second_path))),
             _ => first
                 .score
                 .partial_cmp(&second.score)
@@ -2066,15 +2234,24 @@ impl SearchIndex {
         } else {
             primary
         };
-        directed.then_with(|| compare_folded(first_path, second_path, true))
+        if sort_by == "path" {
+            directed
+        } else {
+            directed.then_with(|| path_order(buffers))
+        }
     }
 
     fn executable_catalog(&self, limit: usize) -> Vec<SearchResult> {
         let mut results = Vec::with_capacity(limit.min(8_192));
-        for (index, entry) in self.entries.iter().copied().enumerate() {
-            let path_value = self.path(index).unwrap_or_default();
-            if !self.live.get(index).copied().unwrap_or(false)
-                || entry.is_directory()
+        let pool = self.path_pool();
+        let mut buffer = Vec::new();
+        for index in 0..self.entry_count() {
+            if !self.is_live(index) {
+                continue;
+            }
+            let Some(entry) = self.entry_at(index) else { continue; };
+            let path_value = self.path_into(pool.as_ref(), index, entry, &mut buffer).unwrap_or_default();
+            if entry.is_directory()
                 || extension_name(path_value) != "exe"
                 || self.path_is_removed(path_value)
             {
@@ -2084,7 +2261,7 @@ impl SearchIndex {
                 path: path_value.to_string(),
                 name: file_name(path_value).to_string(),
                 is_directory: false,
-                size: entry.size(),
+                size: self.entry_size(index, entry),
                 score: 100.0,
                 source: "native-index",
             });
@@ -2142,6 +2319,7 @@ fn save_cache(
         writer.write_all(path_bytes)?;
     }
     writer.flush()?;
+    writer.get_ref().sync_all()?;
     drop(writer);
     // std::fs::rename cannot replace an existing destination on Windows and
     // reports access denied (os error 5). Move the old cache aside first, then
@@ -2199,13 +2377,20 @@ fn load_cache_index(
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "bad entry count"))?
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad entry count"))?,
-    ) as usize;
+    );
     cursor += 8;
     if count > 20_000_000 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "index is too large",
         ));
+    }
+    let count = count as usize;
+    let stamp = mapped_tables::source_stamp(&file, &mapping).ok();
+    if let Some(stamp) = &stamp {
+        if let Ok(tables) = MappedTables::open(cache_path, stamp, count) {
+            return Ok((root, SearchIndex::from_mapped(tables)));
+        }
     }
     let mut entries = Vec::with_capacity(live_table_capacity(count));
     for index in 0..count {
@@ -2258,13 +2443,27 @@ fn load_cache_index(
         ));
         cursor = path_end;
     }
-    let index = SearchIndex::from_parts_controlled(
+    let mut index = SearchIndex::from_parts_controlled(
         PathStorage::Mapped(mapping),
         entries,
         backgrounded,
         stopping,
     )
     .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "indexer is stopping"))?;
+    if let (Some(stamp), PathStorage::Mapped(path_data)) = (&stamp, &index.storage) {
+        // Regenerate only after the legacy image has been parsed successfully.
+        // If the companion cannot be written, the same index remains usable.
+        if let Ok(tables) = mapped_tables::publish(
+            cache_path,
+            stamp,
+            &index.entries,
+            &index.name_signatures,
+            &index.path_positions,
+            path_data,
+        ) {
+            index = SearchIndex::from_mapped(tables);
+        }
+    }
     Ok((root, index))
 }
 
@@ -2289,27 +2488,47 @@ fn append_deltas(cache_path: &Path, deltas: &[&IndexDelta]) -> io::Result<()> {
     writer.flush()
 }
 
-fn load_deltas(cache_path: &Path) -> io::Result<Vec<IndexDelta>> {
-    let path = delta_path(cache_path);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let reader = BufReader::new(File::open(path)?);
-    let mut deltas = Vec::new();
-    for line in reader.lines().take(5_000_000) {
-        let value = line?;
-        if value.trim().is_empty() {
+fn replay_deltas(
+    cache_path: &Path,
+    index: &mut SearchIndex,
+    backgrounded: &AtomicBool,
+    stopping: &AtomicBool,
+) -> io::Result<usize> {
+    const MAX_RECORD_BYTES: u64 = 1024 * 1024;
+    let file = match File::open(delta_path(cache_path)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut applied = 0;
+    loop {
+        line.clear();
+        let bytes = (&mut reader).take(MAX_RECORD_BYTES + 1).read_until(b'\n', &mut line)?;
+        if bytes == 0 {
+            return Ok(applied);
+        }
+        if bytes as u64 > MAX_RECORD_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "index delta is too large"));
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let delta = serde_json::from_str::<IndexDelta>(&value).map_err(|error| {
+        if applied % 4_096 == 0 && wait_while_backgrounded(backgrounded, stopping) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "indexer is stopping"));
+        }
+        let delta = serde_json::from_slice::<IndexDelta>(&line).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("bad index delta: {}", error),
+                format!("bad index delta after {applied} records: {error}"),
             )
         })?;
-        deltas.push(delta);
+        // Keep committed lines if the last write was interrupted. Replaying
+        // the same record on a future start is idempotent.
+        apply_delta(index, &delta);
+        applied += 1;
     }
-    Ok(deltas)
 }
 
 fn reset_deltas(cache_path: &Path) -> io::Result<()> {
@@ -2325,12 +2544,6 @@ fn apply_delta(index: &mut SearchIndex, delta: &IndexDelta) -> bool {
         IndexDelta::Upsert { path, is_directory, size } => index.upsert(path, *is_directory, *size),
         IndexDelta::Remove { path, tree: true } => index.remove_tree(path),
         IndexDelta::Remove { path, tree: false } => index.remove_path(path),
-    }
-}
-
-fn apply_deltas(index: &mut SearchIndex, deltas: &[IndexDelta]) {
-    for delta in deltas {
-        apply_delta(index, delta);
     }
 }
 
@@ -3369,7 +3582,7 @@ mod ntfs {
         root: &str,
         backgrounded: &std::sync::atomic::AtomicBool,
         stopping: &std::sync::atomic::AtomicBool,
-    ) -> io::Result<Vec<Entry>> {
+    ) -> io::Result<(Vec<Entry>, bool)> {
         if root.len() != 3 || !root.ends_with(":\\") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -3406,6 +3619,7 @@ mod ntfs {
         };
         let mut buffer = vec![0u8; 1024 * 1024];
         let mut nodes: HashMap<u64, RawNode> = HashMap::new();
+        let mut complete = true;
 
         loop {
             if super::wait_while_backgrounded(backgrounded, stopping) {
@@ -3435,6 +3649,7 @@ mod ntfs {
                 return Err(io::Error::from_raw_os_error(code as i32));
             }
             if returned < 8 {
+                complete = false;
                 break;
             }
             data.start_file_reference_number = read_u64(&buffer, 0).unwrap_or(0);
@@ -3452,10 +3667,14 @@ mod ntfs {
                     ));
                 }
                 let record_length = match read_u32(&buffer, offset) {
-                    Some(0) | None => break,
+                    Some(0) | None => {
+                        complete = false;
+                        break;
+                    }
                     Some(value) => value as usize,
                 };
                 if offset + record_length > returned {
+                    complete = false;
                     break;
                 }
                 let major_version = read_u16(&buffer, offset + 4).unwrap_or(0);
@@ -3481,10 +3700,15 @@ mod ntfs {
                                 is_directory: attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
                             },
                         );
+                    } else {
+                        complete = false;
                     }
+                } else {
+                    complete = false;
                 }
                 offset += record_length;
             }
+            complete &= offset == returned;
             if data.start_file_reference_number == 0 {
                 break;
             }
@@ -3509,7 +3733,7 @@ mod ntfs {
                 ));
             }
             let mut visiting = HashSet::new();
-            let _ = resolve_path(*id, root, &nodes, &mut cache, &mut visiting);
+            complete &= resolve_path(*id, root, &nodes, &mut cache, &mut visiting).is_some();
         }
         let mut entries = Vec::with_capacity(nodes.len());
         for (id, node) in &nodes {
@@ -3524,15 +3748,28 @@ mod ntfs {
                 });
             }
         }
-        Ok(entries)
+        Ok((entries, complete))
     }
 }
 
-fn walk_filesystem(root: &str, output: &Output, state: &SharedState) -> Vec<Entry> {
+#[derive(Default)]
+struct FilesystemScan {
+    entries: Vec<Entry>,
+    #[cfg(windows)]
+    complete: bool,
+}
+
+fn walk_filesystem(
+    root: &str,
+    output: &Output,
+    state: &SharedState,
+    check_journal_coverage: bool,
+) -> FilesystemScan {
     let queue = Arc::new(Mutex::new(VecDeque::from([PathBuf::from(root)])));
     let entries = Arc::new(Mutex::new(Vec::new()));
     let active = Arc::new(AtomicUsize::new(0));
     let discovered = Arc::new(AtomicUsize::new(0));
+    let complete = Arc::new(AtomicBool::new(true));
     let stopping = Arc::clone(&state.stopping);
     let backgrounded = Arc::clone(&state.backgrounded);
     let workers = thread::available_parallelism()
@@ -3545,6 +3782,7 @@ fn walk_filesystem(root: &str, output: &Output, state: &SharedState) -> Vec<Entr
         let entries = Arc::clone(&entries);
         let active = Arc::clone(&active);
         let discovered = Arc::clone(&discovered);
+        let complete = Arc::clone(&complete);
         let output = output.clone();
         let root = root.to_string();
         let stopping = Arc::clone(&stopping);
@@ -3553,15 +3791,16 @@ fn walk_filesystem(root: &str, output: &Output, state: &SharedState) -> Vec<Entr
             if wait_while_backgrounded(&backgrounded, &stopping) {
                 break;
             }
-            let next = queue
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .pop_front();
-            let directory = match next {
-                Some(value) => {
+            let next = {
+                let mut queue = queue.lock().unwrap_or_else(|error| error.into_inner());
+                let next = queue.pop_front();
+                if next.is_some() {
                     active.fetch_add(1, Ordering::Relaxed);
-                    value
                 }
+                next
+            };
+            let directory = match next {
+                Some(value) => value,
                 None => {
                     if active.load(Ordering::Relaxed) == 0 {
                         break;
@@ -3570,7 +3809,11 @@ fn walk_filesystem(root: &str, output: &Output, state: &SharedState) -> Vec<Entr
                     continue;
                 }
             };
-            if let Ok(items) = snapshot_directory(&directory) {
+            let check_coverage = check_journal_coverage && complete.load(Ordering::Relaxed);
+            if let Ok((items, listing_complete)) = snapshot_directory_status(&directory, check_coverage) {
+                if !listing_complete {
+                    complete.store(false, Ordering::Relaxed);
+                }
                 for (path_buf, file_type) in items {
                     if wait_while_backgrounded(&backgrounded, &stopping) {
                         break;
@@ -3606,17 +3849,28 @@ fn walk_filesystem(root: &str, output: &Output, state: &SharedState) -> Vec<Entr
                         });
                     }
                 }
+            } else {
+                complete.store(false, Ordering::Relaxed);
             }
             active.fetch_sub(1, Ordering::Relaxed);
         }));
     }
     for handle in handles {
-        let _ = handle.join();
+        if handle.join().is_err() {
+            complete.store(false, Ordering::Relaxed);
+        }
     }
-    Arc::try_unwrap(entries)
+    let entries = Arc::try_unwrap(entries)
         .ok()
-        .and_then(|mutex| mutex.into_inner().ok())
-        .unwrap_or_default()
+        .and_then(|mutex| mutex.into_inner().ok());
+    match entries {
+        Some(entries) => FilesystemScan {
+            entries,
+            #[cfg(windows)]
+            complete: complete.load(Ordering::Relaxed) && !stopping.load(Ordering::Relaxed),
+        },
+        None => FilesystemScan::default(),
+    }
 }
 
 fn entry_from_path(path_value: &Path) -> Option<Entry> {
@@ -3640,12 +3894,39 @@ fn entry_from_path(path_value: &Path) -> Option<Entry> {
 // sending over a bounded channel, or reading file contents. A background pause
 // can last indefinitely and must not keep the source directory open.
 fn snapshot_directory(directory: &Path) -> io::Result<Vec<(PathBuf, fs::FileType)>> {
-    Ok(fs::read_dir(directory)?
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            Some((entry.path(), entry.file_type().ok()?))
-        })
-        .collect())
+    snapshot_directory_status(directory, false).map(|(rows, _)| rows)
+}
+
+fn snapshot_directory_status(
+    directory: &Path,
+    check_journal_coverage: bool,
+) -> io::Result<(Vec<(PathBuf, fs::FileType)>, bool)> {
+    #[cfg(not(windows))]
+    let _ = check_journal_coverage;
+    let mut complete = true;
+    let mut rows = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        match entry.and_then(|entry| {
+            let file_type = entry.file_type()?;
+            #[cfg(windows)]
+            if check_journal_coverage && complete && file_type.is_dir() && !file_type.is_symlink() {
+                use std::os::windows::fs::MetadataExt;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+                // Windows supplies these attributes in the enumeration; no
+                // per-directory open is needed. A traversed reparse target
+                // may change independently of this volume's journal.
+                complete = entry.metadata().is_ok_and(|metadata| {
+                    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                });
+            }
+            Ok((entry.path(), file_type))
+        }) {
+            Ok(row) => rows.push(row),
+            Err(_) => complete = false,
+        }
+    }
+    Ok((rows, complete))
 }
 
 fn collect_subtree(root: &Path, maximum: usize, state: &SharedState) -> Vec<Entry> {
@@ -3928,7 +4209,7 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
     }
     thread::spawn(move || {
         set_indexing_priority(true);
-        let loaded = (|| -> io::Result<(SearchIndex, usize, String)> {
+        let loaded = (|| -> io::Result<(SearchIndex, String)> {
             let (cached_root, mut index) =
                 load_cache_index(&state.cache_path, &state.backgrounded, &state.stopping)?;
             if normalized(&cached_root) != normalized(&state.roots.join("|")) {
@@ -3937,35 +4218,21 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
                     "cached drive set changed",
                 ));
             }
-            let (delta_count, message) = match load_deltas(&state.cache_path) {
-                Ok(deltas) => {
-                    let delta_count = deltas.len();
-                    apply_deltas(&mut index, &deltas);
-                    let message = if delta_count == 0 {
-                        "已载入持久化索引，实时监听已接管".to_string()
-                    } else {
-                        format!(
-                            "已载入持久化索引并重放 {} 条增量，实时监听已接管",
-                            delta_count
-                        )
-                    };
-                    (delta_count, message)
-                }
-                Err(error) => (
-                    0,
-                    format!(
-                        "已载入持久化索引，但增量日志损坏（{}）；建议手动刷新",
-                        error
-                    ),
-                ),
+            let message = match replay_deltas(
+                &state.cache_path, &mut index, &state.backgrounded, &state.stopping
+            ) {
+                Ok(0) => "已载入持久化索引，实时监听已接管".to_string(),
+                Ok(count) => format!("已载入持久化索引并重放 {count} 条增量，实时监听已接管"),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+                Err(error) => format!("已载入持久化索引和有效增量，但日志不完整（{error}）；建议手动刷新"),
             };
             validate_entry_cache(&state.roots, &index)?;
-            Ok((index, delta_count, message))
+            Ok((index, message))
         })();
 
         state.loading.store(false, Ordering::SeqCst);
         match loaded {
-            Ok((index, _delta_count, message)) => {
+            Ok((index, message)) => {
                 let count = index.len();
                 *state
                     .index
@@ -4007,7 +4274,7 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
                     },
                 );
                 set_indexing_priority(false);
-                start_scan(Arc::clone(&state), output.clone());
+                start_scan(Arc::clone(&state), output.clone(), false);
                 return;
             }
         }
@@ -4015,7 +4282,7 @@ fn start_initial_cache_load(state: Arc<SharedState>, output: Output) {
     });
 }
 
-fn start_scan(state: Arc<SharedState>, output: Output) {
+fn start_scan(state: Arc<SharedState>, output: Output, reuse_unchanged_volumes: bool) {
     if state.loading.load(Ordering::SeqCst) || state.scanning.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -4026,6 +4293,20 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
             set_indexing_priority(false);
             return;
         }
+        #[cfg(windows)]
+        let mut reused = if reuse_unchanged_volumes {
+            usn_refresh::reusable_volumes(
+                &state.roots,
+                &state.cache_path,
+                &state.backgrounded,
+                &state.stopping,
+            )
+            .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        #[cfg(not(windows))]
+        let _ = reuse_unchanged_volumes;
         let reset_result = {
             let _delta_guard = state
                 .delta_lock
@@ -4065,8 +4346,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     .index
                     .read()
                     .unwrap_or_else(|error| error.into_inner())
-                    .entries
-                    .len(),
+                    .entry_count(),
                 progress: 0.08,
                 root: state.display_root.clone(),
                 updated_at: None,
@@ -4075,9 +4355,11 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
         );
 
         #[cfg(windows)]
-        let (mode, result) = {
+        let (mode, result, baselines, reused_count) = {
             let mut combined = Vec::new();
             let mut used_walker = false;
+            let mut baselines = Vec::new();
+            let mut reused_count = 0usize;
             for (drive_index, root) in state.roots.iter().enumerate() {
                 if state.stopping.load(Ordering::Relaxed) {
                     break;
@@ -4099,14 +4381,32 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                 if wait_while_backgrounded(&state.backgrounded, &state.stopping) {
                     break;
                 }
-                match ntfs::enumerate(root, &state.backgrounded, &state.stopping) {
-                    Ok(mut entries)
+                if let Some(mut prior) = root
+                    .as_bytes()
+                    .first()
+                    .and_then(|letter| reused.remove(&letter.to_ascii_uppercase()))
+                {
+                    if prior.baseline.still_unchanged(root)
+                        && validate_scanned_entries(std::slice::from_ref(root), &prior.entries).is_ok()
+                    {
+                        combined.append(&mut prior.entries);
+                        baselines.push(prior.baseline);
+                        reused_count += 1;
+                        continue;
+                    }
+                }
+                // A baseline is fenced before enumeration. Never advance it
+                // to the journal tail after the scan without applying changes.
+                let baseline = usn_refresh::Baseline::capture(root);
+                let complete = match ntfs::enumerate(root, &state.backgrounded, &state.stopping) {
+                    Ok((mut entries, complete))
                         if validate_scanned_entries(std::slice::from_ref(root), &entries)
                             .is_ok() =>
                     {
-                        combined.append(&mut entries)
+                        combined.append(&mut entries);
+                        complete
                     }
-                    Ok(entries) => {
+                    Ok((entries, _)) => {
                         used_walker = true;
                         output.status(&Status {
                             mode: "hybrid".to_string(),
@@ -4121,7 +4421,9 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                                 entries.len()
                             )),
                         });
-                        combined.extend(walk_filesystem(root, &output, &state));
+                        let scan = walk_filesystem(root, &output, &state, baseline.is_some());
+                        combined.extend(scan.entries);
+                        scan.complete
                     }
                     Err(mft_error) => {
                         used_walker = true;
@@ -4137,7 +4439,14 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                                 root, mft_error
                             )),
                         });
-                        combined.extend(walk_filesystem(root, &output, &state));
+                        let scan = walk_filesystem(root, &output, &state, baseline.is_some());
+                        combined.extend(scan.entries);
+                        scan.complete
+                    }
+                };
+                if complete {
+                    if let Some(baseline) = baseline {
+                        baselines.push(baseline);
                     }
                 }
             }
@@ -4145,6 +4454,8 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
             (
                 if used_walker { "hybrid" } else { "mft" }.to_string(),
                 validation.map(|_| combined),
+                baselines,
+                reused_count,
             )
         };
 
@@ -4152,7 +4463,7 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
         let (mode, result) = {
             let mut combined = Vec::new();
             for root in &state.roots {
-                combined.extend(walk_filesystem(root, &output, &state));
+                combined.extend(walk_filesystem(root, &output, &state, false).entries);
             }
             let validation = validate_scanned_entries(&state.roots, &combined);
             ("walker".to_string(), validation.map(|_| combined))
@@ -4192,6 +4503,12 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     std::mem::take(&mut *current)
                 };
                 drop(previous_index);
+                #[cfg(windows)]
+                let baseline_commit = if baselines.is_empty() {
+                    None
+                } else {
+                    usn_refresh::BaselineCommit::begin(&state.cache_path).ok()
+                };
                 let save_result = save_cache(
                     &state.cache_path,
                     &cache_key,
@@ -4238,16 +4555,23 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     .delta_lock
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                let delta_result = load_deltas(&state.cache_path);
-                if let Ok(deltas) = &delta_result {
-                    apply_deltas(&mut index, deltas);
-                }
+                let delta_result = replay_deltas(
+                    &state.cache_path, &mut index, &state.backgrounded, &state.stopping
+                );
                 let count = index.len();
                 *state
                     .index
                     .write()
                     .unwrap_or_else(|error| error.into_inner()) = index;
                 state.generation.fetch_add(1, Ordering::AcqRel);
+                #[cfg(windows)]
+                if cache_error.is_none() {
+                    if let Some(commit) = baseline_commit {
+                        if let Err(error) = commit.finish(&state.cache_path, &baselines) {
+                            eprintln!("could not persist USN baseline: {error}");
+                        }
+                    }
+                }
                 drop(delta_guard);
                 trim_process_working_set();
                 let persistent_cache = cache_error.is_none();
@@ -4260,6 +4584,9 @@ fn start_scan(state: Arc<SharedState>, output: Output) {
                     (None, Some(error)) => Some(format!("索引可用，但增量日志读取失败：{}", error)),
                     (None, None) => None,
                 };
+                #[cfg(windows)]
+                let cache_message = cache_message.or_else(|| (reused_count > 0)
+                    .then(|| format!("已复用 {reused_count} 个在基准扫描后无变更的 NTFS 卷")));
                 update_status(
                     &state,
                     &output,
@@ -4392,14 +4719,17 @@ fn run_server() -> io::Result<()> {
                 output.status(&initial_status);
 
                 let force_rebuild = request.force_rebuild.unwrap_or(false);
-                let _rebuild_reason = request.rebuild_reason;
                 state = Some(Arc::clone(&shared));
                 output.send(&json!({ "id": request.id, "ok": true }));
                 // Cache parsing and in-memory index construction must not block
                 // the command loop; otherwise a minimize/background request
                 // cannot pause a large startup load until it has already ended.
                 if force_rebuild {
-                    start_scan(shared, output.clone());
+                    start_scan(
+                        shared,
+                        output.clone(),
+                        request.rebuild_reason.as_deref() == Some("daily"),
+                    );
                 } else {
                     start_initial_cache_load(shared, output.clone());
                 }
@@ -4671,7 +5001,11 @@ fn run_server() -> io::Result<()> {
             }
             "rebuild" => {
                 if let Some(shared) = &state {
-                    start_scan(Arc::clone(shared), output.clone());
+                    start_scan(
+                        Arc::clone(shared),
+                        output.clone(),
+                        request.rebuild_reason.as_deref() == Some("daily"),
+                    );
                     output.send(&json!({ "id": request.id, "ok": true }));
                 } else {
                     output.send(
@@ -4835,6 +5169,92 @@ mod tests {
         assert_eq!(index.len(), 2);
         drop(index);
         fs::remove_dir_all(test_root).expect("remove test directory");
+    }
+
+    #[test]
+    fn indexed_scope_requires_a_component_boundary_and_preserves_unicode_fold() {
+        assert!(super::path_matches_scope(r"C:/Data/Folder", r"c:\data"));
+        assert!(super::path_matches_scope(r"C:\DATA", r"c:\data"));
+        assert!(!super::path_matches_scope(r"C:\Database", r"c:\data"));
+        assert!(super::path_matches_scope(r"C:\Keys\README", r"c:\keys"));
+        assert!(!super::path_matches_scope(r"C:\Keystore", r"c:\keys"));
+    }
+
+    #[test]
+    fn mapped_base_remains_immutable_when_watcher_updates_it() {
+        let root = std::env::temp_dir().join(format!(
+            "cshift-mapped-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let cache = root.join("names.bin");
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let path = r"T:\Old\document.txt";
+        let entries = [Entry { path: path.to_string(), is_directory: false, size: 5 }];
+        save_cache(&cache, "T:\\", &entries, &backgrounded, &stopping).unwrap();
+        let (_, index) = load_cache_index(&cache, &backgrounded, &stopping).unwrap();
+        assert!(index.mapped.is_some());
+        let companion = cache.with_extension("tables");
+        let original_image = fs::read(&companion).unwrap();
+        drop(index);
+
+        let (_, mut index) = load_cache_index(&cache, &backgrounded, &stopping).unwrap();
+        assert!(index.mapped.is_some());
+        assert_eq!(index.path_pool().unwrap().name(0), Some(b"document.txt".as_slice()));
+        assert!(index.entries.is_empty());
+        assert!(!index.upsert(path, false, 5));
+        assert!(index.upsert(path, false, 7));
+        let base = index.entry_at(0).unwrap();
+        assert_eq!(index.entry_size(0, base), 7);
+        assert_eq!(base.size(), 5);
+        assert!(index.remove_path(path));
+        assert_eq!(index.find_path(path), None);
+        assert!(index.upsert(r"T:\New\document.txt", false, 8));
+        assert_eq!(index.path(1).as_deref(), Some(r"T:\New\document.txt"));
+        assert_eq!(index.len(), 1);
+        assert_eq!(fs::read(&companion).unwrap(), original_image);
+        drop(index);
+
+        // The replacement has the same length and row count. Its old companion
+        // must be rejected rather than used with different path bytes.
+        let entries = [Entry {
+            path: r"T:\New\document.txt".to_string(), is_directory: false, size: 8
+        }];
+        save_cache(&cache, "T:\\", &entries, &backgrounded, &stopping).unwrap();
+        let (_, index) = load_cache_index(&cache, &backgrounded, &stopping).unwrap();
+        assert_eq!(index.find_path(path), None);
+        assert_eq!(index.find_path(r"T:\New\document.txt"), Some(0));
+        assert_eq!(index.entry_at(0).unwrap().size(), 8);
+        assert_ne!(fs::read(&companion).unwrap(), original_image);
+        drop(index);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_keeps_valid_deltas_when_the_last_write_is_incomplete() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "cshift-delta-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let cache = root.join("names.bin");
+        let path = r"T:\new.txt";
+        let record = super::IndexDelta::Upsert { path: path.to_string(), is_directory: false, size: 7 };
+        super::append_deltas(&cache, &[&record]).unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(super::delta_path(&cache)).unwrap();
+        file.write_all(b"{\"op\":").unwrap();
+        drop(file);
+
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let mut index = SearchIndex::default();
+        let error = super::replay_deltas(&cache, &mut index, &backgrounded, &stopping).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.path(0).as_deref(), Some(path));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

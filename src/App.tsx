@@ -24,6 +24,7 @@ import type {
   EffectMode,
   IndexerStatus,
   MigrationRecord,
+  SearchWorkspaceState,
   SettingsModuleId,
   SystemOverview,
   ViewId
@@ -81,6 +82,10 @@ function initialView(): ViewId {
 export default function App() {
   const { t, ui, runtimeText } = useI18n();
   const [view, setView] = useState<ViewId>(initialView);
+  const [searchNavigation, setSearchNavigation] = useState<{ revision: number; workspace?: SearchWorkspaceState }>({ revision: 0 });
+  const clearSearchNavigation = useCallback((workspace: SearchWorkspaceState) => {
+    setSearchNavigation((current) => current.workspace === workspace ? { revision: current.revision } : current);
+  }, []);
   const [overview, setOverview] = useState<SystemOverview>();
   const [settings, setSettings] = useState<AppSettings>();
   const [indexer, setIndexer] = useState<IndexerStatus>(fallbackStatus);
@@ -231,6 +236,10 @@ export default function App() {
         }
       }
       setView(event.view);
+      if (event.view === "search" && event.searchWorkspace) {
+        const workspace = event.searchWorkspace;
+        setSearchNavigation((current) => ({ revision: current.revision + 1, workspace }));
+      }
       if (event.focus === "ai-settings") {
         setSettingsModule("ai");
         window.setTimeout(() => {
@@ -365,6 +374,9 @@ export default function App() {
       case "search":
         return (
           <SearchView
+            key={searchNavigation.revision}
+            initialWorkspace={searchNavigation.workspace}
+            onWorkspaceRestored={clearSearchNavigation}
             indexer={indexer}
             drives={overview?.drives ?? []}
             onAnalyze={analyzePath}

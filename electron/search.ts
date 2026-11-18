@@ -116,6 +116,7 @@ export class SearchService {
   private cachePath?: string;
   private dailyRefreshTimer?: NodeJS.Timeout;
   private restartTimer?: NodeJS.Timeout;
+  private startPromise?: Promise<void>;
   private stopPromise?: Promise<void>;
   private lastFullRefreshRequestedAt = 0;
   private refreshDue = false;
@@ -151,7 +152,13 @@ export class SearchService {
     };
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startIndexer().finally(() => { this.startPromise = undefined; });
+    return this.startPromise;
+  }
+
+  private async startIndexer(): Promise<void> {
     if (this.stopping || this.child) return;
     const executable = app.isPackaged
       ? path.join(process.resourcesPath, "bin", "cshift-indexer.exe")
@@ -167,6 +174,7 @@ export class SearchService {
       });
       return;
     }
+    if (this.stopping) return;
 
     const child = spawn(executable, ["--serve"], {
       cwd: app.getPath("userData"),
@@ -501,12 +509,12 @@ export class SearchService {
     return request;
   }
 
-  async rebuild(): Promise<void> {
+  async rebuild(automatic = false): Promise<void> {
     if (!this.child) {
       await this.start();
       if (!this.child) throw new Error("原生索引核心不可用");
     }
-    await this.request({ op: "rebuild" }, 5_000);
+    await this.request({ op: "rebuild", ...(automatic ? { rebuildReason: "daily" } : {}) }, 5_000);
     this.executableCatalogCache = undefined;
   }
 
@@ -1228,7 +1236,7 @@ export class SearchService {
         return;
       }
       this.refreshDue = false;
-      void this.rebuild().catch((error) => {
+      void this.rebuild(true).catch((error) => {
         this.updateStatus({
           ...this.status,
           state: "error",

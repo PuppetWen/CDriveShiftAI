@@ -18,7 +18,8 @@ if (-not $visualStudioPath) {
 $developerCommand = Join-Path $visualStudioPath "Common7\Tools\VsDevCmd.bat"
 $manifestPaths = @(
   (Join-Path $workspacePath "native\indexer\Cargo.toml"),
-  (Join-Path $workspacePath "native\updater\Cargo.toml")
+  (Join-Path $workspacePath "native\updater\Cargo.toml"),
+  (Join-Path $workspacePath "native\quick-search-prototype\Cargo.toml")
 )
 $cargoPath = (Get-Command cargo.exe -ErrorAction Stop).Source
 

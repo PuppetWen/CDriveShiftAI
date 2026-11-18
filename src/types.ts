@@ -564,6 +564,7 @@ export interface AppNavigationEvent {
   view: ViewId;
   path?: string;
   focus?: "ai-settings" | "search-input";
+  searchWorkspace?: SearchWorkspaceState;
 }
 
 export type MouseShortcutButton = "disabled" | "back" | "forward" | "middle";
