@@ -29,6 +29,7 @@ const DOWNLOAD_RETRIES = 3;
 const MANIFEST_NAME = "update-manifest.json";
 const CHECK_REQUEST_TIMEOUT_MS = 20_000;
 const CHECK_REQUEST_ATTEMPTS = 2;
+const PROXY_LOOKUP_TIMEOUT_MS = 4_000;
 
 export type UpdatePhase =
   | "idle"
@@ -91,6 +92,8 @@ export interface UpdateNetworkRoute {
   mode: "system-proxy" | "direct" | "unavailable";
   label: string;
   resolvedAt: string;
+  hostname?: string;
+  fallbackToDirect?: boolean;
 }
 
 interface GitHubRelease {
@@ -285,20 +288,42 @@ class ReleaseCheckError extends Error {
   }
 }
 
-export function summarizeProxyRules(rules: string): Pick<UpdateNetworkRoute, "mode" | "label"> {
-  const candidates = rules
-    .split(";")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  const proxy = candidates.find((item) => !/^DIRECT$/i.test(item));
-  if (!proxy) return { mode: "direct", label: "系统网络 · 直连" };
-  const match = /^(PROXY|HTTPS?|SOCKS(?:4|5)?)\s+(.+)$/i.exec(proxy);
-  if (!match) return { mode: "system-proxy", label: "Windows 系统代理" };
+const unavailableProxy: Pick<UpdateNetworkRoute, "mode" | "label"> = {
+  mode: "unavailable",
+  label: "系统代理检测失败，按 Windows 默认网络继续"
+};
+
+export function summarizeProxyRules(
+  rules: string
+): Pick<UpdateNetworkRoute, "mode" | "label" | "fallbackToDirect"> {
+  const [preferred, ...alternatives] = rules.split(";").map((rule) => rule.trim()).filter(Boolean);
+  if (!preferred) return unavailableProxy;
+  if (/^DIRECT$/i.test(preferred)) {
+    return { mode: "direct", label: "系统网络 · 未匹配应用层代理" };
+  }
+  const match = /^(PROXY|HTTPS?|SOCKS(?:4|5)?|QUIC)\s+(\S+)$/i.exec(preferred);
+  if (!match) return unavailableProxy;
   const endpoint = match[2].replace(/^.*@/, "");
+  if (!endpoint) return unavailableProxy;
   return {
     mode: "system-proxy",
-    label: `Windows 系统代理 · ${match[1].toUpperCase()} ${endpoint}`
+    label: `Windows 系统代理 · ${match[1].toUpperCase()} ${endpoint}`,
+    ...(alternatives.some((rule) => /^DIRECT$/i.test(rule)) ? { fallbackToDirect: true } : {})
   };
+}
+
+async function withProxyTimeout<T>(operation: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("System proxy lookup timed out")), PROXY_LOOKUP_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -344,13 +369,14 @@ function safeManifest(value: unknown): UpdateManifest | undefined {
 }
 
 export class UpdateService {
-  private cached?: { at: number; result: AppUpdateInfo };
+  private cached?: { at: number; result: AppUpdateInfo; routeUrl: string };
   private state: AppUpdateInfo;
   private manifest?: UpdateManifest;
   private abortController?: AbortController;
   private lastProgressAt = 0;
-  private networkResolvedAt = 0;
+  private routeUrl = RELEASE_API;
   private checkInFlight?: Promise<AppUpdateInfo>;
+  private checkingCachedRoute = false;
   private installation?: Promise<AppUpdateInfo>;
   private apiRetryAt = 0;
 
@@ -383,28 +409,28 @@ export class UpdateService {
     return result;
   }
 
-  private async resolveNetworkRoute(url: string, force = false): Promise<void> {
-    if (!force && this.state.network && Date.now() - this.networkResolvedAt < 30_000) {
-      return;
-    }
-    const resolvedAt = new Date().toISOString();
+  private async reloadSystemProxy(): Promise<void> {
     try {
-      const rules = await session.defaultSession.resolveProxy(url);
-      const summary = summarizeProxyRules(rules);
-      this.networkResolvedAt = Date.now();
-      this.setState({ network: { ...summary, resolvedAt } });
-      logger.info("update.network_route", summary);
+      await withProxyTimeout(session.defaultSession.forceReloadProxyConfig());
     } catch (error) {
-      this.networkResolvedAt = Date.now();
-      this.setState({
-        network: {
-          mode: "unavailable",
-          label: "系统代理检测失败，按 Windows 默认网络继续",
-          resolvedAt
-        }
-      });
+      logger.warn("update.proxy_reload_failed", { error: serializeError(error) });
+    }
+  }
+
+  private async resolveNetworkRoute(url: string): Promise<void> {
+    this.routeUrl = url;
+    const hostname = new URL(url).hostname;
+    let summary = unavailableProxy;
+    try {
+      // Chromium applies the system proxy and PAC rules to each request URL.
+      // DIRECT here describes its application proxy only. Windows can still
+      // route the underlying connection through a tunnel.
+      summary = summarizeProxyRules(await withProxyTimeout(session.defaultSession.resolveProxy(url)));
+      logger.info("update.network_route", { hostname, mode: summary.mode });
+    } catch (error) {
       logger.warn("update.proxy_resolution_failed", { error: serializeError(error) });
     }
+    this.setState({ network: { ...summary, hostname, resolvedAt: new Date().toISOString() } });
   }
 
   private async networkFetch(
@@ -412,7 +438,8 @@ export class UpdateService {
     init: Parameters<typeof net.fetch>[1],
     refreshRoute = false
   ): Promise<Response> {
-    await this.resolveNetworkRoute(url, refreshRoute);
+    if (refreshRoute) await this.reloadSystemProxy();
+    await this.resolveNetworkRoute(url);
     return net.fetch(url, init);
   }
 
@@ -475,19 +502,32 @@ export class UpdateService {
 
   private async checkRelease(force: boolean): Promise<AppUpdateInfo> {
     // Startup, Settings, and the sidebar can all request a check at once.
-    if (this.checkInFlight) return this.checkInFlight;
-    const now = Date.now();
-    if (!force && this.cached && now - this.cached.at < CACHE_DURATION_MS) {
-      this.state = clone(this.cached.result);
-      return this.getState();
+    if (this.checkInFlight) {
+      if (!force || !this.checkingCachedRoute) return this.checkInFlight;
+      await this.checkInFlight;
+      return this.checkRelease(true);
     }
-
-    this.checkInFlight = this.performCheck();
+    const now = Date.now();
+    const cached = !force && this.cached && now - this.cached.at < CACHE_DURATION_MS
+      ? this.cached
+      : undefined;
+    this.checkingCachedRoute = Boolean(cached);
+    this.checkInFlight = cached
+      ? this.reuseCachedRelease(cached.result, cached.routeUrl)
+      : this.performCheck();
     try {
       return await this.checkInFlight;
     } finally {
       this.checkInFlight = undefined;
+      this.checkingCachedRoute = false;
     }
+  }
+
+  private async reuseCachedRelease(result: AppUpdateInfo, routeUrl: string): Promise<AppUpdateInfo> {
+    this.state = { ...clone(result), network: this.state.network };
+    await this.reloadSystemProxy();
+    await this.resolveNetworkRoute(routeUrl);
+    return this.getState();
   }
 
   private async releaseApiError(response: Response): Promise<ReleaseCheckError> {
@@ -501,7 +541,7 @@ export class UpdateService {
         ? Date.now() + Number(retryAfter) * 1000
         : Date.parse(retryAfter ?? "");
       this.apiRetryAt = Math.max(Date.now() + 60_000, Number.isFinite(reset) ? reset : 0, Number.isFinite(retry) ? retry : 0);
-      return new ReleaseCheckError("GitHub API 请求额度已耗尽（当前网络出口共享限额），代理连接已到达 GitHub", "CHECK_RATE_LIMITED");
+      return new ReleaseCheckError("GitHub API 请求额度已耗尽（当前网络出口共享限额）", "CHECK_RATE_LIMITED");
     }
     return new ReleaseCheckError(
       response.status === 403
@@ -516,7 +556,7 @@ export class UpdateService {
     // final Response.url in current Electron. ClientRequest exposes redirect
     // events directly and uses the same Chromium/system-proxy network stack.
     // Read only the official latest->tag redirect; no HTML parsing is required.
-    await this.resolveNetworkRoute(`${RELEASE_BASE}/latest`, true);
+    await this.resolveNetworkRoute(`${RELEASE_BASE}/latest`);
     const location = await new Promise<string>((resolve, reject) => {
       const request = net.request({ url: `${RELEASE_BASE}/latest`, redirect: "manual" });
       let settled = false;
@@ -573,12 +613,13 @@ export class UpdateService {
       errorCode: undefined
     });
     try {
+      await this.reloadSystemProxy();
       let release: GitHubRelease;
       let manifest: UpdateManifest | undefined;
       let usedPublicManifest = false;
       try {
         if (Date.now() < this.apiRetryAt) throw new ReleaseCheckError("GitHub API 仍在限流冷却期", "CHECK_RATE_LIMITED");
-        const response = await this.fetchForUpdateCheck(RELEASE_API, currentVersion, true);
+        const response = await this.fetchForUpdateCheck(RELEASE_API, currentVersion);
         if (!response.ok) throw await this.releaseApiError(response);
         release = (await response.json()) as GitHubRelease;
       } catch (apiError) {
@@ -673,7 +714,7 @@ export class UpdateService {
         network: this.state.network
       };
       this.state = result;
-      this.cached = { at: Date.now(), result: clone(result) };
+      this.cached = { at: Date.now(), result: clone(result), routeUrl: this.routeUrl };
       this.onState(this.getState());
       return this.getState();
     } catch (error) {

@@ -21,22 +21,12 @@ import { access, cp, lstat, readlink, rename, stat, writeFile } from "node:fs/pr
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { analyzeLocally, scanOwnershipMap, summarizeDirectory } from "./analyzer";
-import { enhanceAnalysisWithAi } from "./ai";
-import {
-  completeAiText,
-  discoverAiModels,
-  validateAiConnection,
-  type ResolvedAiConnection
-} from "./ai-client";
+import type { ResolvedAiConnection } from "./ai-client";
 import { configureApplicationDataPaths } from "./data-root";
-import { createDiagnosticReport } from "./diagnostics";
 import { normalizeDirectoryDialogPurpose } from "./directory-dialog";
-import { openDeleteHelper } from "./delete-helper";
 import { ExplorerContextMenuService } from "./explorer-context-menu";
 import { createForceDeleteLaunchData, ForceDeleteLaunchQueue, parseForceDeleteLaunch } from "./force-delete-launch";
-import { ForceDeleteService } from "./force-delete";
-import { analyzeForceDelete } from "./force-delete-ai";
+import type { ForceDeleteService } from "./force-delete";
 import { assertNoMigrationPathMutation, assertRenameDestinationAvailable, migrationRecordDeletionReason } from "./file-operation-guard";
 import { nativeStrings, resolveNativeLanguage } from "./i18n";
 import {
@@ -129,15 +119,23 @@ const forceDeleteLaunches = new ForceDeleteLaunchQueue();
 let fileRequestWindowReady = false;
 let migrationService: MigrationService;
 const aiVerifications = new Map<string, { fingerprint: string; expiresAt: number }>();
-const forceDeleteService = new ForceDeleteService({
-  applicationExecutable: process.execPath,
-  applicationDataRoot,
-  createVerificationId: randomUUID,
-  assertPathAllowed: assertFileMutationAllowed
-});
+let forceDeleteService: ForceDeleteService | undefined;
 let settingsUpdateQueue: Promise<unknown> = Promise.resolve();
 let fileMutationCount = 0;
 const pendingFileMutations = new Set<Promise<unknown>>();
+
+function getForceDeleteService(): ForceDeleteService {
+  if (!forceDeleteService) {
+    const { ForceDeleteService } = require("./force-delete") as typeof import("./force-delete");
+    forceDeleteService = new ForceDeleteService({
+      applicationExecutable: process.execPath,
+      applicationDataRoot,
+      createVerificationId: randomUUID,
+      assertPathAllowed: assertFileMutationAllowed
+    });
+  }
+  return forceDeleteService;
+}
 
 async function assertFileMutationAllowed(targetPath: string): Promise<void> {
   if (migrationService?.isBusy()) throw new Error("迁移或恢复正在执行，请完成后再删除或重命名");
@@ -146,7 +144,7 @@ async function assertFileMutationAllowed(targetPath: string): Promise<void> {
 
 async function runFileMutation<T>(targetPath: string, operation: () => Promise<T>): Promise<T> {
   if (isQuitting) throw new Error("程序正在退出，无法开始新的文件操作");
-  if (forceDeleteService.isBusy() || fileMutationCount > 0) throw new Error("其他文件操作正在执行，请完成后重试");
+  if (forceDeleteService?.isBusy() || fileMutationCount > 0) throw new Error("其他文件操作正在执行，请完成后重试");
   fileMutationCount++;
   const pending = (async () => {
     await assertFileMutationAllowed(targetPath);
@@ -160,7 +158,7 @@ async function runFileMutation<T>(targetPath: string, operation: () => Promise<T
 
 function assertMigrationCanStart(): void {
   if (isQuitting) throw new Error("程序正在退出，无法开始新的迁移或恢复");
-  if (fileMutationCount > 0 || forceDeleteService.isBusy()) throw new Error("文件操作正在执行，请完成后再迁移或恢复");
+  if (fileMutationCount > 0 || forceDeleteService?.isBusy()) throw new Error("文件操作正在执行，请完成后再迁移或恢复");
 }
 
 function serializeSettingsUpdate<T>(operation: () => Promise<T>): Promise<T> {
@@ -339,7 +337,7 @@ function resolveAiConnection(raw: unknown): {
   }
   return {
     input,
-    connection: validateAiConnection({ ...input, apiKey })
+    connection: (require("./ai-client") as typeof import("./ai-client")).validateAiConnection({ ...input, apiKey })
   };
 }
 
@@ -647,7 +645,7 @@ function assertUpdateCanInstall(): Promise<void> {
     "rolling-back"
   ]);
   const busy = store.listMigrations().find((record) => busyStages.has(record.stage));
-  if (busy || migrationService?.isBusy() || forceDeleteService.isBusy() || fileMutationCount > 0) {
+  if (busy || migrationService?.isBusy() || forceDeleteService?.isBusy() || fileMutationCount > 0) {
     return Promise.reject(
       new Error("当前有迁移或恢复事务正在执行；完成后才能更新程序")
     );
@@ -723,7 +721,7 @@ function createForceDeleteWindow(): BrowserWindow {
   window.on("close", (event) => {
     // Keep the result surface alive through process release and UAC retries.
     // A normal application quit already waits for this service to finish.
-    if (!isQuitting && forceDeleteService.isBusy()) event.preventDefault();
+    if (!isQuitting && forceDeleteService?.isBusy()) event.preventDefault();
   });
   window.on("closed", () => {
     if (forceDeleteWindow === window) forceDeleteWindow = undefined;
@@ -1327,6 +1325,7 @@ function registerIpc(): void {
       ? await dialog.showSaveDialog(mainWindow, options)
       : await dialog.showSaveDialog(options);
     if (selected.canceled || !selected.filePath) return { cancelled: true };
+    const { createDiagnosticReport } = require("./diagnostics") as typeof import("./diagnostics");
     const report = await createDiagnosticReport({
       applicationDataRoot,
       logDirectory: getLogDirectory(),
@@ -1523,11 +1522,13 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("ai:list-models", async (_event, raw: unknown) => {
+    const { discoverAiModels } = require("./ai-client") as typeof import("./ai-client");
     const { connection } = resolveAiConnection(raw);
     return discoverAiModels(connection);
   });
 
   ipcMain.handle("ai:test", async (_event, raw: unknown) => {
+    const { completeAiText } = require("./ai-client") as typeof import("./ai-client");
     const { connection } = resolveAiConnection(raw);
     if (!connection.model) throw new Error("请先从远程模型列表中选择一个模型");
     const started = performance.now();
@@ -1557,6 +1558,7 @@ function registerIpc(): void {
 
   ipcMain.handle("ai:save-draft", (_event, raw: unknown) => serializeSettingsUpdate(async () => {
     if (!raw || typeof raw !== "object") throw new Error("AI 草稿配置无效");
+    const { validateAiConnection } = require("./ai-client") as typeof import("./ai-client");
     const input = raw as AiDraftSaveInput;
     const rawBaseUrl =
       typeof input.baseUrl === "string" ? input.baseUrl.trim() : "";
@@ -1882,24 +1884,26 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("shell:force-delete-preview", (_event, targetPath: unknown) =>
-    forceDeleteService.preview(assertString(targetPath, "路径"))
+    getForceDeleteService().preview(assertString(targetPath, "路径"))
   );
 
   ipcMain.handle("shell:force-delete-analyze", async (_event, targetPath: unknown, failure: unknown) => {
-    if (isQuitting || forceDeleteService.isBusy()) throw new Error("文件操作正在执行或程序正在退出，请稍后再分析");
+    if (isQuitting || forceDeleteService?.isBusy()) throw new Error("文件操作正在执行或程序正在退出，请稍后再分析");
     const settings = store.getSettings();
     if (!settings.ai.enabled || !settings.ai.baseUrl || !settings.ai.model) {
       throw new Error("请先在设置中启用并配置 AI 服务，再分析占用原因");
     }
     // Never trust a renderer-supplied process list for diagnosis or deletion.
-    const preview = await forceDeleteService.preview(assertString(targetPath, "路径"));
+    const { analyzeForceDelete } = require("./force-delete-ai") as typeof import("./force-delete-ai");
+    const preview = await getForceDeleteService().preview(assertString(targetPath, "路径"));
     const analysis = await analyzeForceDelete(preview, failure === "" ? "" : assertString(failure, "失败信息", 4_000), settings, store.getApiKey());
     return { preview, analysis };
   });
 
-  ipcMain.handle("shell:delete-helper", (_event, target: unknown) =>
-    openDeleteHelper(target, shell)
-  );
+  ipcMain.handle("shell:delete-helper", (_event, target: unknown) => {
+    const { openDeleteHelper } = require("./delete-helper") as typeof import("./delete-helper");
+    return openDeleteHelper(target, shell);
+  });
 
   ipcMain.handle("shell:force-delete-menu-status", async () => {
     const status = await explorerContextMenu.getStatus();
@@ -1918,8 +1922,8 @@ function registerIpc(): void {
 
   ipcMain.handle("shell:force-delete-execute", (_event, verificationId: unknown) => {
     if (isQuitting) throw new Error("程序正在退出，无法开始新的删除操作");
-    if (fileMutationCount > 0 || forceDeleteService.isBusy()) throw new Error("其他文件操作正在执行，请完成后重试");
-    return forceDeleteService.execute(assertString(verificationId, "强制删除确认 ID", 128));
+    if (fileMutationCount > 0 || forceDeleteService?.isBusy()) throw new Error("其他文件操作正在执行，请完成后重试");
+    return getForceDeleteService().execute(assertString(verificationId, "强制删除确认 ID", 128));
   });
 
   ipcMain.handle(
@@ -2148,23 +2152,27 @@ function registerIpc(): void {
     }
   );
 
-  ipcMain.handle("analysis:summarize", (_event, targetPath: unknown) =>
-    summarizeDirectory(assertString(targetPath, "目录"))
-  );
+  ipcMain.handle("analysis:summarize", (_event, targetPath: unknown) => {
+    const { summarizeDirectory } = require("./analyzer") as typeof import("./analyzer");
+    return summarizeDirectory(assertString(targetPath, "目录"));
+  });
   ipcMain.handle(
     "analysis:analyze-legacy",
     async (_event, targetPath: unknown, useAi?: unknown) => {
+      const { analyzeLocally } = require("./analyzer") as typeof import("./analyzer");
       const local = await analyzeLocally(assertString(targetPath, "目录"));
       if (!useAi) return local;
+      const { enhanceAnalysisWithAi } = require("./ai") as typeof import("./ai");
       return enhanceAnalysisWithAi(local, {
         settings: store.getSettings(),
         apiKey: store.getApiKey()
       });
     }
   );
-  ipcMain.handle("analysis:ownership-map-legacy", (_event, drive: unknown) =>
-    scanOwnershipMap(assertString(drive, "盘符", 16))
-  );
+  ipcMain.handle("analysis:ownership-map-legacy", (_event, drive: unknown) => {
+    const { scanOwnershipMap } = require("./analyzer") as typeof import("./analyzer");
+    return scanOwnershipMap(assertString(drive, "盘符", 16));
+  });
 
   ipcMain.handle("analysis:get-saved", (_event, targetPath: unknown) =>
     store.getAnalysis(assertString(targetPath, "目录"))
@@ -2176,12 +2184,14 @@ function registerIpc(): void {
   ipcMain.handle(
     "analysis:analyze",
     async (_event, targetPath: unknown, useAi?: unknown) => {
+      const { analyzeLocally } = require("./analyzer") as typeof import("./analyzer");
       const safePath = assertString(targetPath, "目录");
       const executablePaths = await searchService?.listExecutablePaths().catch(() => []);
       const local = await analyzeLocally(safePath, undefined, executablePaths ?? []);
       let result = local;
       if (useAi) {
         try {
+          const { enhanceAnalysisWithAi } = require("./ai") as typeof import("./ai");
           result = await enhanceAnalysisWithAi(local, {
             settings: store.getSettings(),
             apiKey: store.getApiKey()
@@ -2200,6 +2210,7 @@ function registerIpc(): void {
     }
   );
   ipcMain.handle("analysis:ownership-map", async (_event, drive: unknown) => {
+    const { scanOwnershipMap } = require("./analyzer") as typeof import("./analyzer");
     const safeDrive = assertString(drive, "盘符", 16);
     const executablePaths = await searchService?.listExecutablePaths().catch(() => []);
     const result = await scanOwnershipMap(safeDrive, executablePaths ?? []);
@@ -2448,7 +2459,7 @@ app.on("before-quit", (event) => {
     shutdownPromise = (async () => {
       try {
         await migrationService?.whenIdle();
-        await forceDeleteService.whenIdle();
+        await forceDeleteService?.whenIdle();
         await Promise.allSettled([...pendingFileMutations]);
         await settingsUpdateQueue;
         await store.whenIdle();

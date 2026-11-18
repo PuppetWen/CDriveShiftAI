@@ -1,8 +1,11 @@
+const byteUnits = ["B", "KB", "MB", "GB", "TB", "PB"];
+let dateFormatter: Intl.DateTimeFormat | undefined;
+let dateFormatterExpiresAt = 0;
+
 export function formatBytes(bytes: number, decimals = 1): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : decimals)} ${units[index]}`;
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), byteUnits.length - 1);
+  return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : decimals)} ${byteUnits[index]}`;
 }
 
 export function formatPercent(value: number): string {
@@ -14,12 +17,18 @@ export function formatDate(value?: string): string {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
+  const now = performance.now();
+  if (!dateFormatter || now >= dateFormatterExpiresAt) {
+    dateFormatter = new Intl.DateTimeFormat("zh-CN", {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+    // Re-read the default time zone periodically for long-running windows.
+    dateFormatterExpiresAt = now + 30_000;
+  }
+  return dateFormatter.format(date);
 }
 
 export function fileName(path: string): string {

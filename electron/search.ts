@@ -1,7 +1,6 @@
 import { app } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import type { Stats } from "node:fs";
 import { createInterface } from "node:readline";
 import { access, lstat, readdir, stat } from "node:fs/promises";
 import { uptime } from "node:os";
@@ -34,6 +33,11 @@ interface PendingRequest {
   resolve: (response: NativeResponse) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+}
+
+interface ResultMetadata {
+  fileSize?: number;
+  modifiedAt: string;
 }
 
 async function fileExists(candidate: string): Promise<boolean> {
@@ -108,7 +112,7 @@ export class SearchService {
   };
   private stopping = false;
   private restartCount = 0;
-  private executableCatalogCache?: { at: number; paths: string[] };
+  private executableCatalogCache?: { expiresAt: number; paths: string[] };
   private cachePath?: string;
   private dailyRefreshTimer?: NodeJS.Timeout;
   private restartTimer?: NodeJS.Timeout;
@@ -117,9 +121,11 @@ export class SearchService {
   private refreshDue = false;
   private backgroundMode = false;
   private readonly queryScheduler = new LatestSearchScheduler();
-  private readonly metadataCache = new Map<string, { expiresAt: number; stats: Stats }>();
-  private readonly metadataPending = new Map<string, Promise<Stats>>();
-  private metadataEpoch = 0;
+  private readonly metadataCache = new Map<string, { expiresAt: number; result: ResultMetadata }>();
+  private readonly metadataPending = new Map<string, Promise<ResultMetadata>>();
+  private resultCacheEpoch = 0;
+  private resultCacheExpiryTimer?: NodeJS.Timeout;
+  private resultCacheExpiryAt = Infinity;
   private readonly directorySizeCache = new Map<string, { expiresAt: number; result: DirectorySizeResult }>();
   private mouseShortcutStatus: MouseShortcutStatus;
   private magnifierStatus: MagnifierStatus;
@@ -276,6 +282,7 @@ export class SearchService {
     if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
     this.queryScheduler.cancelAll();
+    this.clearResultCaches();
     logger.info("indexer.stop_started", {
       hasChild: this.child != null,
       pendingRequests: this.pending.size
@@ -431,8 +438,37 @@ export class SearchService {
     this.executableCatalogCache = undefined;
     this.metadataCache.clear();
     this.metadataPending.clear();
-    this.metadataEpoch++;
+    this.resultCacheEpoch++;
     this.directorySizeCache.clear();
+    if (this.resultCacheExpiryTimer) clearTimeout(this.resultCacheExpiryTimer);
+    this.resultCacheExpiryTimer = undefined;
+    this.resultCacheExpiryAt = Infinity;
+  }
+
+  private scheduleResultCacheExpiry(expiresAt: number): void {
+    // Batch expirations from nearby stats so a large page needs one cleanup.
+    expiresAt = Math.ceil(expiresAt / 1_000) * 1_000;
+    if (expiresAt >= this.resultCacheExpiryAt || this.stopping) return;
+    if (this.resultCacheExpiryTimer) clearTimeout(this.resultCacheExpiryTimer);
+    this.resultCacheExpiryAt = expiresAt;
+    this.resultCacheExpiryTimer = setTimeout(() => {
+      this.resultCacheExpiryTimer = undefined;
+      this.resultCacheExpiryAt = Infinity;
+      const now = Date.now();
+      let earliest = Infinity;
+      for (const cache of [this.metadataCache, this.directorySizeCache]) {
+        for (const [key, entry] of cache) {
+          if (entry.expiresAt <= now) cache.delete(key);
+          else earliest = Math.min(earliest, entry.expiresAt);
+        }
+      }
+      if (this.executableCatalogCache) {
+        if (this.executableCatalogCache.expiresAt <= now) this.executableCatalogCache = undefined;
+        else earliest = Math.min(earliest, this.executableCatalogCache.expiresAt);
+      }
+      this.scheduleResultCacheExpiry(earliest);
+    }, Math.max(0, expiresAt - Date.now()));
+    this.resultCacheExpiryTimer.unref();
   }
 
   cancelWindowSearch(ownerId: number): void {
@@ -441,19 +477,25 @@ export class SearchService {
     this.queryScheduler.cancel(`properties:${ownerId}`);
   }
 
-  private async cachedMetadata(target: string): Promise<Stats> {
+  private async cachedMetadata(target: string): Promise<ResultMetadata> {
     const key = target.toLocaleLowerCase();
     const cached = this.metadataCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.stats;
+    if (cached && cached.expiresAt > Date.now()) return cached.result;
     const pending = this.metadataPending.get(key);
     if (pending) return pending;
-    const epoch = this.metadataEpoch;
+    const epoch = this.resultCacheEpoch;
     const request = lstat(target).then((stats) => {
-      if (epoch === this.metadataEpoch) {
+      const result = {
+        fileSize: stats.isFile() ? stats.size : undefined,
+        modifiedAt: stats.mtime.toISOString()
+      };
+      if (epoch === this.resultCacheEpoch && !this.backgroundMode && !this.stopping) {
         if (this.metadataCache.size >= 4_096) this.metadataCache.delete(this.metadataCache.keys().next().value!);
-        this.metadataCache.set(key, { stats, expiresAt: Date.now() + 5_000 });
+        const expiresAt = Date.now() + 5_000;
+        this.metadataCache.set(key, { result, expiresAt });
+        this.scheduleResultCacheExpiry(expiresAt);
       }
-      return stats;
+      return result;
     }).finally(() => { if (this.metadataPending.get(key) === request) this.metadataPending.delete(key); });
     this.metadataPending.set(key, request);
     return request;
@@ -471,11 +513,12 @@ export class SearchService {
   async listExecutablePaths(): Promise<string[]> {
     if (
       this.executableCatalogCache &&
-      Date.now() - this.executableCatalogCache.at < 10 * 60_000
+      Date.now() < this.executableCatalogCache.expiresAt
     ) {
       return [...this.executableCatalogCache.paths];
     }
     if (!this.child || this.status.state === "error") return [];
+    const epoch = this.resultCacheEpoch;
     const response = await this.request(
       { op: "executableCatalog", limit: 30_000 },
       20_000
@@ -483,7 +526,11 @@ export class SearchService {
     const paths = ((response.results ?? []) as SearchResult[])
       .filter((item) => !item.isDirectory && item.path.toLocaleLowerCase().endsWith(".exe"))
       .map((item) => item.path);
-    this.executableCatalogCache = { at: Date.now(), paths };
+    if (epoch === this.resultCacheEpoch && !this.backgroundMode && !this.stopping) {
+      const expiresAt = Date.now() + 10 * 60_000;
+      this.executableCatalogCache = { expiresAt, paths };
+      this.scheduleResultCacheExpiry(expiresAt);
+    }
     return [...paths];
   }
 
@@ -561,8 +608,8 @@ export class SearchService {
           return { ...result, modifiedAt: new Date(result.modifiedAtMs!).toISOString() };
         }
         try {
-          const stats = await this.cachedMetadata(result.path);
-          return { ...result, size: stats.isFile() ? stats.size : 0, modifiedAt: stats.mtime.toISOString() };
+          const metadata = await this.cachedMetadata(result.path);
+          return { ...result, size: metadata.fileSize ?? 0, modifiedAt: metadata.modifiedAt };
         } catch { return result; }
       }));
       results.push(...batch);
@@ -670,11 +717,11 @@ export class SearchService {
       const resolved = await Promise.all(
         batch.map(async (result): Promise<SearchResult | undefined> => {
           try {
-            const stats = await this.cachedMetadata(result.path);
+            const metadata = await this.cachedMetadata(result.path);
             return {
               ...result,
-              size: stats.isFile() ? stats.size : result.size,
-              modifiedAt: stats.mtime.toISOString()
+              size: metadata.fileSize ?? result.size,
+              modifiedAt: metadata.modifiedAt
             };
           } catch {
             // 缓存加载后若某项在应用关闭期间已被删除，不向用户返回失效路径。
@@ -771,6 +818,7 @@ export class SearchService {
   }
 
   private async runDirectorySizes(inputPaths: string[], isCurrent: () => boolean, purpose: "search" | "properties"): Promise<DirectorySizeResult[]> {
+    const epoch = this.resultCacheEpoch;
     const ready: DirectorySizeResult[] = [];
     const normalizedTargets = new Map<
       string,
@@ -888,11 +936,14 @@ export class SearchService {
       await Promise.all(roots.slice(offset, offset + 2).map(scanRoot));
     }
     const results = [...normalizedTargets.values()];
-    for (const result of results) {
-      // Incomplete counts are estimates and must be retried soon, never kept as
-      // an authoritative zero after a large directory exceeds the idle budget.
-      if (this.directorySizeCache.size >= 256) this.directorySizeCache.delete(this.directorySizeCache.keys().next().value!);
-      this.directorySizeCache.set(result.path.toLocaleLowerCase(), { result: { ...result }, expiresAt: Date.now() + (result.complete ? 30_000 : 2_000) });
+    if (epoch === this.resultCacheEpoch && !this.backgroundMode && !this.stopping) {
+      for (const result of results) {
+        // Incomplete counts are estimates and expire quickly.
+        if (this.directorySizeCache.size >= 256) this.directorySizeCache.delete(this.directorySizeCache.keys().next().value!);
+        const expiresAt = Date.now() + (result.complete ? 30_000 : 2_000);
+        this.directorySizeCache.set(result.path.toLocaleLowerCase(), { result: { ...result }, expiresAt });
+        this.scheduleResultCacheExpiry(expiresAt);
+      }
     }
     return [...ready, ...results];
   }

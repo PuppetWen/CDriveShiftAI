@@ -102,6 +102,24 @@ export function normalizeScopePath(value: string): string {
     .toLocaleLowerCase();
 }
 
+export function appendSearchPage<T extends { path: string }>(current: T[], page: T[]): T[] {
+  // Hold only the new page's normalized paths. The loaded results can be far
+  // larger than a page, and the same path may appear under a different case.
+  const additions = new Map<string, T>();
+  for (const item of page) {
+    const key = normalizeScopePath(item.path);
+    if (!additions.has(key)) additions.set(key, item);
+  }
+  for (const item of current) {
+    if (additions.size === 0) return current;
+    additions.delete(normalizeScopePath(item.path));
+  }
+  if (additions.size === 0) return current;
+  const merged = current.slice();
+  for (const item of additions.values()) merged.push(item);
+  return merged;
+}
+
 export function categoryOf(result: SearchResult): SearchCategory {
   if (result.isDirectory) return "folder";
   const name = result.name.split(/[\\/]/).pop() ?? "";

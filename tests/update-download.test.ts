@@ -11,7 +11,7 @@ vi.mock("electron", () => ({
   },
   net: { fetch: (...args: Parameters<typeof fetch>) => fetch(...args) },
   session: {
-    defaultSession: { resolveProxy: async () => "DIRECT" }
+    defaultSession: { resolveProxy: async () => "DIRECT", forceReloadProxyConfig: async () => undefined }
   }
 }));
 
@@ -114,14 +114,16 @@ describe("auto-update downloader", () => {
   });
 
   it("recognizes Windows system proxy and direct routes", () => {
-    expect(summarizeProxyRules("PROXY 127.0.0.1:7890; DIRECT")).toEqual({
+    expect(summarizeProxyRules("PROXY 127.0.0.1:45555; DIRECT")).toEqual({
       mode: "system-proxy",
-      label: "Windows 系统代理 · PROXY 127.0.0.1:7890"
+      label: "Windows 系统代理 · PROXY 127.0.0.1:45555",
+      fallbackToDirect: true
     });
-    expect(summarizeProxyRules("DIRECT")).toEqual({
+    expect(summarizeProxyRules("DIRECT; SOCKS5 [::1]:54444")).toEqual({
       mode: "direct",
-      label: "系统网络 · 直连"
+      label: "系统网络 · 未匹配应用层代理"
     });
+    expect(summarizeProxyRules(" ; ")).toMatchObject({ mode: "unavailable" });
   });
 
   it("retries a transient release endpoint failure", async () => {

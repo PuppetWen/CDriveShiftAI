@@ -7,44 +7,42 @@ export interface BundledReleaseNote {
 }
 
 export const bundledReleaseNotes: BundledReleaseNote = {
-  "version": "0.2.3",
-  "summary": "降低空闲资源占用和窗口缩放开销，改善搜索响应，并修复下载后的静默安装与新版重启。",
+  "version": "0.2.4",
+  "summary": "降低大索引和搜索分页的内存占用，修复更新页的系统代理状态。",
   "sections": [
     {
-      "title": "窗口与搜索性能",
+      "title": "搜索与内存",
       "items": [
-        "停止空闲时循环重绘背景，窗口缩放时简化玻璃效果，拖动结束后再保存窗口大小。",
-        "托盘模式释放搜索结果缓存；优先使用已有索引，完整刷新延后到窗口可见时执行。",
-        "频繁写入的文件就地更新索引，避免累积重复记录，同时保留全文更新。"
+        "压缩常驻文件索引，避免首次文件变动时复制并扩容整个索引。保留现有索引文件和全部搜索条件。",
+        "结果分页复用已有路径和工作区快照，减少搜索时的临时内存和重复通信。"
       ]
     },
     {
-      "title": "自动更新",
+      "title": "更新代理",
       "items": [
-        "更新助手接手后才退出旧版，支持含空格的安装目录，并复用已校验的下载包。",
-        "静默安装后自动打开新版，核对启动回执后再提交更新和清理备份。"
+        "按更新请求的目标重新解析 Windows 系统代理和 PAC，避免缓存的版本结果恢复过期代理状态。",
+        "分别显示系统代理或未匹配应用层代理，避免把 VPN 或 TUN 流量误标为直连。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: BundledReleaseNote = {
-  "version": "0.2.3",
-  "summary": "Reduce idle and resize overhead, keep search responsive, and fix automatic installation and restart after a download.",
+  "version": "0.2.4",
+  "summary": "Reduce memory use with large indexes and paged searches, and correct the update page's system proxy status.",
   "sections": [
     {
-      "title": "Window and search performance",
+      "title": "Search and memory",
       "items": [
-        "Stop repainting the idle background, simplify glass effects while resizing and save window bounds after the drag.",
-        "Release search result caches in the tray and use the existing index before refreshing it while the window is visible.",
-        "Update frequently modified files in place in the name index while retaining full-text updates."
+        "Compact the resident file index and avoid copying and growing the entire index on the first file change. Existing index files and search filters remain compatible.",
+        "Reuse paths and workspace snapshots during pagination to reduce temporary memory and duplicate messages."
       ]
     },
     {
-      "title": "Automatic updates",
+      "title": "Update proxy",
       "items": [
-        "Wait for the updater to accept the handoff, handle installation paths with spaces and reuse verified downloads.",
-        "Launch the new version after silent installation and verify startup before committing the update and clearing the backup."
+        "Resolve Windows system proxy and PAC rules per update destination. Cached release metadata no longer restores an outdated proxy status.",
+        "Explain when no application proxy matches without implying traffic bypasses a VPN or TUN."
       ]
     }
   ]

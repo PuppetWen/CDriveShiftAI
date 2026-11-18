@@ -1219,10 +1219,28 @@ export function SettingsView({
               </span>
             )}
             {updateInfo?.network && (
-              <span className="update-network-route">
-                <Wifi size={12} />
-                {runtimeText(updateInfo.network.label)}
-              </span>
+              <>
+                <span className="update-network-route">
+                  <Wifi size={12} aria-hidden="true" />
+                  <span>
+                    {runtimeText(updateInfo.network.label)}
+                    {updateInfo.network.hostname && ` · ${updateInfo.network.hostname}`}
+                  </span>
+                </span>
+                {updateInfo.network.mode === "direct" && (
+                  <span>
+                    {ui("流量仍可能经 VPN 或 TUN 转发", "Traffic may still pass through a VPN or TUN tunnel")}
+                  </span>
+                )}
+                {updateInfo.network.mode === "system-proxy" && updateInfo.network.fallbackToDirect && (
+                  <span>
+                    {ui(
+                      "这是首选代理。代理不可用时可能按系统默认网络连接",
+                      "This is the preferred proxy. If it is unavailable, the request may use the default network."
+                    )}
+                  </span>
+                )}
+              </>
             )}
           </div>
           <div className="update-actions">

@@ -10,6 +10,23 @@ const previousReleases: Array<{
   en: Omit<BundledReleaseNote, "version">;
 }> = [
   {
+    version: "0.2.3",
+    zh: {
+      summary: "降低空闲和缩放时的资源开销，改善搜索响应，修复静默安装与新版重启。",
+      sections: [
+        { title: "窗口与搜索性能", items: ["停止空闲背景重绘，缩放时简化玻璃效果；在托盘中释放搜索结果缓存。", "优先使用已有的索引，频繁写入时就地更新记录。"] },
+        { title: "自动更新", items: ["支持含空格的安装目录，等待更新助手接手后再退出。", "校验新版窗口启动后才提交更新。"] }
+      ]
+    },
+    en: {
+      summary: "Reduce idle and resize overhead, keep search responsive, and fix silent installation and restart.",
+      sections: [
+        { title: "Window and search performance", items: ["Stop idle background redraws, simplify glass effects while resizing, and release search result caches in the tray.", "Use the existing index first and update frequently written files in place."] },
+        { title: "Automatic updates", items: ["Handle installation paths with spaces and wait for the updater to accept the handoff.", "Verify that the new window opens before committing the update."] }
+      ]
+    }
+  },
+  {
     version: "0.2.2",
     zh: {
       summary: "修复自动更新启动回执的窗口事件时序，以及更新失败后的进程清理和恢复。",

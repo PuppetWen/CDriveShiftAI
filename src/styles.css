@@ -5305,6 +5305,12 @@ input:checked + .toggle::after { transform: translateX(13px); }
   align-items: center;
   gap: 4px;
 }
+.update-network-route > svg {
+  flex: none;
+}
+.update-network-route > span {
+  overflow-wrap: anywhere;
+}
 .update-progress-meta > span:first-child {
   margin-right: auto;
 }

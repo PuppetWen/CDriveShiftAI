@@ -37,14 +37,25 @@ Object.defineProperty(document, "visibilityState", { configurable: true, get: ()
 window.__setVisible = value => { state.visible = value; document.dispatchEvent(new Event("visibilitychange")); };
 Object.assign(api, {
   async getSearchWorkspace() { return undefined; },
-  async saveSearchWorkspace() { state.saves++; },
+  async saveSearchWorkspace(workspace) { state.saves++; state.savedResultCount = workspace.results.length; },
   async listSearchBookmarks() { return []; },
   async listSearchBookmarkFolders() { return []; },
   onSearchIndexChanged(listener) { state.indexListeners.add(listener); return () => state.indexListeners.delete(listener); },
-  async searchPage(query, filters) {
+  async searchPage(query, filters, { cursor, limit = 240 } = {}) {
     state.calls.push({mode:"name",query,at:performance.now(),filters});
     if(state.deferNext) { state.deferNext=false; await new Promise(resolve=>{state.releaseSearch=resolve;}); }
     await sleep(10);
+    if (state.paginating && query === "paged") {
+      const offset = Number(cursor ?? "0");
+      const end = Math.min(1000, offset + limit);
+      const resultAt = n => ({name:"paged-"+n+".txt",path:"E:\\\\fixture\\\\paged-"+n+".txt",isDirectory:false,size:1,score:1,source:"native-index"});
+      const items = Array.from({length:end-offset}, (_, index) => resultAt(offset+index));
+      if (offset) {
+        const duplicate = resultAt(offset-1);
+        items.unshift({...duplicate, path:duplicate.path.toUpperCase()});
+      }
+      return {items,hasMore:end<1000,nextCursor:end<1000?String(end):undefined,totalMatches:1000,generation:1};
+    }
     const items = Array.from({length:state.folders?200:1},(_,i)=>({name:query+(state.folders?"-folder-"+i:".txt"),path:"E:\\\\fixture\\\\"+query+"-"+i,isDirectory:state.folders,size:1,score:1,source:"native-index"}));
     return {items,hasMore:false,totalMatches:items.length,generation:1};
   },
@@ -173,6 +184,25 @@ try {
     const sizeCalls=await evaluate('window.__perf.sizeCalls.length');await wait(850);
     assert.equal(await evaluate('window.__perf.sizeCalls.length'),sizeCalls,"Hidden size work must not continue");
     checks.push("Folder sizing waits for idle input, follows visible results, and stops scheduling when hidden");
+
+    await evaluate('window.__perf.paginating=true; window.__perf.folders=false; window.__setVisible(true); window.__input("paged")');
+    const loaded = count => until('document.querySelector(".results-head > span")?.textContent.startsWith("已加载 '+count.toLocaleString("en-US")+' /")');
+    const nextPage = () => evaluate('(()=>{const list=document.querySelector(".virtual-result-list");list.scrollTop=list.scrollHeight;list.dispatchEvent(new Event("scroll"));})()');
+    await loaded(240);
+    await nextPage();
+    await loaded(480);
+    await nextPage();
+    await loaded(720);
+    await until('window.__perf.savedResultCount === 500');
+    const savesAtSnapshotLimit = await evaluate('window.__perf.saves');
+    await nextPage();
+    await loaded(960);
+    await nextPage();
+    await loaded(1000);
+    await wait(550);
+    assert.equal(await evaluate('window.__perf.saves'), savesAtSnapshotLimit, "Paging past the saved snapshot limit must not resend the same workspace");
+    assert(await evaluate('document.querySelectorAll(".result-row").length < 100'),"Pagination must keep virtualized rendering");
+    checks.push("Pages keep all 1000 matches, deduplicate overlapping paths, and avoid repeated workspace saves");
   }
   assert.deepEqual(errors,[]);
   await mkdir(path.join(workspace,".task-tmp"),{recursive:true});

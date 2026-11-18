@@ -651,6 +651,8 @@ export interface AppUpdateInfo {
     mode: "system-proxy" | "direct" | "unavailable";
     label: string;
     resolvedAt: string;
+    hostname?: string;
+    fallbackToDirect?: boolean;
   };
 }
 

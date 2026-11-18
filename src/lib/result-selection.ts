@@ -26,8 +26,13 @@ export function toggleResultSelection(current: ReadonlySet<string>, path: string
   return next;
 }
 
-const samePaths = (left: ReadonlySet<string>, right: ReadonlySet<string>) =>
-  left.size === right.size && [...left].every((path) => right.has(path));
+function samePaths(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const path of left) {
+    if (!right.has(path)) return false;
+  }
+  return true;
+}
 
 export function useResultSelection(
   items: readonly { path: string }[],
@@ -64,11 +69,24 @@ export function useResultSelection(
   }, []);
 
   useEffect(() => {
-    const available = new Set(items.map((item) => item.path));
     setSelection((before) => {
-      const paths = new Set([...before.paths].filter((path) => available.has(path)));
-      if (samePaths(paths, before.paths)) return before;
-      return { paths, primary: paths.has(before.primary) ? before.primary : [...paths].at(-1) ?? "" };
+      if (before.paths.size === 0) return before;
+      // Most searches have only a few selected rows. Track those instead of
+      // allocating a temporary set for every loaded row after each new page.
+      const missing = new Set(before.paths);
+      for (const item of items) {
+        missing.delete(item.path);
+        if (missing.size === 0) return before;
+      }
+      const paths = new Set<string>();
+      let lastPath = "";
+      for (const path of before.paths) {
+        if (!missing.has(path)) {
+          paths.add(path);
+          lastPath = path;
+        }
+      }
+      return { paths, primary: paths.has(before.primary) ? before.primary : lastPath };
     });
   }, [items]);
 

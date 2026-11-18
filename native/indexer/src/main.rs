@@ -59,6 +59,7 @@ impl Default for PathStorage {
 }
 
 #[derive(Clone, Copy)]
+#[repr(C, packed(4))]
 struct IndexedEntry {
     offset: u64,
     // Bit 31 = watcher/delta byte pool, bit 30 = directory.
@@ -90,12 +91,39 @@ impl IndexedEntry {
         (self.length_and_flags & Self::LENGTH_MASK) as usize
     }
 
+    fn size(self) -> u64 {
+        // Read by value: a full-width field need not be aligned to eight bytes
+        // in the compact table.
+        self.size
+    }
+
     fn is_directory(self) -> bool {
         self.length_and_flags & Self::DIRECTORY_FLAG != 0
     }
 
     fn is_delta(self) -> bool {
         self.length_and_flags & Self::DELTA_FLAG != 0
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C, packed(4))]
+struct PathPosition {
+    hash: u64,
+    index: u32,
+}
+
+fn live_table_growth(len: usize) -> usize {
+    (len / 32).max(256)
+}
+
+fn live_table_capacity(len: usize) -> usize {
+    len.saturating_add(live_table_growth(len))
+}
+
+fn reserve_live_slot<T>(table: &mut Vec<T>) {
+    if table.len() == table.capacity() {
+        table.reserve_exact(live_table_growth(table.len()));
     }
 }
 
@@ -106,9 +134,9 @@ struct SearchIndex {
     entries: Vec<IndexedEntry>,
     name_signatures: Vec<u64>,
     live: Vec<bool>,
-    // The immutable base uses a sorted flat vector (16 bytes/entry) rather than
-    // a hash table. Live watcher additions remain in a small hash map.
-    path_positions: Vec<(u64, u32)>,
+    // The immutable base uses a sorted flat vector (12 bytes/entry) rather
+    // than a hash table. Live watcher additions remain in a small hash map.
+    path_positions: Vec<PathPosition>,
     delta_positions: HashMap<u64, u32>,
     // Directory removals are represented as compact prefix tombstones. The
     // previous eager implementation scanned all entries for every ambiguous
@@ -1516,15 +1544,18 @@ impl SearchIndex {
         backgrounded: &AtomicBool,
         stopping: &AtomicBool,
     ) -> Option<Self> {
+        let count = entries.len();
+        let mut live = Vec::with_capacity(entries.capacity());
+        live.resize(count, true);
         let mut index = Self {
             storage,
             delta_paths: Vec::new(),
-            name_signatures: Vec::with_capacity(entries.len()),
-            live: vec![true; entries.len()],
-            path_positions: Vec::with_capacity(entries.len()),
+            name_signatures: Vec::with_capacity(entries.capacity()),
+            live,
+            path_positions: Vec::with_capacity(count),
             delta_positions: HashMap::new(),
             removed_trees: HashSet::new(),
-            live_count: entries.len(),
+            live_count: count,
             entries,
         };
         for entry_index in 0..index.entries.len() {
@@ -1539,14 +1570,14 @@ impl SearchIndex {
                 )
             };
             index.name_signatures.push(signature);
-            index.path_positions.push((path_hash, entry_index as u32));
+            index.path_positions.push(PathPosition {
+                hash: path_hash,
+                index: entry_index as u32,
+            });
         }
         index
             .path_positions
-            .sort_unstable_by_key(|(path_hash, _)| *path_hash);
-        index.path_positions.shrink_to_fit();
-        index.name_signatures.shrink_to_fit();
-        index.entries.shrink_to_fit();
+            .sort_unstable_by_key(|position| position.hash);
         Some(index)
     }
 
@@ -1557,7 +1588,7 @@ impl SearchIndex {
     ) -> Option<Self> {
         let capacity = entries.iter().map(|entry| entry.path.len()).sum();
         let mut paths = Vec::with_capacity(capacity);
-        let mut indexed_entries = Vec::with_capacity(entries.len());
+        let mut indexed_entries = Vec::with_capacity(live_table_capacity(entries.len()));
         for (entry_index, entry) in entries.into_iter().enumerate() {
             if entry_index % 4_096 == 0 && wait_while_backgrounded(backgrounded, stopping) {
                 return None;
@@ -1593,17 +1624,18 @@ impl SearchIndex {
         }
         let start = self
             .path_positions
-            .partition_point(|(candidate, _)| *candidate < hash);
-        for (_, index) in self.path_positions[start..]
+            .partition_point(|position| position.hash < hash);
+        for position in self.path_positions[start..]
             .iter()
-            .take_while(|(candidate, _)| *candidate == hash)
+            .take_while(|position| position.hash == hash)
         {
-            if self.live.get(*index as usize).copied().unwrap_or(false)
+            let index = position.index as usize;
+            if self.live.get(index).copied().unwrap_or(false)
                 && self
-                    .path(*index as usize)
+                    .path(index)
                     .is_some_and(|candidate| compare_folded(candidate, path_value, true).is_eq())
             {
-                return Some(*index as usize);
+                return Some(index);
             }
         }
         None
@@ -1665,7 +1697,7 @@ impl SearchIndex {
             if self.path(index) == Some(path) && self.entries[index].is_directory() == is_directory {
                 // Frequent file writes should not leave dead copies of the
                 // same path, name signature and lookup entry in memory.
-                let resized = self.entries[index].size != size;
+                let resized = self.entries[index].size() != size;
                 self.entries[index].size = size;
                 return restored || resized;
             }
@@ -1674,6 +1706,11 @@ impl SearchIndex {
         let index = self.entries.len() as u32;
         let offset = self.delta_paths.len() as u64;
         self.delta_paths.extend_from_slice(path.as_bytes());
+        // The first live file change must not double and copy full-size tables
+        // that already hold millions of cached entries.
+        reserve_live_slot(&mut self.entries);
+        reserve_live_slot(&mut self.name_signatures);
+        reserve_live_slot(&mut self.live);
         self.entries.push(IndexedEntry::new(
             offset,
             path.len(),
@@ -1886,7 +1923,7 @@ impl SearchIndex {
                     .unwrap_or(0);
                 (if is_directory { 0 } else { metadata.len() }, modified_ms)
             } else {
-                (entry.size, 0)
+                (entry.size(), 0)
             };
             if min_size.is_some_and(|minimum| size < minimum)
                 || max_size.is_some_and(|maximum| size > maximum)
@@ -2047,7 +2084,7 @@ impl SearchIndex {
                 path: path_value.to_string(),
                 name: file_name(path_value).to_string(),
                 is_directory: false,
-                size: entry.size,
+                size: entry.size(),
                 score: 100.0,
                 source: "native-index",
             });
@@ -2170,7 +2207,7 @@ fn load_cache_index(
             "index is too large",
         ));
     }
-    let mut entries = Vec::with_capacity(count);
+    let mut entries = Vec::with_capacity(live_table_capacity(count));
     for index in 0..count {
         if index % 4_096 == 0 && wait_while_backgrounded(backgrounded, stopping) {
             return Err(io::Error::new(
@@ -4817,12 +4854,18 @@ mod tests {
         }
         assert_eq!(index.entries.len(), 1);
         assert!(index.delta_paths.is_empty());
-        assert_eq!(index.entries[0].size, 9_999);
+        assert_eq!(index.entries[0].size(), 9_999);
+        let entries = index.entries.as_ptr();
+        let signatures = index.name_signatures.as_ptr();
+        let live = index.live.as_ptr();
         assert!(index.remove_path(path));
         assert!(!index.remove_path(path));
         assert!(index.upsert(path, false, 10_000));
         assert_eq!(index.len(), 1);
         assert_eq!(index.find_path(path), Some(1));
+        assert_eq!(index.entries.as_ptr(), entries);
+        assert_eq!(index.name_signatures.as_ptr(), signatures);
+        assert_eq!(index.live.as_ptr(), live);
     }
 
     #[test]

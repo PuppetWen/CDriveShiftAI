@@ -12,7 +12,6 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { summarizeDirectory } from "./analyzer";
 import { hasSignificantAnalysisChange } from "./analysis-freshness";
 import { canonicalizeMigrationPath, migrationDestinationFor, normalizeMigrationPath } from "./migration-path";
 import type { AppStore } from "./store";
@@ -409,6 +408,7 @@ export class MigrationService {
       }
     }
     if (blockers.length === 0) {
+      const { summarizeDirectory } = await import("./analyzer.js");
       const summary = await summarizeDirectory(source);
       requiredBytes = summary.totalBytes;
       fileCount = summary.fileCount;
@@ -649,6 +649,7 @@ export class MigrationService {
       if (record.backupPath) throw new Error(record.error ?? "迁移旧副本尚未清理，无法开始回滚");
     }
     if (!(await exists(record.destination))) throw new Error("目标目录已不存在");
+    const { summarizeDirectory } = await import("./analyzer.js");
     const targetSummary = await summarizeDirectory(record.destination);
     if (targetSummary.scanErrors.length) throw new Error(`目标目录扫描不完整，无法安全回滚：${targetSummary.scanErrors[0]}`);
     const free = await availableBytes(record.source);

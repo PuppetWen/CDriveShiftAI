@@ -63,6 +63,7 @@ import { useI18n, type TranslationKey } from "../lib/i18n";
 import { useVirtualList } from "../lib/virtual-list";
 import { useResultSelection } from "../lib/result-selection";
 import {
+  appendSearchPage,
   bookmarkConditionCount,
   bookmarkSignature,
   categoryOf,
@@ -278,6 +279,7 @@ export function SearchView({
   const resultsPanelRef = useRef<HTMLElement>(null);
   const bookmarkPanelRef = useRef<HTMLElement>(null);
   const workspaceSnapshotRef = useRef<SearchWorkspaceState | undefined>(undefined);
+  const submittedWorkspaceRef = useRef<SearchWorkspaceState | undefined>(undefined);
   const liveRefreshRef = useRef(false);
   const resultsRef = useRef<SearchResult[]>([]);
   const contentResultsRef = useRef<ContentSearchResult[]>([]);
@@ -514,9 +516,19 @@ export function SearchView({
     };
   }, []);
 
+  const saveWorkspace = useCallback((workspace: SearchWorkspaceState) => {
+    if (submittedWorkspaceRef.current === workspace) return;
+    submittedWorkspaceRef.current = workspace;
+    void api.saveSearchWorkspace(workspace).catch((reason) => {
+      if (submittedWorkspaceRef.current === workspace) submittedWorkspaceRef.current = undefined;
+      console.warn("Unable to save search workspace", reason);
+    });
+  }, []);
+
   useEffect(() => {
     if (!workspaceReady) return;
-    const workspace: SearchWorkspaceState = {
+    const previous = workspaceSnapshotRef.current;
+    const snapshot: Omit<SearchWorkspaceState, "savedAt"> = {
       version: 1,
       mode,
       query,
@@ -525,19 +537,18 @@ export function SearchView({
       extensionInput,
       datePreset,
       contentScope,
-      results: results.length > WORKSPACE_RESULT_LIMIT ? results.slice(0, WORKSPACE_RESULT_LIMIT) : results,
-      contentResults: contentResults.length > WORKSPACE_RESULT_LIMIT ? contentResults.slice(0, WORKSPACE_RESULT_LIMIT) : contentResults,
-      directorySizes: [...directorySizes.values()].slice(0, WORKSPACE_RESULT_LIMIT),
+      results: workspaceResultPrefix(results, previous?.results),
+      contentResults: workspaceResultPrefix(contentResults, previous?.contentResults),
+      directorySizes: workspaceResultPrefix([...directorySizes.values()], previous?.directorySizes),
       selectedPath,
-      elapsed,
-      savedAt: new Date().toISOString()
+      elapsed
     };
+    const unchanged = previous && (Object.keys(snapshot) as Array<keyof typeof snapshot>)
+      .every((key) => snapshot[key] === previous[key]);
+    const workspace = unchanged ? previous : { ...snapshot, savedAt: new Date().toISOString() };
     workspaceSnapshotRef.current = workspace;
-    const timer = window.setTimeout(() => {
-      void api
-        .saveSearchWorkspace(workspace)
-        .catch((reason) => console.warn("Unable to save search workspace", reason));
-    }, 450);
+    if (submittedWorkspaceRef.current === workspace) return;
+    const timer = window.setTimeout(() => saveWorkspace(workspace), 450);
     return () => window.clearTimeout(timer);
   }, [
     contentResults,
@@ -551,6 +562,7 @@ export function SearchView({
     mode,
     query,
     results,
+    saveWorkspace,
     selectedPath,
     workspaceReady
   ]);
@@ -558,10 +570,10 @@ export function SearchView({
   useEffect(
     () => () => {
       if (workspaceSnapshotRef.current) {
-        void api.saveSearchWorkspace(workspaceSnapshotRef.current);
+        saveWorkspace(workspaceSnapshotRef.current);
       }
     },
-    []
+    [saveWorkspace]
   );
 
   useEffect(() => {
@@ -904,7 +916,7 @@ export function SearchView({
         setResults((current) =>
           restoredBootstrap || page.cursorReset
             ? page.items
-            : mergeSearchResults(current, page.items)
+            : appendSearchPage(current, page.items)
         );
         setNameCursor(page.nextCursor);
         setNameHasMore(page.hasMore);
@@ -931,7 +943,7 @@ export function SearchView({
         setContentResults((current) =>
           restoredBootstrap || page.cursorReset
             ? page.items
-            : mergeContentResults(current, page.items)
+            : appendSearchPage(current, page.items)
         );
         setContentCursor(page.nextCursor);
         setContentHasMore(page.hasMore);
@@ -2908,32 +2920,10 @@ function searchResultsEqual(current: SearchResult[], next: SearchResult[]): bool
   });
 }
 
-function mergeSearchResults(
-  current: SearchResult[],
-  next: SearchResult[]
-): SearchResult[] {
-  const paths = new Set(current.map((item) => normalizeScopePath(item.path)));
-  const merged = [...current];
-  for (const item of next) {
-    const key = normalizeScopePath(item.path);
-    if (paths.has(key)) continue;
-    paths.add(key);
-    merged.push(item);
+function workspaceResultPrefix<T>(items: T[], previous: T[] | undefined): T[] {
+  const length = Math.min(items.length, WORKSPACE_RESULT_LIMIT);
+  if (previous?.length === length && previous.every((item, index) => item === items[index])) {
+    return previous;
   }
-  return merged;
-}
-
-function mergeContentResults(
-  current: ContentSearchResult[],
-  next: ContentSearchResult[]
-): ContentSearchResult[] {
-  const paths = new Set(current.map((item) => normalizeScopePath(item.path)));
-  const merged = [...current];
-  for (const item of next) {
-    const key = normalizeScopePath(item.path);
-    if (paths.has(key)) continue;
-    paths.add(key);
-    merged.push(item);
-  }
-  return merged;
+  return length === items.length ? items : items.slice(0, length);
 }

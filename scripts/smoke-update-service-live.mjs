@@ -22,7 +22,7 @@ const option = (name, fallback) => {
 const oldPortable = path.resolve(option("--old-portable", path.join(workspace, "release-v0.1.12/CDriveShiftAI-x64-portable.exe")));
 const helperSource = path.resolve(option("--helper", path.join(workspace, "native/updater/target/release/cshift-updater.exe")));
 const expectedVersion = option("--expected-version", undefined);
-const proxy = option("--proxy", "http://127.0.0.1:7890");
+const proxyOverride = option("--proxy", undefined);
 const reportOption = option("--report", undefined);
 const reportPath = reportOption ? path.resolve(workspace, reportOption) : undefined;
 if (reportPath) {
@@ -128,7 +128,8 @@ Object.defineProperty(app,'isPackaged',{value:true});
 Object.defineProperty(process,'resourcesPath',{value:${JSON.stringify(resources)}});
 process.chdir(data); // Reproduce production's data-root working directory.
 app.whenReady().then(async()=>{
- await session.defaultSession.setProxy({proxyRules:${JSON.stringify(proxy)}});
+ const proxyOverride = ${JSON.stringify(proxyOverride)};
+ if(proxyOverride)await session.defaultSession.setProxy({proxyRules:proxyOverride});
  const {configureLogger}=require(${JSON.stringify(path.join(workspace, "dist-electron/logger.js"))});
  configureLogger(data);
  const {UpdateService}=require(${JSON.stringify(path.join(workspace, "dist-electron/update.js"))});

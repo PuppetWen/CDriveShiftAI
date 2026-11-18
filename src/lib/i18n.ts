@@ -653,7 +653,7 @@ const runtimeEnglishReplacements: ReadonlyArray<readonly [RegExp, string]> = [
   [/^当前已是最新版本\s+(.+)$/u, "You are using the latest version, $1"],
   [/^发现新版本\s+([^，]+)，可自动下载并更新$/u, "Version $1 is available and can be downloaded and installed automatically"],
   [/^发现新版本\s+([^，]+)，但该 Release 缺少自动更新清单$/u, "Version $1 is available, but its Release does not include an automatic-update manifest"],
-  [/^系统网络 · 直连$/u, "System network · direct connection"],
+  [/^系统网络 · 未匹配应用层代理$/u, "System network · no application proxy matched"],
   [/^Windows 系统代理$/u, "Windows system proxy"],
   [/^Windows 系统代理 · (.+)$/u, "Windows system proxy · $1"],
   [/^系统代理检测失败，按 Windows 默认网络继续$/u, "System proxy detection failed; continuing with the Windows default network"],
