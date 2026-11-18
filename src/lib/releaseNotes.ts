@@ -7,30 +7,44 @@ export interface BundledReleaseNote {
 }
 
 export const bundledReleaseNotes: BundledReleaseNote = {
-  "version": "0.2.2",
-  "summary": "修复自动更新成功回执的窗口事件时序，并完整退出更新失败的进程树后恢复旧版。",
+  "version": "0.2.3",
+  "summary": "降低空闲资源占用和窗口缩放开销，改善搜索响应，并修复下载后的静默安装与新版重启。",
   "sections": [
     {
-      "title": "自动更新与失败恢复",
+      "title": "窗口与搜索性能",
       "items": [
-        "修复窗口已打开却未确认成功的问题，等待主页面完成加载与显示，补齐停止加载事件。",
-        "更新助手释放数据目录占用，安装器与新版程序使用明确的工作目录和临时目录。",
-        "新版启动使用独立进程作业；失败时关闭本次启动的全部后代进程，等待文件释放后恢复备份。"
+        "停止空闲时循环重绘背景，窗口缩放时简化玻璃效果，拖动结束后再保存窗口大小。",
+        "托盘模式释放搜索结果缓存；优先使用已有索引，完整刷新延后到窗口可见时执行。",
+        "频繁写入的文件就地更新索引，避免累积重复记录，同时保留全文更新。"
+      ]
+    },
+    {
+      "title": "自动更新",
+      "items": [
+        "更新助手接手后才退出旧版，支持含空格的安装目录，并复用已校验的下载包。",
+        "静默安装后自动打开新版，核对启动回执后再提交更新和清理备份。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: BundledReleaseNote = {
-  "version": "0.2.2",
-  "summary": "Fix automatic update startup acknowledgement timing and stop the failed application process tree before restoring the previous version.",
+  "version": "0.2.3",
+  "summary": "Reduce idle and resize overhead, keep search responsive, and fix automatic installation and restart after a download.",
   "sections": [
     {
-      "title": "Automatic updates and recovery",
+      "title": "Window and search performance",
       "items": [
-        "Handle the final loading event so an opened, fully loaded window correctly acknowledges successful startup.",
-        "Release inherited data-directory locks and set explicit working and temporary directories for installation and restart.",
-        "Track the newly launched application in its own process job and wait for its descendants to exit before restoring a failed update."
+        "Stop repainting the idle background, simplify glass effects while resizing and save window bounds after the drag.",
+        "Release search result caches in the tray and use the existing index before refreshing it while the window is visible.",
+        "Update frequently modified files in place in the name index while retaining full-text updates."
+      ]
+    },
+    {
+      "title": "Automatic updates",
+      "items": [
+        "Wait for the updater to accept the handoff, handle installation paths with spaces and reuse verified downloads.",
+        "Launch the new version after silent installation and verify startup before committing the update and clearing the backup."
       ]
     }
   ]

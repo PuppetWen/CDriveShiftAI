@@ -126,6 +126,11 @@ require(path.join(compiled, "main.js"));
   closed.close();
   await closedReady;
   report.checks.push("window closed before load rejects acknowledgement");
+  const planPath = path.join(path.dirname(marker), "update-plan.json");
+  await wait(3200);
+  assert(fs.existsSync(marker), "Startup cleanup must leave the marker while the updater owns the plan");
+  // A real updater removes the plan after consuming the acknowledgement.
+  fs.unlinkSync(planPath);
   const cleanupDeadline = Date.now() + 7000;
   while (fs.existsSync(path.dirname(marker))) {
     if (Date.now() > cleanupDeadline) throw new Error("Production update acknowledgement did not clean its staging directory");

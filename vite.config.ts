@@ -14,6 +14,6 @@ export default defineConfig({
     strictPort: true,
     // Browser profiles and native build caches contain exclusively locked files.
     // Test fixtures can still be served without watching their generated data.
-    watch: { ignored: ["**/.test-tmp/**", "**/.task-tmp/**", "**/.cache/**"] }
+    watch: { ignored: ["**/.test-tmp/**", "**/.task-tmp/**", "**/.tmp/**", "**/.cache/**", "**/.cdriveshiftai-data/test-temp/**"] }
   }
 });

@@ -114,7 +114,7 @@ struct SearchIndex {
     // previous eager implementation scanned all entries for every ambiguous
     // Windows remove event, which could peg one core and page the full cache
     // back into memory. Search results still exclude the complete subtree.
-    removed_trees: Vec<String>,
+    removed_trees: HashSet<String>,
     live_count: usize,
 }
 
@@ -1523,7 +1523,7 @@ impl SearchIndex {
             live: vec![true; entries.len()],
             path_positions: Vec::with_capacity(entries.len()),
             delta_positions: HashMap::new(),
-            removed_trees: Vec::new(),
+            removed_trees: HashSet::new(),
             live_count: entries.len(),
             entries,
         };
@@ -1583,11 +1583,10 @@ impl SearchIndex {
 
     fn find_path(&self, path_value: &str) -> Option<usize> {
         let hash = normalized_path_hash(path_value);
-        let normalized_path = normalized(path_value);
         if let Some(index) = self.delta_positions.get(&hash).copied() {
             if self
                 .path(index as usize)
-                .is_some_and(|candidate| normalized(candidate) == normalized_path)
+                .is_some_and(|candidate| compare_folded(candidate, path_value, true).is_eq())
             {
                 return Some(index as usize);
             }
@@ -1602,7 +1601,7 @@ impl SearchIndex {
             if self.live.get(*index as usize).copied().unwrap_or(false)
                 && self
                     .path(*index as usize)
-                    .is_some_and(|candidate| normalized(candidate) == normalized_path)
+                    .is_some_and(|candidate| compare_folded(candidate, path_value, true).is_eq())
             {
                 return Some(*index as usize);
             }
@@ -1621,76 +1620,74 @@ impl SearchIndex {
             return false;
         }
         let candidate = normalized(path_value);
-        self.removed_trees.iter().any(|tree| {
-            candidate == *tree
-                || candidate
-                    .strip_prefix(tree)
-                    .is_some_and(|suffix| suffix.starts_with('\\'))
-        })
+        self.removed_trees.contains(&candidate)
+            || candidate
+                .rmatch_indices('\\')
+                .any(|(index, _)| self.removed_trees.contains(&candidate[..index]))
     }
 
-    fn remove_path(&mut self, path_value: &str) {
-        let hash = normalized_path_hash(path_value);
-        if let Some(index) = self.find_path(path_value) {
-            if self.live.get(index).copied().unwrap_or(false) {
-                if let Some(live) = self.live.get_mut(index) {
-                    *live = false;
-                }
-                self.live_count = self.live_count.saturating_sub(1);
-                if self
-                    .entries
-                    .get(index)
-                    .is_some_and(|entry| entry.is_delta())
-                {
-                    self.delta_positions.remove(&hash);
-                }
-            }
+    fn remove_path(&mut self, path_value: &str) -> bool {
+        let Some(index) = self.find_path(path_value) else {
+            return false;
+        };
+        self.remove_entry(index, path_value);
+        true
+    }
+
+    fn remove_entry(&mut self, index: usize, path_value: &str) {
+        self.live[index] = false;
+        self.live_count -= 1;
+        if self.entries[index].is_delta() {
+            self.delta_positions.remove(&normalized_path_hash(path_value));
         }
     }
 
-    fn remove_tree(&mut self, path_value: &str) {
+    fn remove_tree(&mut self, path_value: &str) -> bool {
         let key = normalized(path_value);
-        let covered = self.removed_trees.iter().any(|tree| {
-            key == *tree
-                || key
-                    .strip_prefix(tree)
-                    .is_some_and(|suffix| suffix.starts_with('\\'))
-        });
+        let covered = self.path_is_removed(&key);
         if !covered {
             let prefix = format!("{key}\\");
-            self.removed_trees
-                .retain(|tree| tree != &key && !tree.starts_with(&prefix));
-            self.removed_trees.push(key);
+            self.removed_trees.retain(|tree| !tree.starts_with(&prefix));
+            self.removed_trees.insert(key);
         }
-        self.remove_path(path_value);
+        self.remove_path(path_value) || !covered
     }
 
     fn len(&self) -> usize {
         self.live_count
     }
 
-    fn upsert(&mut self, entry: Entry) {
-        if entry.is_directory && !self.removed_trees.is_empty() {
-            let key = normalized(&entry.path);
-            self.removed_trees.retain(|tree| tree != &key);
+    fn upsert(&mut self, path: &str, is_directory: bool, size: u64) -> bool {
+        let restored = is_directory
+            && !self.removed_trees.is_empty()
+            && self.removed_trees.remove(&normalized(path));
+        if let Some(index) = self.find_path(path) {
+            if self.path(index) == Some(path) && self.entries[index].is_directory() == is_directory {
+                // Frequent file writes should not leave dead copies of the
+                // same path, name signature and lookup entry in memory.
+                let resized = self.entries[index].size != size;
+                self.entries[index].size = size;
+                return restored || resized;
+            }
+            self.remove_entry(index, path);
         }
-        self.remove_path(&entry.path);
         let index = self.entries.len() as u32;
         let offset = self.delta_paths.len() as u64;
-        self.delta_paths.extend_from_slice(entry.path.as_bytes());
+        self.delta_paths.extend_from_slice(path.as_bytes());
         self.entries.push(IndexedEntry::new(
             offset,
-            entry.path.len(),
-            entry.is_directory,
+            path.len(),
+            is_directory,
             true,
-            entry.size,
+            size,
         ));
         self.name_signatures
-            .push(lowercase_name_signature(file_name(&entry.path)));
+            .push(lowercase_name_signature(file_name(path)));
         self.live.push(true);
         self.delta_positions
-            .insert(normalized_path_hash(&entry.path), index);
+            .insert(normalized_path_hash(path), index);
         self.live_count += 1;
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2238,7 +2235,7 @@ fn delta_path(cache_path: &Path) -> PathBuf {
     cache_path.with_extension("delta")
 }
 
-fn append_deltas(cache_path: &Path, deltas: &[IndexDelta]) -> io::Result<()> {
+fn append_deltas(cache_path: &Path, deltas: &[&IndexDelta]) -> io::Result<()> {
     if deltas.is_empty() {
         return Ok(());
     }
@@ -2286,26 +2283,17 @@ fn reset_deltas(cache_path: &Path) -> io::Result<()> {
     File::create(path).map(|_| ())
 }
 
+fn apply_delta(index: &mut SearchIndex, delta: &IndexDelta) -> bool {
+    match delta {
+        IndexDelta::Upsert { path, is_directory, size } => index.upsert(path, *is_directory, *size),
+        IndexDelta::Remove { path, tree: true } => index.remove_tree(path),
+        IndexDelta::Remove { path, tree: false } => index.remove_path(path),
+    }
+}
+
 fn apply_deltas(index: &mut SearchIndex, deltas: &[IndexDelta]) {
     for delta in deltas {
-        match delta {
-            IndexDelta::Upsert {
-                path,
-                is_directory,
-                size,
-            } => index.upsert(Entry {
-                path: path.clone(),
-                is_directory: *is_directory,
-                size: *size,
-            }),
-            IndexDelta::Remove { path, tree } => {
-                if *tree {
-                    index.remove_tree(path);
-                } else {
-                    index.remove_path(path);
-                }
-            }
-        }
+        apply_delta(index, delta);
     }
 }
 
@@ -3681,6 +3669,9 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                     move |result: notify::Result<notify::Event>| {
                         match result {
                             Ok(event) => {
+                                if matches!(event.kind, EventKind::Access(_)) {
+                                    return;
+                                }
                                 let new_tree = matches!(
                                     event.kind,
                                     EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))
@@ -3689,6 +3680,7 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                                     matches!(event.kind, EventKind::Remove(RemoveKind::Folder));
                                 let mut items =
                                     pending.lock().unwrap_or_else(|error| error.into_inner());
+                                let mut relevant = false;
                                 for changed_path in event.paths {
                                     // The index, state and content databases
                                     // live below this directory. Never feed
@@ -3699,6 +3691,7 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                                     {
                                         continue;
                                     }
+                                    relevant = true;
                                     if items.len() >= 250_000 && !items.contains_key(&changed_path)
                                     {
                                         overflowed.store(true, Ordering::Relaxed);
@@ -3707,6 +3700,9 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                                     let item = items.entry(changed_path).or_default();
                                     item.new_tree |= new_tree;
                                     item.folder_hint |= folder_hint;
+                                }
+                                if !relevant {
+                                    return;
                                 }
                             }
                             Err(error) => {
@@ -3754,7 +3750,8 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                     Duration::from_secs(1)
                 };
                 match wake_receiver.recv_timeout(timeout) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Ok(()) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
                 if state.stopping.load(Ordering::Relaxed) {
@@ -3798,7 +3795,15 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                 };
                 let mut deltas = Vec::with_capacity(changes.len());
                 for (changed_path, change) in changes {
-                    if !changed_path.exists() {
+                    if let Some(entry) = entry_from_path(&changed_path) {
+                        let is_directory = entry.is_directory;
+                        deltas.push(IndexDelta::Upsert { path: entry.path, is_directory, size: entry.size });
+                        if is_directory && change.new_tree {
+                            deltas.extend(collect_subtree(&changed_path, 250_000, &state).into_iter().map(|entry| {
+                                IndexDelta::Upsert { path: entry.path, is_directory: entry.is_directory, size: entry.size }
+                            }));
+                        }
+                    } else if !changed_path.exists() {
                         let path_text = changed_path.to_string_lossy().to_string();
                         // RemoveKind::Any is also used for ordinary files. A
                         // blind remove_tree here scans every indexed entry and
@@ -3816,19 +3821,6 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                             path: path_text,
                             tree,
                         });
-                        continue;
-                    }
-                    if let Some(entry) = entry_from_path(&changed_path) {
-                        let is_directory = entry.is_directory;
-                        let mut additions = vec![entry];
-                        if is_directory && change.new_tree {
-                            additions.extend(collect_subtree(&changed_path, 250_000, &state));
-                        }
-                        deltas.extend(additions.into_iter().map(|item| IndexDelta::Upsert {
-                            path: item.path,
-                            is_directory: item.is_directory,
-                            size: item.size,
-                        }));
                     }
                 }
                 if deltas.is_empty() {
@@ -3842,37 +3834,31 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                     .delta_lock
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                let delta_error = append_deltas(&state.cache_path, &deltas).err();
+                // A refresh builds a separate snapshot. Replay all events
+                // during it, even when the current index already matches.
+                let rebuilding = state.scanning.load(Ordering::Acquire);
+                let mut index_changes = Vec::new();
                 for mutations in deltas.chunks(2_048) {
                     let mut index = state
                         .index
                         .write()
                         .unwrap_or_else(|error| error.into_inner());
                     for mutation in mutations {
-                        match mutation {
-                            IndexDelta::Remove { path, tree } => {
-                                if *tree {
-                                    index.remove_tree(path);
-                                } else {
-                                    index.remove_path(path);
-                                }
-                            }
-                            IndexDelta::Upsert {
-                                path,
-                                is_directory,
-                                size,
-                            } => index.upsert(Entry {
-                                path: path.clone(),
-                                is_directory: *is_directory,
-                                size: *size,
-                            }),
+                        if apply_delta(&mut index, mutation) || rebuilding {
+                            index_changes.push(mutation);
                         }
                     }
                     drop(index);
                     thread::yield_now();
                 }
-                let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let delta_error = append_deltas(&state.cache_path, &index_changes).err();
+                let generation = if index_changes.is_empty() {
+                    state.generation.load(Ordering::Acquire)
+                } else {
+                    state.generation.fetch_add(1, Ordering::AcqRel) + 1
+                };
                 drop(delta_guard);
+                // Same-size edits still affect full-text search.
                 let content_scopes = update_content_indexes(&state, &deltas);
                 if let Some(error) = delta_error {
                     let mut status = state
@@ -3883,10 +3869,12 @@ fn start_watchers(state: Arc<SharedState>, output: Output) {
                     status.message = Some(format!("索引增量日志写入失败：{error}"));
                     update_status(&state, &output, status);
                 }
-                if !state.backgrounded.load(Ordering::Relaxed) {
+                if !state.backgrounded.load(Ordering::Relaxed)
+                    && (!index_changes.is_empty() || !content_scopes.is_empty())
+                {
                     output.send(&json!({
                         "event": "indexChanged",
-                        "changedCount": deltas.len(),
+                        "changedCount": index_changes.len(),
                         "generation": generation,
                         "contentScopes": content_scopes
                     }));
@@ -4397,12 +4385,17 @@ fn run_server() -> io::Result<()> {
                         "background": background
                     }));
                     if background && process_id != 0 {
+                        let shared = Arc::clone(shared);
                         thread::spawn(move || {
                             // The renderer is destroyed shortly after the close
                             // event. Delay the trim so Chromium has first
                             // released its renderer/GPU resources naturally.
                             thread::sleep(Duration::from_millis(750));
-                            trim_process_tree_working_sets(process_id);
+                            if shared.backgrounded.load(Ordering::Acquire)
+                                && !shared.stopping.load(Ordering::Relaxed)
+                            {
+                                trim_process_tree_working_sets(process_id);
+                            }
                         });
                     }
                 } else {
@@ -4805,6 +4798,31 @@ mod tests {
         assert_eq!(index.len(), 2);
         drop(index);
         fs::remove_dir_all(test_root).expect("remove test directory");
+    }
+
+    #[test]
+    fn repeated_writes_update_one_index_entry() {
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let path = r"C:\data\changing.txt";
+        let mut index = SearchIndex::from_entries_controlled(
+            vec![Entry { path: path.to_string(), is_directory: false, size: 1 }],
+            &backgrounded,
+            &stopping,
+        ).expect("index");
+
+        assert!(!index.upsert(path, false, 1));
+        for size in 2..10_000 {
+            assert!(index.upsert(path, false, size));
+        }
+        assert_eq!(index.entries.len(), 1);
+        assert!(index.delta_paths.is_empty());
+        assert_eq!(index.entries[0].size, 9_999);
+        assert!(index.remove_path(path));
+        assert!(!index.remove_path(path));
+        assert!(index.upsert(path, false, 10_000));
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.find_path(path), Some(1));
     }
 
     #[test]

@@ -1,11 +1,12 @@
 import { app, net, session } from "electron";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   access,
   mkdir,
   open,
   readdir,
   readFile,
+  rmdir,
   rename,
   rm,
   stat,
@@ -136,6 +137,7 @@ interface UpdatePlan {
   expectedSha512: string;
   logPath: string;
   runnerDirectory?: string;
+  readyMarker?: string;
 }
 
 function versionParts(value: string): number[] {
@@ -349,6 +351,7 @@ export class UpdateService {
   private lastProgressAt = 0;
   private networkResolvedAt = 0;
   private checkInFlight?: Promise<AppUpdateInfo>;
+  private installation?: Promise<AppUpdateInfo>;
   private apiRetryAt = 0;
 
   constructor(
@@ -466,6 +469,11 @@ export class UpdateService {
   }
 
   async check(force = false): Promise<AppUpdateInfo> {
+    if (this.installation || this.state.phase === "installing") return this.getState();
+    return this.checkRelease(force);
+  }
+
+  private async checkRelease(force: boolean): Promise<AppUpdateInfo> {
     // Startup, Settings, and the sidebar can all request a check at once.
     if (this.checkInFlight) return this.checkInFlight;
     const now = Date.now();
@@ -693,7 +701,8 @@ export class UpdateService {
   }
 
   cancel(): AppUpdateInfo {
-    this.abortController?.abort(new Error("用户已取消下载"));
+    if (!this.abortController || this.state.phase !== "downloading") return this.getState();
+    this.abortController.abort(new Error("用户已取消下载"));
     return this.setState({
       phase: "cancelled",
       message: "已暂停更新；下次继续时会从已下载位置续传",
@@ -702,6 +711,17 @@ export class UpdateService {
   }
 
   async downloadAndInstall(): Promise<AppUpdateInfo> {
+    if (this.installation) return this.installation;
+    if (this.state.phase === "installing") return this.getState();
+    this.installation = Promise.resolve().then(() => this.runInstallation());
+    try {
+      return await this.installation;
+    } finally {
+      this.installation = undefined;
+    }
+  }
+
+  private async runInstallation(): Promise<AppUpdateInfo> {
     try {
       return await this.performDownloadAndInstall();
     } catch (error) {
@@ -731,11 +751,9 @@ export class UpdateService {
   }
 
   private async performDownloadAndInstall(): Promise<AppUpdateInfo> {
-    if (this.state.phase === "downloading" || this.state.phase === "verifying") {
-      return this.getState();
-    }
+    await this.checkInFlight;
     if (!this.state.updateAvailable || !this.state.canAutoUpdate) {
-      const checked = await this.check(true);
+      const checked = await this.checkRelease(true);
       if (!checked.updateAvailable || !checked.canAutoUpdate) return checked;
     }
     await this.canInstall();
@@ -751,13 +769,29 @@ export class UpdateService {
     }
     const controller = new AbortController();
     this.abortController = controller;
+    this.setState({
+      phase: "downloading",
+      message: "正在准备更新包…",
+      progress: undefined,
+      errorCode: undefined
+    });
     const stagingDir = updateStagingDirectory(latestVersion);
     await mkdir(stagingDir, { recursive: true });
     const partialPath = path.join(stagingDir, `${manifestAsset.name}.part`);
     const packagePath = path.join(stagingDir, manifestAsset.name);
+    // A previous handoff can fail after the package was verified and renamed.
+    // Reuse it only after checking both its current size and digest.
+    if (await exists(packagePath)) {
+      const valid = (await stat(packagePath)).size === manifestAsset.size &&
+        (await sha512(packagePath)).toLowerCase() === manifestAsset.sha512.toLowerCase();
+      controller.signal.throwIfAborted();
+      if (valid) return this.installVerifiedPackage(packagePath, manifestAsset);
+      await rm(packagePath, { force: true });
+    }
     let lastError: unknown;
     for (let attempt = 1; attempt <= DOWNLOAD_RETRIES; attempt += 1) {
       try {
+        controller.signal.throwIfAborted();
         await this.downloadAttempt(
           selectedAsset.downloadUrl,
           partialPath,
@@ -791,6 +825,7 @@ export class UpdateService {
       });
     }
 
+    controller.signal.throwIfAborted();
     this.setState({
       phase: "verifying",
       message: "正在校验更新包完整性与 SHA-512…",
@@ -818,6 +853,10 @@ export class UpdateService {
     }
     await rm(packagePath, { force: true });
     await rename(partialPath, packagePath);
+    return this.installVerifiedPackage(packagePath, manifestAsset);
+  }
+
+  private installVerifiedPackage(packagePath: string, manifestAsset: ManifestAsset): Promise<AppUpdateInfo> {
     this.setState({
       phase: "ready",
       message: "更新包校验通过，正在准备安全替换…",
@@ -841,6 +880,7 @@ export class UpdateService {
         transferred = 0;
       }
     }
+    if (transferred === total) return;
     const headers: Record<string, string> = githubHeaders(app.getVersion());
     if (transferred > 0) headers.Range = `bytes=${transferred}-`;
     const response = await this.networkFetch(
@@ -848,7 +888,6 @@ export class UpdateService {
       { headers, signal, redirect: "follow" },
       attempt === 1
     );
-    if (response.status === 416 && transferred === total) return;
     if (!response.ok && response.status !== 206) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -918,14 +957,15 @@ export class UpdateService {
       throw new Error("更新助手缺失，已保留下载包但不会执行替换");
     }
     const helperPath = path.join(stagingDir, "cshift-updater.exe");
-    const runnerDirectory = updateRunnerDirectoryForExecutable(targetPath);
+    // NSIS replaces the installed directory, so a running fallback helper
+    // must remain outside it, just like the primary helper.
+    const runnerDirectory = path.join(stagingDir, "runner");
     let fallbackHelperPath = path.join(
       runnerDirectory,
       `CDriveShiftAI-Update-${this.state.latestVersion!}.exe`
     );
     await prepareUpdaterExecutable(helperSource, helperPath);
     try {
-      await rm(runnerDirectory, { recursive: true, force: true });
       await prepareUpdaterExecutable(helperSource, fallbackHelperPath);
     } catch (error) {
       logger.warn("update.fallback_helper_prepare_failed", {
@@ -956,23 +996,25 @@ export class UpdateService {
       expectedVersion: this.state.latestVersion!,
       expectedSha512: manifestAsset.sha512,
       logPath: path.join(stagingDir, "update.log"),
-      runnerDirectory
+      readyMarker: path.join(stagingDir, `helper-ready-${randomUUID()}`)
     };
     const planPath = path.join(stagingDir, "update-plan.json");
     await writeFile(planPath, JSON.stringify(plan, null, 2), "utf8");
+    const launched = await launchUpdaterHelper({
+      primaryPath: helperPath,
+      fallbackPath: fallbackHelperPath,
+      planPath,
+      readyMarker: plan.readyMarker,
+      forcePrimaryFailure:
+        process.env.CDRIVESHIFTAI_UPDATE_FORCE_PRIMARY_EACCES === "1"
+    });
+    await writeFile(`${plan.readyMarker}.install`, "", { flag: "wx" });
     this.setState({
       phase: "installing",
       message:
         distribution === "installed"
           ? "即将退出并静默安装；失败时会自动恢复旧版本"
           : "即将退出并在原路径替换便携版；失败时会自动恢复旧文件"
-    });
-    const launched = await launchUpdaterHelper({
-      primaryPath: helperPath,
-      fallbackPath: fallbackHelperPath,
-      planPath,
-      forcePrimaryFailure:
-        process.env.CDRIVESHIFTAI_UPDATE_FORCE_PRIMARY_EACCES === "1"
     });
     logger.info("update.install_handoff", {
       distribution,
@@ -1017,7 +1059,7 @@ async function removeEmptyLegacyUpdateRunner(): Promise<void> {
   );
   try {
     if ((await readdir(legacyRoot)).length === 0) {
-      await rm(legacyRoot, { recursive: true, force: true });
+      await rmdir(legacyRoot);
     }
   } catch {
     // A missing, non-empty, or temporarily locked legacy directory is left alone.
@@ -1031,19 +1073,22 @@ export async function completePendingUpdate(canAcknowledge: () => boolean = () =
   const stagingDir = process.argv[markerIndex + 1];
   if (!stagingDir || !safeUpdateStaging(stagingDir)) return;
   try {
+    const planPath = path.join(stagingDir, "update-plan.json");
     const plan = JSON.parse(
-      await readFile(path.join(stagingDir, "update-plan.json"), "utf8")
+      await readFile(planPath, "utf8")
     ) as UpdatePlan;
     if (
       plan.schemaVersion !== 1 ||
       path.resolve(plan.stagingDir) !== path.resolve(stagingDir) ||
+      path.resolve(plan.successMarker) !== path.resolve(stagingDir, "update-success.json") ||
       plan.expectedVersion !== app.getVersion()
     ) {
       return;
     }
     if (!canAcknowledge()) return;
+    const pendingMarker = `${plan.successMarker}.${process.pid}.tmp`;
     await writeFile(
-      plan.successMarker,
+      pendingMarker,
       JSON.stringify({
         version: app.getVersion(),
         startedAt: new Date().toISOString(),
@@ -1051,9 +1096,17 @@ export async function completePendingUpdate(canAcknowledge: () => boolean = () =
       }),
       "utf8"
     );
+    if (!canAcknowledge()) {
+      await rm(pendingMarker, { force: true });
+      return;
+    }
+    await rename(pendingMarker, plan.successMarker);
     logger.info("update.startup_confirmed", { version: app.getVersion(), stagingDir });
     const cleanup = async (remaining = 20): Promise<void> => {
       try {
+        // The helper removes the plan after it accepts the marker and commits
+        // the update. Until then, staging still contains its rollback files.
+        if (await exists(planPath)) throw new Error("Update helper still owns staging");
         await rm(stagingDir, { recursive: true, force: true });
         if (plan.runnerDirectory && safeUpdateRunner(plan.runnerDirectory)) {
           await rm(plan.runnerDirectory, { recursive: true, force: true });

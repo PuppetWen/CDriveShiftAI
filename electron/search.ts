@@ -46,6 +46,7 @@ async function fileExists(candidate: string): Promise<boolean> {
 }
 
 const wordCharacterPattern = /[\p{L}\p{N}_]/u;
+const FOREGROUND_REFRESH_DELAY_MS = 30_000;
 
 function containsCompleteWord(target: string, needle: string): boolean {
   let start = target.indexOf(needle);
@@ -113,6 +114,7 @@ export class SearchService {
   private restartTimer?: NodeJS.Timeout;
   private stopPromise?: Promise<void>;
   private lastFullRefreshRequestedAt = 0;
+  private refreshDue = false;
   private backgroundMode = false;
   private readonly queryScheduler = new LatestSearchScheduler();
   private readonly metadataCache = new Map<string, { expiresAt: number; stats: Stats }>();
@@ -231,21 +233,16 @@ export class SearchService {
     const cachePath = path.join(app.getPath("userData"), "search-index-v1.bin");
     this.cachePath = cachePath;
     const contentCacheDir = path.join(app.getPath("userData"), "content-indexes");
-    let forceRebuild = false;
-    let rebuildReason: string | undefined;
     try {
       const cacheStats = await stat(cachePath);
-      rebuildReason = determineIndexRefreshReason(
+      this.refreshDue = determineIndexRefreshReason(
         cacheStats.mtimeMs,
         Date.now(),
         uptime()
-      );
-      forceRebuild = rebuildReason != null;
+      ) != null;
     } catch {
       // A missing cache is the normal first-run case; the native indexer builds it.
-    }
-    if (forceRebuild) {
-      this.lastFullRefreshRequestedAt = Date.now();
+      this.refreshDue = false;
     }
     await this.request(
       {
@@ -254,8 +251,6 @@ export class SearchService {
         cachePath,
         contentCacheDir,
         background: this.backgroundMode,
-        forceRebuild,
-        rebuildReason,
         mouseButton: this.mouseShortcutStatus.button,
         mouseHoldMs: this.mouseShortcutStatus.holdMs,
         magnifierEnabled: this.magnifierStatus.enabled,
@@ -416,7 +411,12 @@ export class SearchService {
   setBackgroundMode(background: boolean, force = false): void {
     if (!force && this.backgroundMode === background) return;
     this.backgroundMode = background;
-    if (background) this.queryScheduler.cancelAll();
+    if (background) {
+      this.queryScheduler.cancelAll();
+      this.clearResultCaches();
+    } else if (this.refreshDue && this.status.state === "ready" && !this.dailyRefreshTimer) {
+      this.scheduleRefreshTimer(FOREGROUND_REFRESH_DELAY_MS);
+    }
     if (!this.child) return;
     void this.request(
       { op: "setBackground", background, processId: process.pid },
@@ -425,6 +425,14 @@ export class SearchService {
       // The process may be between a crash and its automatic restart. start()
       // includes the current mode in init, so no retry loop is needed here.
     });
+  }
+
+  private clearResultCaches(): void {
+    this.executableCatalogCache = undefined;
+    this.metadataCache.clear();
+    this.metadataPending.clear();
+    this.metadataEpoch++;
+    this.directorySizeCache.clear();
   }
 
   cancelWindowSearch(ownerId: number): void {
@@ -1054,13 +1062,10 @@ export class SearchService {
       return;
     }
     if (response.event === "indexChanged") {
-      this.executableCatalogCache = undefined;
-      this.metadataCache.clear();
-      this.metadataPending.clear();
-      this.metadataEpoch++;
-      this.directorySizeCache.clear();
+      const changedCount = response.changedCount ?? 1;
+      if (changedCount > 0) this.clearResultCaches();
       this.onIndexChanged({
-        changedCount: Math.max(1, response.changedCount ?? 1),
+        changedCount,
         observedAt: new Date().toISOString(),
         generation: response.generation,
         contentScopes: response.contentScopes
@@ -1106,6 +1111,11 @@ export class SearchService {
     const previousMode = this.status.mode;
     if (status.state === "indexing" && previousState !== "indexing") {
       this.lastFullRefreshRequestedAt = Date.now();
+      this.refreshDue = false;
+      if (this.dailyRefreshTimer) {
+        clearTimeout(this.dailyRefreshTimer);
+        this.dailyRefreshTimer = undefined;
+      }
     }
     this.status = structuredClone(status);
     if (status.state !== previousState || status.mode !== previousMode) {
@@ -1131,6 +1141,12 @@ export class SearchService {
       this.dailyRefreshTimer = undefined;
     }
     if (this.stopping || !this.cachePath) return;
+    // Make cached results usable before starting a scan after a reboot or
+    // when yesterday's cache is still present.
+    if (this.refreshDue) {
+      if (!this.backgroundMode) this.scheduleRefreshTimer(FOREGROUND_REFRESH_DELAY_MS);
+      return;
+    }
 
     let cacheModifiedAt = 0;
     try {
@@ -1148,9 +1164,19 @@ export class SearchService {
       1_000,
       refreshBase + INDEX_REFRESH_INTERVAL_MS - Date.now()
     );
+    if (!this.stopping && this.status.state === "ready") this.scheduleRefreshTimer(delay);
+  }
+
+  private scheduleRefreshTimer(delay: number): void {
+    if (this.dailyRefreshTimer) clearTimeout(this.dailyRefreshTimer);
     this.dailyRefreshTimer = setTimeout(() => {
       this.dailyRefreshTimer = undefined;
       if (this.stopping) return;
+      if (this.backgroundMode) {
+        this.refreshDue = true;
+        return;
+      }
+      this.refreshDue = false;
       void this.rebuild().catch((error) => {
         this.updateStatus({
           ...this.status,

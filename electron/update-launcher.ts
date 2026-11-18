@@ -1,12 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, copyFile, mkdir, rm } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { logger, serializeError } from "./logger";
 
 const RETRY_DELAYS_MS = [0, 300, 900];
 const INTERNAL_RUNNER_DIRECTORY = ".cdriveshiftai-update-runner";
+const HELPER_READY_TIMEOUT_MS = 15_000;
 
 type SpawnProcess = typeof spawn;
 interface UpdateLaunchContext {
@@ -199,10 +200,29 @@ export interface LaunchUpdaterOptions {
   primaryPath: string;
   fallbackPath: string;
   planPath: string;
+  readyMarker?: string;
   spawnProcess?: SpawnProcess;
   forcePrimaryFailure?: boolean;
   forceAllDirectFailures?: boolean;
   retryDelaysMs?: number[];
+}
+
+async function waitForHelperReady(marker: string | undefined, child?: ChildProcess): Promise<void> {
+  if (!marker) return;
+  const deadline = Date.now() + HELPER_READY_TIMEOUT_MS;
+  do {
+    try {
+      await access(marker);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (child && child.exitCode !== null) {
+      throw new Error(`更新助手在接收更新前退出（退出码 ${child.exitCode}）`);
+    }
+    await delay(100);
+  } while (Date.now() < deadline);
+  throw new Error("更新助手未确认接收更新；当前版本和已下载的更新包已保留");
 }
 
 export async function launchUpdaterHelper(
@@ -228,8 +248,9 @@ export async function launchUpdaterHelper(
   };
   const failures: unknown[] = [];
   for (const [index, candidate] of [options.primaryPath, options.fallbackPath].entries()) {
+    let child: ChildProcess;
     try {
-      const child = await directLaunch(
+      child = await directLaunch(
         candidate,
         planPath,
         spawnProcess,
@@ -238,35 +259,34 @@ export async function launchUpdaterHelper(
         retryDelaysMs,
         context
       );
-      child.on("error", (error) => {
-        logger.error("update.helper_post_spawn_error", {
-          candidate,
-          error: serializeError(error)
-        });
-      });
-      child.unref();
-      return {
-        child,
-        strategy: index === 0 ? "primary-direct" : "fallback-direct",
-        executable: candidate
-      };
     } catch (error) {
       failures.push(error);
+      continue;
     }
+    child.on("error", (error) => {
+      logger.error("update.helper_post_spawn_error", {
+        candidate,
+        error: serializeError(error)
+      });
+    });
+    child.unref();
+    // Once a process has started, do not retry via another launcher. A slow
+    // helper could still be about to acknowledge and both would own the plan.
+    await waitForHelperReady(options.readyMarker, child);
+    return {
+      child,
+      strategy: index === 0 ? "primary-direct" : "fallback-direct",
+      executable: candidate
+    };
   }
+  let child: ChildProcess;
   try {
-    const child = await powershellLaunch(
+    child = await powershellLaunch(
       options.fallbackPath,
       planPath,
       spawnProcess,
       context
     );
-    child.unref();
-    return {
-      child,
-      strategy: "fallback-powershell",
-      executable: options.fallbackPath
-    };
   } catch (error) {
     failures.push(error);
     logger.error("update.helper_launch_exhausted", {
@@ -282,4 +302,13 @@ export async function launchUpdaterHelper(
       `无法启动更新助手${codes ? `（${codes}）` : ""}；更新包与旧版本均已保留，请导出诊断报告后手动安装`
     );
   }
+  child.unref();
+  // This ChildProcess is PowerShell, which has already exited successfully;
+  // the readiness file must come from the detached native helper itself.
+  await waitForHelperReady(options.readyMarker);
+  return {
+    child,
+    strategy: "fallback-powershell",
+    executable: options.fallbackPath
+  };
 }

@@ -14,6 +14,7 @@
   --glass-filter: blur(18px) saturate(145%);
   --glass-control-filter: blur(10px) saturate(135%);
   --glass-overlay-filter: blur(30px) saturate(140%);
+  --glass-backdrop-filter: blur(5px);
   --glass-window-tint: color-mix(in srgb, var(--bg) 28%, transparent);
   --glass-window-base: var(--bg);
   --glass-on-accent: #112e34;
@@ -302,7 +303,7 @@
 :root[data-effect] :is(.themed-tooltip, .toast) { border-radius: 12px; }
 :root[data-effect] :is(.path-properties-backdrop, .force-delete-backdrop) {
   background: var(--glass-backdrop);
-  backdrop-filter: blur(5px);
+  backdrop-filter: var(--glass-backdrop-filter);
 }
 :root[data-effect] .path-properties-titlebar::before {
   background: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
@@ -357,6 +358,16 @@
   }
 }
 
+/* Resizing changes the pixels sampled by every glass surface. Use the same
+   tinted materials without live backdrop filters until the geometry settles. */
+:root[data-effect]:is(.layout-resizing, .resizing-search-columns),
+:root[data-effect] .app-shell:has(> .sidebar.resizing) {
+  --glass-filter: none;
+  --glass-control-filter: none;
+  --glass-overlay-filter: none;
+  --glass-backdrop-filter: none;
+}
+
 /* CSS fallbacks also apply to the dedicated utility-window stylesheet. */
 @supports not (backdrop-filter: blur(1px)) {
   :root[data-effect] {
@@ -378,6 +389,7 @@
     --glass-filter: none;
     --glass-control-filter: none;
     --glass-overlay-filter: none;
+    --glass-backdrop-filter: none;
     --glass-border: var(--muted);
     --sidebar: var(--glass-fallback);
   }
@@ -412,6 +424,7 @@
     --glass-filter: none;
     --glass-control-filter: none;
     --glass-overlay-filter: none;
+    --glass-backdrop-filter: none;
     --sidebar: Canvas;
   }
   :root[data-effect] :is(.background-fx, .fx-surface) { display: none; }

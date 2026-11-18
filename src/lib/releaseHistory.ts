@@ -10,6 +10,31 @@ const previousReleases: Array<{
   en: Omit<BundledReleaseNote, "version">;
 }> = [
   {
+    version: "0.2.2",
+    zh: {
+      summary: "修复自动更新启动回执的窗口事件时序，以及更新失败后的进程清理和恢复。",
+      sections: [{
+        title: "自动更新与失败恢复",
+        items: [
+          "等待新版主窗口加载完成并显示后确认启动。",
+          "更新助手使用明确的工作目录与临时目录，避免锁住应用数据目录。",
+          "恢复旧版前关闭失败启动的进程树并等待文件释放。"
+        ]
+      }]
+    },
+    en: {
+      summary: "Fix automatic update startup confirmation and process cleanup before rollback.",
+      sections: [{
+        title: "Automatic updates and recovery",
+        items: [
+          "Confirm startup once the new main window has loaded and is visible.",
+          "Use explicit working and temporary directories to avoid locking application data.",
+          "Stop the failed launch process tree and wait for its files to be released before rollback."
+        ]
+      }]
+    }
+  },
+  {
     "version": "0.2.0",
     "zh": {
       "summary": "多关键词按或关系合并结果，优化实时搜索和后台占用，支持键盘删词、Ctrl 多选、拖动框选与主题荧光焦点。",

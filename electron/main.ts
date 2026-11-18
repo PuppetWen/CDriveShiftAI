@@ -413,30 +413,47 @@ function trackWindowBounds(
   key: "mainWindowBounds" | "quickSearchWindowBounds"
 ): void {
   let timer: NodeJS.Timeout | undefined;
-  const persist = () => {
+  let lastBounds = store.getUiLayout()[key];
+  let resizing = false;
+  const cancelScheduledSave = () => {
     if (timer) clearTimeout(timer);
     timer = undefined;
+  };
+  const persist = () => {
+    cancelScheduledSave();
     if (window.isDestroyed()) return;
-    const bounds = window.getNormalBounds();
-    void store.updateUiLayout({
-      [key]: {
-        ...bounds,
-        maximized: window.isMaximized()
-      }
+    const next = { ...window.getNormalBounds(), maximized: window.isMaximized() };
+    if (
+      lastBounds?.x === next.x && lastBounds.y === next.y &&
+      lastBounds.width === next.width && lastBounds.height === next.height &&
+      lastBounds.maximized === next.maximized
+    ) return;
+    const previous = lastBounds;
+    lastBounds = next;
+    void store.updateUiLayout({ [key]: next }).catch((error) => {
+      if (lastBounds === next) lastBounds = previous;
+      logger.warn("window.bounds_save_failed", { key, error: serializeError(error) });
     });
   };
   const schedule = () => {
-    if (timer) clearTimeout(timer);
+    if (resizing) return;
+    cancelScheduledSave();
     timer = setTimeout(persist, 250);
   };
+  window.on("will-resize", () => {
+    resizing = true;
+    cancelScheduledSave();
+  });
+  window.on("resized", () => {
+    resizing = false;
+    schedule();
+  });
   window.on("move", schedule);
   window.on("resize", schedule);
   window.on("maximize", persist);
   window.on("unmaximize", persist);
   window.on("close", persist);
-  window.on("closed", () => {
-    if (timer) clearTimeout(timer);
-  });
+  window.on("closed", cancelScheduledSave);
 }
 
 function showAsSoonAsRenderable(window: BrowserWindow, maximized = false): void {

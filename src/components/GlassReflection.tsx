@@ -7,8 +7,10 @@ const surfaces = ".glass-card, .path-input, .search-input-wrap, .ownership-searc
 export function GlassReflection() {
   useEffect(() => {
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce), (prefers-reduced-transparency: reduce), (forced-colors: active), (prefers-contrast: more)");
+    const root = document.documentElement;
     let active: HTMLElement | null = null;
     let frame = 0;
+    let resizeTimer = 0;
     let pointer: { target: EventTarget | null; x: number; y: number } | null = null;
 
     const clear = () => {
@@ -40,27 +42,53 @@ export function GlassReflection() {
     };
 
     const move = (event: PointerEvent) => {
-      if (reduced.matches || event.pointerType === "touch" || event.buttons) return clear();
+      if (resizeTimer || reduced.matches || event.pointerType === "touch" || event.buttons) return clear();
       pointer = { target: event.target, x: event.clientX, y: event.clientY };
       if (!frame) frame = requestAnimationFrame(paint);
     };
 
-    const visibility = () => { if (document.hidden) clear(); };
+    const endResize = () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = 0;
+      root.classList.remove("layout-resizing");
+    };
+    const resize = () => {
+      if (document.hidden) return;
+      if (resizeTimer) window.clearTimeout(resizeTimer);
+      else {
+        root.classList.add("layout-resizing");
+        clear();
+      }
+      resizeTimer = window.setTimeout(endResize, 160);
+    };
+    const visibility = () => {
+      root.classList.toggle("background-suspended", document.hidden);
+      if (document.hidden) {
+        endResize();
+        clear();
+        pointer = null;
+      }
+    };
     document.addEventListener("pointermove", move, { passive: true });
     document.addEventListener("pointerleave", clear);
     document.addEventListener("pointerdown", clear, { passive: true });
     document.addEventListener("scroll", clear, { capture: true, passive: true });
     document.addEventListener("visibilitychange", visibility);
     window.addEventListener("blur", clear);
+    window.addEventListener("resize", resize, { passive: true });
     reduced.addEventListener("change", clear);
+    visibility();
     return () => {
       clear();
+      endResize();
+      root.classList.remove("background-suspended");
       document.removeEventListener("pointermove", move);
       document.removeEventListener("pointerleave", clear);
       document.removeEventListener("pointerdown", clear);
       document.removeEventListener("scroll", clear, true);
       document.removeEventListener("visibilitychange", visibility);
       window.removeEventListener("blur", clear);
+      window.removeEventListener("resize", resize);
       reduced.removeEventListener("change", clear);
     };
   }, []);

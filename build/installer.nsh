@@ -2,6 +2,17 @@
 Var /GLOBAL cdrivePreserveNoDesktopShortcut
 
 !macro customInit
+  ; Older helpers used a quoted Win32 argument for a destination containing
+  ; spaces. NSIS reads /D= as the remainder of the command line and leaves
+  ; the closing quote in $INSTDIR. Permit those clients to reach this release.
+  ${If} ${Silent}
+  ${AndIf} ${isUpdated}
+    StrCpy $R4 $INSTDIR 1 -1
+    ${If} $R4 == '$\"'
+      StrCpy $INSTDIR $INSTDIR -1
+    ${EndIf}
+  ${EndIf}
+
   StrCpy $cdrivePreserveNoDesktopShortcut "false"
   ReadRegStr $R7 HKEY_CURRENT_USER "${INSTALL_REGISTRY_KEY}" InstallLocation
   ReadRegStr $R6 HKEY_LOCAL_MACHINE "${INSTALL_REGISTRY_KEY}" InstallLocation

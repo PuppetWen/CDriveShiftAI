@@ -106,6 +106,8 @@ interface SearchViewProps {
 
 const NAME_PAGE_SIZE = 240;
 const CONTENT_PAGE_SIZE = 80;
+// The persistence layer retains only the first 500 entries of each list.
+const WORKSPACE_RESULT_LIMIT = 500;
 const EMPTY_CATEGORIES: SearchCategory[] = [];
 const EMPTY_STRINGS: string[] = [];
 const SEARCH_COLUMN_KEYS = [
@@ -273,6 +275,7 @@ export function SearchView({
   const skipRestoredSearchRef = useRef(false);
   const skipRestoredSizesRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const resultsPanelRef = useRef<HTMLElement>(null);
   const bookmarkPanelRef = useRef<HTMLElement>(null);
   const workspaceSnapshotRef = useRef<SearchWorkspaceState | undefined>(undefined);
   const liveRefreshRef = useRef(false);
@@ -373,8 +376,10 @@ export function SearchView({
   useEffect(() => {
     if (!effectiveQuery) return;
     let timer: number | undefined;
+    let lastSizeRefresh = 0;
     const unsubscribe = api.onSearchIndexChanged((event) => {
-      if (document.visibilityState === "hidden") return;
+      if (document.visibilityState === "hidden" || timer != null) return;
+      if (mode === "name" && event.changedCount === 0) return;
       if (mode === "content") {
         const currentScope = normalizeScopePath(contentScope);
         if (
@@ -386,13 +391,19 @@ export function SearchView({
           return;
         }
       }
-      if (timer != null) window.clearTimeout(timer);
+      // Combine index notifications over a fixed window so continuous disk
+      // writes cannot keep starting searches or delay a refresh indefinitely.
       timer = window.setTimeout(() => {
+        timer = undefined;
         if (document.visibilityState === "hidden") return;
-        setDirectorySizes(new Map());
+        const now = Date.now();
+        if (mode === "name" && now - lastSizeRefresh >= 30_000) {
+          lastSizeRefresh = now;
+          setDirectorySizes((current) => current.size ? new Map() : current);
+        }
         liveRefreshRef.current = true;
         setLiveIndexRevision((revision) => revision + 1);
-      }, 240);
+      }, 1_200);
     });
     return () => {
       if (timer != null) window.clearTimeout(timer);
@@ -514,9 +525,9 @@ export function SearchView({
       extensionInput,
       datePreset,
       contentScope,
-      results,
-      contentResults,
-      directorySizes: [...directorySizes.values()],
+      results: results.length > WORKSPACE_RESULT_LIMIT ? results.slice(0, WORKSPACE_RESULT_LIMIT) : results,
+      contentResults: contentResults.length > WORKSPACE_RESULT_LIMIT ? contentResults.slice(0, WORKSPACE_RESULT_LIMIT) : contentResults,
+      directorySizes: [...directorySizes.values()].slice(0, WORKSPACE_RESULT_LIMIT),
       selectedPath,
       elapsed,
       savedAt: new Date().toISOString()
@@ -775,7 +786,7 @@ export function SearchView({
             setNameHasMore(false);
             setNameTotal(undefined);
           }
-          setElapsed(performance.now() - started);
+          if (!backgroundRefresh) setElapsed(performance.now() - started);
           });
         })
         .catch((reason) => {
@@ -802,17 +813,8 @@ export function SearchView({
     workspaceReady
   ]);
 
-  const displayedResults = useMemo(() => {
-    return results.map((item) => {
-      const directorySize = item.isDirectory
-        ? directorySizes.get(normalizeScopePath(item.path))
-        : undefined;
-      return directorySize ? { ...item, size: directorySize.bytes } : item;
-    });
-  }, [directorySizes, results]);
-
   const activeHasMore = mode === "name" ? nameHasMore : contentHasMore;
-  const virtualNameResults = displayedResults.slice(
+  const virtualNameResults = results.slice(
     virtualList.start,
     virtualList.end
   );
@@ -964,7 +966,7 @@ export function SearchView({
 
   const handleResultScroll = useCallback(
     (event: UIEvent<HTMLDivElement>) => {
-      virtualList.onScroll(event);
+      virtualList.onScroll();
       const element = event.currentTarget;
       if (element.scrollHeight - element.scrollTop - element.clientHeight < 720) {
         void loadMoreResults();
@@ -1124,10 +1126,8 @@ export function SearchView({
 
   const resultGridStyle = useMemo<CSSProperties>(
     () => ({
-      gridTemplateColumns: SEARCH_COLUMN_KEYS.map(
-        (key) => `${columnWidths[key]}fr`
-      ).join(" ")
-    }),
+      "--search-grid-columns": searchGridColumns(columnWidths)
+    } as CSSProperties),
     [columnWidths]
   );
 
@@ -1135,7 +1135,8 @@ export function SearchView({
     (
       boundary: number,
       deltaPercentage: number,
-      base = columnWidthsRef.current
+      base = columnWidthsRef.current,
+      dragging = false
     ) => {
       const leftKey = SEARCH_COLUMN_KEYS[boundary];
       const rightKey = SEARCH_COLUMN_KEYS[boundary + 1];
@@ -1154,7 +1155,8 @@ export function SearchView({
         [rightKey]: pairWidth - leftWidth
       };
       columnWidthsRef.current = next;
-      setColumnWidths(next);
+      if (dragging) resultsPanelRef.current?.style.setProperty("--search-grid-columns", searchGridColumns(next));
+      else setColumnWidths(next);
     },
     []
   );
@@ -1186,7 +1188,8 @@ export function SearchView({
       resizeColumnBoundary(
         resize.boundary,
         ((event.clientX - resize.startX) / resize.tableWidth) * 100,
-        resize.widths
+        resize.widths,
+        true
       );
     },
     [resizeColumnBoundary]
@@ -1199,6 +1202,7 @@ export function SearchView({
       event.preventDefault();
       event.stopPropagation();
       columnResizeRef.current = undefined;
+      setColumnWidths(columnWidthsRef.current);
       document.documentElement.classList.remove("resizing-search-columns");
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
@@ -1609,7 +1613,7 @@ export function SearchView({
         : scopes.length === 1
           ? scopes[0]
           : ui(`${scopes.length} 个范围`, `${formatNumber(scopes.length)} scopes`);
-  const count = mode === "name" ? displayedResults.length : contentResults.length;
+  const count = activeResultCount;
   const totalCount = mode === "name" ? nameTotal : contentTotal;
   const resultCountLabel =
     totalCount != null
@@ -1634,6 +1638,7 @@ export function SearchView({
       onPointerMove={moveColumnResize}
       onPointerUp={finishColumnResize}
       onPointerCancel={finishColumnResize}
+      onLostPointerCapture={finishColumnResize}
       onKeyDown={(event) => adjustColumnWidthByKeyboard(boundary, event)}
     />
   );
@@ -2476,7 +2481,7 @@ export function SearchView({
       </section>
 
       {effectiveQuery ? (
-        <section className="results-panel glass-card">
+        <section className="results-panel glass-card" ref={resultsPanelRef} style={resultGridStyle}>
           <div className="results-head">
             <span>{loading ? ui("正在查询…", "Searching…") : resultCountLabel}</span>
             {loadingMore && (
@@ -2516,8 +2521,8 @@ export function SearchView({
               "Click to select · double-click to open · right-click for actions · drag headers to resize"
             )}</span>
           </div>
-          {mode === "name" && !error && displayedResults.length > 0 && (
-            <div className="result-columns" style={resultGridStyle}>
+          {mode === "name" && !error && results.length > 0 && (
+            <div className="result-columns">
               <button type="button" onClick={() => setSort("name")}>
                 {ui("名称", "Name")}
                 {filters.sortBy === "name" &&
@@ -2567,10 +2572,10 @@ export function SearchView({
             >
               {error}
             </EmptyState>
-          ) : mode === "name" && displayedResults.length > 0 ? (
+          ) : mode === "name" && results.length > 0 ? (
             <div
               className={`result-list virtual-result-list ${resultSelection.rectangle ? "search-selection-dragging" : ""}`}
-              ref={virtualList.containerRef}
+              ref={virtualList.attachContainer}
               onScroll={handleResultScroll}
               onPointerDown={resultSelection.onPointerDown}
               onClickCapture={resultSelection.onClickCapture}
@@ -2593,7 +2598,6 @@ export function SearchView({
                     className={`result-row result-grid-row path-openable ${
                       selectedPaths.has(item.path) ? "selected" : ""
                     } ${openClassNameFor(item.path)}`}
-                    style={resultGridStyle}
                     key={item.path}
                     onClick={(event) => resultSelection.selectPath(item.path, event.ctrlKey || event.metaKey)}
                     onDoubleClick={(event) => openFromDoubleClick(event, item.path)}
@@ -2616,7 +2620,7 @@ export function SearchView({
                         ? directorySizesLoading
                           ? ui("计算中…", "Calculating…")
                           : "—"
-                        : `${directorySize && !directorySize.complete ? "≥ " : ""}${formatBytes(item.size)}`}
+                        : `${directorySize && !directorySize.complete ? "≥ " : ""}${formatBytes(directorySize?.bytes ?? item.size)}`}
                     </strong>
                     <span className="result-date-cell">{formatDate(item.modifiedAt)}</span>
                     <div className="result-row-action">
@@ -2684,7 +2688,7 @@ export function SearchView({
               </div>
               <div
                 className={`result-list content-results virtual-result-list ${resultSelection.rectangle ? "search-selection-dragging" : ""}`}
-                ref={virtualList.containerRef}
+                ref={virtualList.attachContainer}
                 onScroll={handleResultScroll}
                 onPointerDown={resultSelection.onPointerDown}
                 onClickCapture={resultSelection.onClickCapture}
@@ -2882,6 +2886,10 @@ export function SearchView({
       )}
     </div>
   );
+}
+
+function searchGridColumns(widths: SearchResultColumnWidths): string {
+  return SEARCH_COLUMN_KEYS.map((key) => `${widths[key]}fr`).join(" ");
 }
 
 function searchResultsEqual(current: SearchResult[], next: SearchResult[]): boolean {

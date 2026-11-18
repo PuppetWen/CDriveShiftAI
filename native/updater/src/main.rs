@@ -37,6 +37,7 @@ struct UpdatePlan {
     expected_version: String,
     expected_sha512: String,
     log_path: PathBuf,
+    ready_marker: Option<PathBuf>,
 }
 
 struct Logger {
@@ -115,6 +116,14 @@ fn validate_plan(plan: &UpdatePlan) -> Result<(), String> {
             ));
         }
     }
+    if let Some(marker) = &plan.ready_marker {
+        let location = canonical_or_absolute(marker).map_err(|error| error.to_string())?;
+        if location.parent() != Some(staging.as_path())
+            || !location.file_name().is_some_and(|name| name.to_string_lossy().starts_with("helper-ready-"))
+        {
+            return Err("helper readiness marker is outside the update boundary".to_string());
+        }
+    }
     if plan.target_path.starts_with(&staging) {
         return Err("update target must be outside staging".to_string());
     }
@@ -150,25 +159,35 @@ fn validate_plan(plan: &UpdatePlan) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn wait_for_process(pid: u32, timeout: Duration) {
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+fn wait_for_process(pid: u32, timeout: Duration, ready: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
     const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
-    unsafe {
-        let process = OpenProcess(SYNCHRONIZE_ACCESS, 0, pid);
-        if process == 0 {
-            return;
-        }
-        let result = WaitForSingleObject(process, timeout.as_millis().min(u32::MAX as u128) as u32);
-        CloseHandle(process);
-        if result != WAIT_OBJECT_0 {
-            thread::sleep(Duration::from_secs(2));
-        }
+    if pid == 0 {
+        return ready();
     }
+    let process = unsafe { OpenProcess(SYNCHRONIZE_ACCESS, 0, pid) };
+    if process == 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+            ready()
+        } else {
+            Err(error)
+        };
+    }
+    let result = ready().and_then(|()| {
+        match unsafe { WaitForSingleObject(process, timeout.as_millis().min(u32::MAX as u128) as u32) } {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(io::Error::new(io::ErrorKind::TimedOut, "previous application did not exit")),
+            _ => Err(io::Error::last_os_error()),
+        }
+    });
+    unsafe { CloseHandle(process); }
+    result
 }
 
 #[cfg(not(windows))]
-fn wait_for_process(_pid: u32, _timeout: Duration) {}
+fn wait_for_process(_pid: u32, _timeout: Duration, ready: impl FnOnce() -> io::Result<()>) -> io::Result<()> { ready() }
 
 fn sha512(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
@@ -338,8 +357,18 @@ fn installer_command(plan: &UpdatePlan, installed: &Path) -> Command {
         .env("TEMP", plan.staging_dir.join("temp"))
         .env("TMP", plan.staging_dir.join("temp"))
         .arg("/S")
-        .arg("--updated")
-        .arg(format!("/D={}", installed.display()));
+        .arg("--updated");
+    let mut destination = std::ffi::OsString::from("/D=");
+    destination.push(installed);
+    // NSIS reads /D= from the raw command line. It consumes the entire
+    // remaining line, including spaces, and does not strip quotes.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.raw_arg(destination);
+    }
+    #[cfg(not(windows))]
+    command.arg(destination);
     command
 }
 
@@ -396,14 +425,25 @@ fn launch_updated(plan: &UpdatePlan) -> io::Result<ApplicationProcess> {
     { command.spawn() }
 }
 
-fn wait_for_success(child: &mut ApplicationProcess, marker: &Path) -> bool {
+#[derive(Deserialize)]
+struct StartupMarker {
+    version: String,
+}
+
+fn has_startup_acknowledgement(plan: &UpdatePlan) -> bool {
+    fs::read(&plan.success_marker).ok()
+        .and_then(|contents| serde_json::from_slice::<StartupMarker>(&contents).ok())
+        .is_some_and(|marker| marker.version == plan.expected_version)
+}
+
+fn wait_for_success(child: &mut ApplicationProcess, plan: &UpdatePlan) -> bool {
     let started = Instant::now();
     while started.elapsed() < START_TIMEOUT {
-        if marker.exists() {
+        if has_startup_acknowledgement(plan) {
             return true;
         }
         match child.try_wait() {
-            Ok(Some(_)) => return marker.exists(),
+            Ok(Some(_)) => return has_startup_acknowledgement(plan),
             Ok(None) => {}
             Err(_) => return false,
         }
@@ -425,7 +465,7 @@ fn stop_updated_application(child: &mut ApplicationProcess, logger: &Logger) -> 
     Ok(())
 }
 
-fn retry_rollback_files(mut operation: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+fn retry_locked_files(mut operation: impl FnMut() -> io::Result<()>) -> io::Result<()> {
     let started = Instant::now();
     loop {
         match operation() {
@@ -452,9 +492,9 @@ fn restore_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
         .as_ref()
         .ok_or_else(|| "missing installed directory".to_string())?;
     logger.line("restoring installed application backup");
-    retry_rollback_files(|| clear_application_directory(installed)).map_err(|error| error.to_string())?;
+    retry_locked_files(|| clear_application_directory(installed)).map_err(|error| error.to_string())?;
     ensure_preserved_data_restored(plan, installed)?;
-    retry_rollback_files(|| copy_tree(&plan.backup_path, installed, false)).map_err(|error| error.to_string())
+    retry_locked_files(|| copy_tree(&plan.backup_path, installed, false)).map_err(|error| error.to_string())
 }
 
 fn update_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
@@ -489,7 +529,7 @@ fn update_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
             return Err(format!("new installed executable could not start: {error}"));
         }
     };
-    if wait_for_success(&mut child, &plan.success_marker) {
+    if wait_for_success(&mut child, plan) {
         logger.line("new installed version reported a successful start");
         return Ok(());
     }
@@ -502,7 +542,9 @@ fn update_installed(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
 fn update_portable(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
     remove_entry(&plan.backup_path).map_err(|error| error.to_string())?;
     logger.line("backing up portable executable");
-    fs::rename(&plan.target_path, &plan.backup_path).map_err(|error| error.to_string())?;
+    // The portable launcher can still hold its image open while cleaning
+    // its extracted program files after the Electron parent exits.
+    retry_locked_files(|| fs::rename(&plan.target_path, &plan.backup_path)).map_err(|error| error.to_string())?;
     let replacement = plan.target_path.with_extension("update-new");
     let replace_result = (|| -> io::Result<()> {
         remove_entry(&replacement)?;
@@ -524,14 +566,14 @@ fn update_portable(plan: &UpdatePlan, logger: &Logger) -> Result<(), String> {
             return Err(format!("new portable executable could not start: {error}"));
         }
     };
-    if wait_for_success(&mut child, &plan.success_marker) {
+    if wait_for_success(&mut child, plan) {
         logger.line("new portable version reported a successful start");
         return Ok(());
     }
     logger.line("new portable version did not report success; rolling back");
     stop_updated_application(&mut child, logger)?;
-    retry_rollback_files(|| remove_entry(&plan.target_path)).map_err(|error| error.to_string())?;
-    retry_rollback_files(|| fs::rename(&plan.backup_path, &plan.target_path)).map_err(|error| error.to_string())?;
+    retry_locked_files(|| remove_entry(&plan.target_path)).map_err(|error| error.to_string())?;
+    retry_locked_files(|| fs::rename(&plan.backup_path, &plan.target_path)).map_err(|error| error.to_string())?;
     Err("new portable version failed its startup acknowledgement".to_string())
 }
 
@@ -544,7 +586,7 @@ fn run(plan_path: &Path) -> Result<(), String> {
     for candidate in [
         &mut plan.package_path, &mut plan.target_path, &mut plan.staging_dir,
         &mut plan.backup_path, &mut plan.success_marker, &mut plan.log_path,
-    ] {
+    ].into_iter().chain(plan.ready_marker.iter_mut()) {
         if !candidate.is_absolute() { *candidate = original_directory.join(&*candidate); }
     }
     if let Some(installed) = plan.installed_dir.as_mut() {
@@ -559,17 +601,34 @@ fn run(plan_path: &Path) -> Result<(), String> {
         "starting {} update to {}",
         plan.mode, plan.expected_version
     ));
-    wait_for_process(plan.parent_pid, Duration::from_secs(120));
-    let actual_sha512 = sha512(&plan.package_path).map_err(|error| error.to_string())?;
-    if !actual_sha512.eq_ignore_ascii_case(&plan.expected_sha512) {
-        return Err("helper SHA-512 verification rejected the package".to_string());
+    if let Err(error) = wait_for_process(plan.parent_pid, Duration::from_secs(120), || {
+        if let Some(marker) = &plan.ready_marker {
+            OpenOptions::new().write(true).create_new(true).open(marker)?;
+        }
+        Ok(())
+    }) {
+        logger.line(format!("update handoff failed: {error}"));
+        return Err(error.to_string());
     }
-    logger.line("helper SHA-512 verification passed");
-    let result = if plan.mode == "installed" {
-        update_installed(&plan, &logger)
-    } else {
-        update_portable(&plan, &logger)
-    };
+    if let Some(marker) = &plan.ready_marker {
+        if !marker.with_extension("install").is_file() {
+            logger.line("update handoff was not committed by the application");
+            return Err("update handoff was not committed".to_string());
+        }
+    }
+    let result = (|| {
+        remove_entry(&plan.success_marker).map_err(|error| error.to_string())?;
+        let actual_sha512 = sha512(&plan.package_path).map_err(|error| error.to_string())?;
+        if !actual_sha512.eq_ignore_ascii_case(&plan.expected_sha512) {
+            return Err("helper SHA-512 verification rejected the package".to_string());
+        }
+        logger.line("helper SHA-512 verification passed");
+        if plan.mode == "installed" {
+            update_installed(&plan, &logger)
+        } else {
+            update_portable(&plan, &logger)
+        }
+    })();
     match result {
         Ok(()) => {
             let _ = remove_entry(&plan.package_path);
@@ -637,6 +696,7 @@ mod tests {
             expected_version: "0.2.1".to_string(),
             expected_sha512: "a".repeat(128),
             log_path: staging.join("update.log"),
+            ready_marker: None,
         }
     }
 
@@ -736,6 +796,7 @@ mod tests {
             expected_version: "0.0.2".to_string(),
             expected_sha512: "a".repeat(128),
             log_path: staging.join("update.log"),
+            ready_marker: None,
         };
         preserve_application_data(&plan, &installed).unwrap();
         assert!(!data.exists());
@@ -770,6 +831,7 @@ mod tests {
             expected_version: "0.0.2".to_string(),
             expected_sha512: "a".repeat(128),
             log_path: staging.join("update.log"),
+            ready_marker: None,
         };
         assert!(validate_plan(&plan).is_err());
         let _ = fs::remove_dir_all(root);

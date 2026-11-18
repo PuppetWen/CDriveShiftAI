@@ -213,4 +213,21 @@ describe("auto-update downloader", () => {
     expect((await stat(partialPath)).size).toBe(payload.length);
     expect(await readFile(partialPath)).toEqual(payload);
   });
+
+  it("hands a complete partial download to verification even when offline", async () => {
+    const partialPath = path.join(fixtureRoot, "package.exe.part");
+    await writeFile(partialPath, payload);
+    const url = await listen((_request, response) => {
+      response.writeHead(503);
+      response.end();
+    });
+    await downloader().downloadAttempt(
+      url,
+      partialPath,
+      payload.length,
+      1,
+      new AbortController().signal
+    );
+    expect(await readFile(partialPath)).toEqual(payload);
+  });
 });

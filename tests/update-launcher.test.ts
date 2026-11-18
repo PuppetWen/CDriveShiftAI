@@ -19,9 +19,11 @@ const fixtureRoot = path.join(
 function spawnedChild(pid: number) {
   const child = new EventEmitter() as EventEmitter & {
     pid: number;
+    exitCode: number | null;
     unref: () => void;
   };
   child.pid = pid;
+  child.exitCode = null;
   child.unref = () => undefined;
   queueMicrotask(() => child.emit("spawn"));
   return child;
@@ -63,21 +65,24 @@ describe("update helper launcher", () => {
     expect(await readFile(destination)).toEqual(await readFile(source));
   });
 
-  it("uses the visible fallback runner when the primary path is denied", async () => {
+  it("hands off from a denied primary to a staging-local fallback only after it is ready", async () => {
     const calls: string[] = [];
     const contexts: SpawnOptions[] = [];
     const staging = path.join(fixtureRoot, ".cdriveshiftai-update", "0.2.1");
     const primaryPath = path.join(staging, "helper.exe");
-    const fallbackPath = path.join(fixtureRoot, "application", ".cdriveshiftai-update-runner", "helper.exe");
+    const fallbackPath = path.join(staging, "runner", "helper.exe");
+    const readyMarker = path.join(staging, "helper-ready-test");
     const fakeSpawn = ((executable: string, _args: string[], options: SpawnOptions) => {
       calls.push(executable);
       contexts.push(options);
+      void writeFile(readyMarker, "");
       return spawnedChild(4242);
     }) as never;
     const result = await launchUpdaterHelper({
       primaryPath,
       fallbackPath,
       planPath: path.join(staging, "plan.json"),
+      readyMarker,
       forcePrimaryFailure: true,
       retryDelaysMs: [0],
       spawnProcess: fakeSpawn
@@ -87,6 +92,29 @@ describe("update helper launcher", () => {
     expect(contexts[0].cwd).toBe(staging);
     expect(contexts[0].env?.TEMP).toBe(path.join(staging, "temp"));
     expect(contexts[0].env?.TMP).toBe(path.join(staging, "temp"));
+    expect(await readFile(readyMarker, "utf8")).toBe("");
+  });
+
+  it("keeps the old app running when a spawned helper rejects the plan", async () => {
+    const calls: string[] = [];
+    const fakeSpawn = ((executable: string) => {
+      calls.push(executable);
+      const child = spawnedChild(4244);
+      queueMicrotask(() => {
+        child.exitCode = 1;
+        child.emit("exit", 1);
+      });
+      return child;
+    }) as never;
+    await expect(launchUpdaterHelper({
+      primaryPath: "primary.exe",
+      fallbackPath: "fallback.exe",
+      planPath: path.join(fixtureRoot, "plan.json"),
+      readyMarker: path.join(fixtureRoot, "helper-ready-test"),
+      retryDelaysMs: [0],
+      spawnProcess: fakeSpawn
+    })).rejects.toThrow(/退出码 1/);
+    expect(calls).toEqual(["primary.exe"]);
   });
 
   it("reports a useful error after direct and PowerShell launch methods fail", async () => {

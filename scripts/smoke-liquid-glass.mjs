@@ -192,7 +192,7 @@ try {
   for (let attempt = 0; attempt < 100 && !page; attempt++) {
     try {
       const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then((result) => result.json());
-      page = pages.find((item) => item.type === "page" && item.webSocketDebuggerUrl);
+      page = pages.find((item) => item.type === "page" && item.url === "about:blank" && item.webSocketDebuggerUrl);
     } catch { /* Browser is starting. */ }
     if (!page) await delay(80);
   }
@@ -213,11 +213,38 @@ try {
   });
   await send("Page.enable");
   await send("Runtime.enable");
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: `
+    window.backgroundPaints = 0;
+    const clearRect = CanvasRenderingContext2D.prototype.clearRect;
+    CanvasRenderingContext2D.prototype.clearRect = function (...args) {
+      if (this.canvas.classList.contains("background-fx")) window.backgroundPaints++;
+      return clearRect.apply(this, args);
+    };
+  ` });
   await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
 
   for (const theme of themes) {
     await navigate({ view: "overview" }, theme);
     await waitFor('document.querySelector(".overview-page .glass-card") !== null');
+    if (!baseline && theme[0] === "aurora") {
+      await waitFor('window.backgroundPaints > 0');
+      const paints = await evaluate('window.backgroundPaints');
+      const canvasWidth = await evaluate('document.querySelector(".background-fx").width');
+      await send("Emulation.setDeviceMetricsOverride", { width: 1240, height: 850, deviceScaleFactor: 1.5, mobile: false });
+      await waitFor('document.documentElement.classList.contains("layout-resizing")');
+      assert(await evaluate('getComputedStyle(document.querySelector(".sidebar")).backdropFilter === "none"'), "Resize must suspend glass blur");
+      await waitFor('getComputedStyle(document.querySelector(".sidebar")).backdropFilter !== "none"');
+      await delay(2_100);
+      assert.equal(await evaluate('window.backgroundPaints'), paints, "Idle and resize must reuse the background artwork");
+      assert.equal(await evaluate('document.querySelector(".background-fx").width'), canvasWidth, "Resize must keep the backing store size bounded");
+      await evaluate('Object.defineProperty(document,"hidden",{configurable:true,value:true});document.dispatchEvent(new Event("visibilitychange"))');
+      assert.equal(await evaluate('document.querySelector(".background-fx").width'), 1, "Hiding the window must release its artwork bitmap");
+      await evaluate('delete document.hidden;document.dispatchEvent(new Event("visibilitychange"))');
+      await waitFor(`document.querySelector(".background-fx").width === ${canvasWidth}`);
+      await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await waitFor('!document.documentElement.classList.contains("layout-resizing")');
+      report.rendererPerformance = { canvasWidth, canvasPaintsDuringResizeAndIdle: 0, hiddenCanvasWidth: 1 };
+    }
     await capture(`${theme[0]}-overview`, [".sidebar", ".topbar", ".overview-page .glass-card"]);
     await navigate({ view: "migrate" }, theme);
     await waitFor('document.querySelectorAll(".path-input input").length === 2');
@@ -322,6 +349,11 @@ try {
   throw error;
 } finally {
   await writeFile(path.join(output, "results.json"), JSON.stringify(report, null, 2));
+  if (socket?.readyState === WebSocket.OPEN) {
+    const closed = new Promise((resolve) => socket.addEventListener("close", resolve, { once: true }));
+    socket.send(JSON.stringify({ id: ++sequence, method: "Browser.close" }));
+    await Promise.race([closed, delay(2000)]);
+  }
   socket?.close();
   const exited = new Promise((resolve) => chrome.once("exit", resolve));
   chrome.kill();

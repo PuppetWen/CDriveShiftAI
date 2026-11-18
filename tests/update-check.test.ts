@@ -93,6 +93,23 @@ describe("GitHub release checks through a shared system proxy", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a single install attempt while another update check arrives", async () => {
+    request.mockResolvedValueOnce(limited()).mockResolvedValueOnce(redirect()).mockResolvedValueOnce(json(manifest));
+    let refuseInstallation!: (error: Error) => void;
+    const canInstall = vi.fn(() => new Promise<void>((_resolve, reject) => {
+      refuseInstallation = reject;
+    }));
+    const updater = new UpdateService(() => undefined, canInstall);
+    await updater.check(true);
+    const first = updater.downloadAndInstall();
+    const duplicate = updater.downloadAndInstall();
+    await vi.waitFor(() => expect(canInstall).toHaveBeenCalledTimes(1));
+    expect((await updater.check(true)).phase).toBe("available");
+    expect(request).toHaveBeenCalledTimes(3);
+    refuseInstallation(new Error("File operation is active"));
+    expect((await Promise.all([first, duplicate])).map(result => result.errorCode)).toEqual(["UPDATE_FAILED", "UPDATE_FAILED"]);
+  });
+
   it("reports the actual rate-limit cause if both official channels fail", async () => {
     request.mockResolvedValueOnce(limited()).mockResolvedValueOnce(new Response(null, { status: 404 }));
     const result = await service().check(true);

@@ -32,35 +32,16 @@ export function BackgroundFX({ mode }: { mode: EffectMode }) {
     const context = canvas.getContext("2d", { alpha: true });
     if (!context) return;
 
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const flatTheme = window.matchMedia(
+      "(prefers-reduced-transparency: reduce), (forced-colors: active), (prefers-contrast: more)"
+    );
+    // This artwork sits behind the UI. Paint it at a fixed resolution so a
+    // window resize or high-DPI display cannot multiply its raster cost.
+    const width = 1280;
+    const height = 800;
+    const scale = 0.6;
     const particles = createParticles(48);
-    let width = 0;
-    let height = 0;
-    let animation = 0;
-    let timer = 0;
-    let activeUntil = performance.now() + 6_000;
-
-    const markInteractive = () => {
-      const wasIdle = performance.now() >= activeUntil;
-      activeUntil = performance.now() + 6_000;
-      if (wasIdle && !document.hidden && !animation) {
-        if (timer) window.clearTimeout(timer);
-        timer = 0;
-        animation = requestAnimationFrame(draw);
-      }
-    };
-
-    const resize = () => {
-      width = window.innerWidth;
-      height = window.innerHeight;
-      const ratio = Math.min(window.devicePixelRatio || 1, 1.5);
-      canvas.width = Math.floor(width * ratio);
-      canvas.height = Math.floor(height * ratio);
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-      context.setTransform(ratio, 0, 0, ratio, 0, 0);
-      context.imageSmoothingEnabled = false;
-    };
+    let frame = 0;
 
     const moveParticles = (speed = 1) => {
       for (const particle of particles) {
@@ -78,7 +59,7 @@ export function BackgroundFX({ mode }: { mode: EffectMode }) {
       context.clearRect(0, 0, width, height);
       const tile = width < 1320 ? 24 : 30;
       const waterline = Math.floor((height * 0.61) / tile) * tile;
-      const drift = reducedMotion ? 0 : time * 0.006;
+      const drift = time * 0.006;
 
       const sky = context.createLinearGradient(0, 0, 0, waterline);
       sky.addColorStop(0, "rgba(103, 196, 204, .46)");
@@ -527,60 +508,40 @@ export function BackgroundFX({ mode }: { mode: EffectMode }) {
       context.restore();
     };
 
-    const draw = (time: number) => {
-      animation = 0;
-      if (document.hidden) return;
-      const interactive = document.hasFocus() && time < activeUntil;
-      const frameInterval = reducedMotion ? 2_000 : interactive ? 40 : 2_000;
-      const visualTime = reducedMotion ? 0 : time;
-      if (mode === "aurora") drawBlockWorld(visualTime);
-      else if (mode === "matrix") drawTechnology(visualTime);
-      else if (mode === "calm") drawCrystal(visualTime);
-      else if (mode === "ember") drawEmber(visualTime);
-      else drawIvory(visualTime);
-      timer = window.setTimeout(() => {
-        timer = 0;
-        animation = requestAnimationFrame(draw);
-      }, frameInterval);
+    const paint = () => {
+      frame = 0;
+      if (document.hidden || flatTheme.matches) return;
+      canvas.width = width * scale;
+      canvas.height = height * scale;
+      context.setTransform(scale, 0, 0, scale, 0, 0);
+      const scene = { aurora: drawBlockWorld, matrix: drawTechnology, calm: drawCrystal, ember: drawEmber, ivory: drawIvory }[mode];
+      scene(4200);
     };
 
+    const release = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      if (canvas.width !== 1) canvas.width = 1;
+      if (canvas.height !== 1) canvas.height = 1;
+    };
     const updateVisibility = () => {
-      const hidden = document.hidden;
-      document.documentElement.classList.toggle("background-suspended", hidden);
-      if (hidden) {
-        if (animation) cancelAnimationFrame(animation);
-        if (timer) window.clearTimeout(timer);
-        animation = 0;
-        timer = 0;
-        return;
-      }
-      if (!animation) animation = requestAnimationFrame(draw);
+      if (document.hidden || flatTheme.matches) release();
+      else if (canvas.width === 1 && !frame) frame = requestAnimationFrame(paint);
     };
 
-    resize();
-    window.addEventListener("resize", resize);
-    window.addEventListener("focus", markInteractive);
-    window.addEventListener("pointermove", markInteractive, { passive: true });
-    window.addEventListener("pointerdown", markInteractive, { passive: true });
-    window.addEventListener("keydown", markInteractive);
     document.addEventListener("visibilitychange", updateVisibility);
+    flatTheme.addEventListener("change", updateVisibility);
     updateVisibility();
     return () => {
-      window.removeEventListener("resize", resize);
-      window.removeEventListener("focus", markInteractive);
-      window.removeEventListener("pointermove", markInteractive);
-      window.removeEventListener("pointerdown", markInteractive);
-      window.removeEventListener("keydown", markInteractive);
       document.removeEventListener("visibilitychange", updateVisibility);
-      document.documentElement.classList.remove("background-suspended");
-      if (animation) cancelAnimationFrame(animation);
-      if (timer) window.clearTimeout(timer);
+      flatTheme.removeEventListener("change", updateVisibility);
+      release();
     };
   }, [mode]);
 
   return (
     <>
-      <canvas className="background-fx" ref={canvasRef} aria-hidden="true" />
+      <canvas className="background-fx" ref={canvasRef} width={1} height={1} aria-hidden="true" />
       <div className={`fx-surface ${mode}`} aria-hidden="true" />
     </>
   );

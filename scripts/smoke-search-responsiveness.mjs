@@ -101,7 +101,9 @@ try {
   for(let n=0;n<100&&!port;n++){try{port=Number((await readFile(path.join(profile,"DevToolsActivePort"),"utf8")).split("\n")[0]);}catch{await wait(100);}}
   assert(port);
   const pages=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  socket=new WebSocket(pages.find(page=>page.type==="page").webSocketDebuggerUrl);
+  const page=pages.find(page=>page.type==="page" && page.url==="about:blank");
+  assert(page,"The test tab was not available");
+  socket=new WebSocket(page.webSocketDebuggerUrl);
   await new Promise(resolve=>socket.addEventListener("open",resolve,{once:true}));
   socket.addEventListener("message",event=>{const message=JSON.parse(event.data);if(message.method==="Runtime.exceptionThrown")errors.push(message.params.exceptionDetails.exception?.description||message.params.exceptionDetails.text);const item=pending.get(message.id);if(item){pending.delete(message.id);message.error?item.reject(Error(message.error.message)):item.resolve(message.result);}});
   await send("Runtime.enable"); await send("Page.enable");
@@ -140,6 +142,15 @@ try {
     await until('document.querySelector(".result-name-cell > strong")?.textContent==="hidden-query.txt"');
     checks.push("Hidden input and index events remain quiet; showing the view refreshes results");
 
+    await evaluate('window.__perf.calls=[]; for(const listener of window.__perf.indexListeners)listener({changedCount:0,contentScopes:["E:\\\\Other"]})');
+    await wait(1450);
+    assert.equal(await evaluate('window.__perf.calls.length'),0,"Content-only changes should not refresh filename results");
+    await evaluate(`(async()=>{for(let n=0;n<8;n++){for(const listener of window.__perf.indexListeners)listener({changedCount:1});await new Promise(r=>setTimeout(r,80));}})()`);
+    await until('window.__perf.calls.length>0');
+    await wait(220);
+    assert.equal(await evaluate('window.__perf.calls.length'),1,"A burst of filename changes should refresh exactly once");
+    checks.push("Filename search skips content-only notifications and combines index changes");
+
     await evaluate('window.__perf.deferNext=true; window.__input("stale-request")');
     await until('typeof window.__perf.releaseSearch === "function"');
     await evaluate('window.__input(""); window.__perf.releaseSearch()');
@@ -168,6 +179,11 @@ try {
   await writeFile(path.join(workspace,".task-tmp",`search-responsiveness-${metrics.kind}.json`),JSON.stringify({metrics,checks},null,2)+"\n");
   console.log(JSON.stringify({metrics,checks},null,2));
 } finally {
+  if (socket?.readyState === WebSocket.OPEN) {
+    const closed = new Promise(resolve => socket.addEventListener("close", resolve, { once: true }));
+    socket.send(JSON.stringify({id:++id,method:"Browser.close"}));
+    await Promise.race([closed,wait(2000)]);
+  }
   socket?.close();
   if(chrome&&chrome.exitCode===null){const exited=new Promise(resolve=>chrome.once("exit",resolve));chrome.kill();await Promise.race([exited,wait(3000)]);}
   await server?.close();
