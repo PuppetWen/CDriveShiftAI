@@ -859,6 +859,7 @@ async function dispatchNativeQuickSearch(owner: number, request: Record<string, 
         nextCursor: page.nextCursor ?? null,
         totalMatches: page.totalMatches ?? null,
         generation: page.generation,
+        partial: page.partial === true,
         cursorReset: page.cursorReset === true
       };
     }

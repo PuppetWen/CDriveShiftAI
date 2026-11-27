@@ -114,11 +114,11 @@ try {
     op: "query",
     query: "needle-file",
     kind: "all",
-    scope: fixture,
+    scope: path.parse(fixture).root,
     limit: 10
   });
   if (!nameResult.results?.some((result) => result.name === "Needle-file.txt")) {
-    throw new Error("Name index smoke test did not find the fixture file");
+    throw new Error("Name search with a drive-root filter did not find the fixture file");
   }
   const directoryResult = await request({
     op: "query",
@@ -198,7 +198,7 @@ try {
     op: "query",
     query: "shared",
     kind: "all",
-    scopes: [scoped],
+    scopes: [scoped + path.sep],
     limit: 10
   });
   if (

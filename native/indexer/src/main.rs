@@ -1908,7 +1908,12 @@ impl SearchIndex {
             .filter(|scope| {
                 !scope.is_empty() && scope.as_str() != "*" && !scope.eq_ignore_ascii_case("all")
             })
-            .map(|scope| normalized(scope))
+            .map(|scope| {
+                // The scope comparison checks for a component separator after
+                // the prefix. This also needs to hold for drive roots such as C:\.
+                let prefix = scope.trim_end_matches(['\\', '/']);
+                normalized(if prefix.is_empty() { scope } else { prefix })
+            })
             .collect();
         let category_values: HashSet<&str> = categories.iter().map(String::as_str).collect();
         let extension_values: HashSet<String> = extensions
@@ -5178,6 +5183,55 @@ mod tests {
         assert!(!super::path_matches_scope(r"C:\Database", r"c:\data"));
         assert!(super::path_matches_scope(r"C:\Keys\README", r"c:\keys"));
         assert!(!super::path_matches_scope(r"C:\Keystore", r"c:\keys"));
+    }
+
+    #[test]
+    fn search_scopes_with_trailing_separators_match_fresh_and_mapped_indexes() {
+        let root = env::temp_dir().join(format!(
+            "cshift-scopes-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let cache = root.join("names.bin");
+        let backgrounded = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let names = [
+            r"C:\Users\Lenovo\Downloads\CEV.exe",
+            r"C:\Users\Lenovo\Downloads-old\CEV-copy.exe",
+            r"E:\Backup\CEV-backup.exe",
+            r"\\Server\Share\Folder\CEV-shared.exe",
+            r"\\Server\Shared\Folder\CEV-other-share.exe",
+        ];
+        let entries = names.iter().map(|path| Entry {
+            path: (*path).to_string(), is_directory: false, size: 1,
+        }).collect::<Vec<_>>();
+        let fresh = SearchIndex::from_entries_controlled(entries.clone(), &backgrounded, &stopping).unwrap();
+        save_cache(&cache, "*", &entries, &backgrounded, &stopping).unwrap();
+        let (_, mapped) = load_cache_index(&cache, &backgrounded, &stopping).unwrap();
+        assert!(mapped.mapped.is_some());
+
+        for index in [&fresh, &mapped] {
+            for (scopes, expected_matches) in [
+                (vec![r"C:\"], vec![names[0], names[1]]),
+                (vec![r"c:/Users/Lenovo/downloads/"], vec![names[0]]),
+                (vec![r"c:\Users\Lenovo\Downloads\\", r"e:/"], vec![names[2], names[0]]),
+                (vec![r"//server/share/"], vec![names[3]]),
+            ] {
+                for match_path in [false, true] {
+                    let scopes = scopes.iter().map(|scope| (*scope).to_owned()).collect::<Vec<_>>();
+                    let page = index.query("CEV", &[], true, "file", &scopes, &[], &[], false,
+                        false, false, match_path, false, "name", "asc", None, None, None, None, 0, 10).unwrap();
+                    let mut actual = page.results.iter().map(|result| result.path.as_str()).collect::<Vec<_>>();
+                    let mut expected = expected_matches.clone();
+                    actual.sort_unstable();
+                    expected.sort_unstable();
+                    assert_eq!(actual, expected, "scopes: {scopes:?}, match_path: {match_path}");
+                    assert_eq!(page.total_matches, expected.len());
+                }
+            }
+        }
+        drop(mapped);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

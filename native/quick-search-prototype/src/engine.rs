@@ -90,6 +90,8 @@ pub struct Page {
     pub next_cursor: Option<String>,
     pub total_matches: Option<usize>,
     pub generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
     #[serde(default)]
     pub cursor_reset: bool,
 }

@@ -15,13 +15,14 @@ import type {
   MouseShortcutStatus,
   MagnifierStatus,
   NativeResponse,
+  SearchCategory,
   SearchIndexChangedEvent,
   SearchFilters,
   SearchPage,
   SearchPageOptions,
   SearchResult
 } from "./types";
-import { getLocalDriveRoots } from "./system";
+import { getLocalDriveRoots, isPathWithin, normalizeWindowsPath } from "./system";
 import {
   determineIndexRefreshReason,
   INDEX_REFRESH_INTERVAL_MS
@@ -51,6 +52,36 @@ async function fileExists(candidate: string): Promise<boolean> {
 
 const wordCharacterPattern = /[\p{L}\p{N}_]/u;
 const FOREGROUND_REFRESH_DELAY_MS = 30_000;
+const LIVE_SEARCH_MS = 1_200;
+const LIVE_DIRECTORY_LIMIT = 320;
+const LIVE_ENTRY_LIMIT = 25_000;
+const LIVE_RESULT_LIMIT = 240;
+
+// Match the indexer's category filters while the persisted name index is unavailable.
+const extensionsByCategory: Partial<Record<SearchCategory, string>> = {
+  document: "doc docx odt pdf ppt pptx rtf txt csv xls xlsx",
+  image: "apng avif bmp gif heic ico jpeg jpg png svg tif tiff webp",
+  video: "avi flv m2ts m4v mkv mov mp4 mpeg mpg webm wmv",
+  audio: "aac aiff alac ape flac m4a mp3 ogg opus wav wma",
+  archive: "7z bz2 cab gz iso rar tar tgz xz zip zst",
+  executable: "appx bat cmd com dll exe msi msix ps1 scr",
+  code: "c cc cpp cs css go h hpp html java js jsx json kt kts lua md php pl py rb rs scss sh sql swift toml ts tsx vue xml yaml yml"
+};
+const categoryByExtension = new Map<string, SearchCategory>();
+for (const [category, extensions] of Object.entries(extensionsByCategory)) {
+  for (const extension of extensions.split(" ")) categoryByExtension.set(extension, category as SearchCategory);
+}
+
+function fileExtension(name: string): string {
+  return path.win32.extname(name).slice(1).toLowerCase();
+}
+
+function scopedSearchRoots(filters: SearchFilters): string[] {
+  const selected = filters.scopes?.length ? filters.scopes : [filters.scope];
+  return selected.map((scope) => scope.trim())
+    .filter((scope) => scope && scope !== "*" && scope.toLowerCase() !== "all")
+    .map((scope) => normalizeWindowsPath(/^[a-z]:$/i.test(scope) ? `${scope}\\` : scope));
+}
 
 function containsCompleteWord(target: string, needle: string): boolean {
   let start = target.indexOf(needle);
@@ -118,6 +149,7 @@ export class SearchService {
   private restartTimer?: NodeJS.Timeout;
   private startPromise?: Promise<void>;
   private stopPromise?: Promise<void>;
+  private hasReadyNameIndex = false;
   private lastFullRefreshRequestedAt = 0;
   private refreshDue = false;
   private backgroundMode = false;
@@ -182,6 +214,7 @@ export class SearchService {
       stdio: ["pipe", "pipe", "pipe"]
     });
     this.child = child;
+    this.hasReadyNameIndex = false;
     logger.info("indexer.spawn_requested", {
       executable,
       backgroundMode: this.backgroundMode
@@ -658,15 +691,16 @@ export class SearchService {
       return { items: [], hasMore: false, generation: 0 };
     }
     const limit = Math.min(10_000, Math.max(1, Math.trunc(options.limit ?? 240)));
+    const roots = scopedSearchRoots(filters);
     let results: SearchResult[];
     let hasMore = false;
     let nextCursor: string | undefined;
     let totalMatches: number | undefined;
     let generation = 0;
     let cursorReset = false;
-    let usingNative = false;
-    if (this.child && this.status.state !== "error") {
-      usingNative = true;
+    const indexAvailable = Boolean(this.child && this.status.state !== "error");
+    const usingNative = indexAvailable && (this.hasReadyNameIndex || this.status.state === "ready");
+    if (usingNative) {
       const response = await this.request(
         {
           op: "query",
@@ -674,8 +708,8 @@ export class SearchService {
           keywords: filters.keywords,
           keywordMatch: "any",
           kind: filters.kind,
-          scope: filters.scope || "*",
-          scopes: filters.scopes?.length ? filters.scopes : [filters.scope || "*"],
+          scope: roots[0] ?? "*",
+          scopes: roots,
           categories: filters.categories ?? [],
           extensions: filters.extensions ?? [],
           caseSensitive: filters.caseSensitive ?? false,
@@ -714,7 +748,8 @@ export class SearchService {
       generation = response.generation ?? 0;
       cursorReset = response.cursorReset === true;
     } else {
-      results = await this.liveSearch(trimmed, filters.scope || "*", filters, isCurrent);
+      // During startup, keep regex on the native linear-time matcher once it is ready.
+      results = filters.regex && indexAvailable ? [] : await this.liveSearch(trimmed, roots, filters, isCurrent);
     }
 
     const enriched: SearchResult[] = [];
@@ -742,77 +777,52 @@ export class SearchService {
       );
     }
 
-    let pageItems = enriched;
-    if (!usingNative) {
-    const modifiedThreshold = filters.modifiedAfter
-      ? new Date(filters.modifiedAfter).getTime()
-      : undefined;
-    const modifiedBeforeThreshold = filters.modifiedBefore
-      ? new Date(filters.modifiedBefore).getTime()
-      : undefined;
-    const filtered = enriched.filter((item) => {
-      // Directory sizes are calculated asynchronously by directorySizes().
-      if (!item.isDirectory && filters.minSize != null && item.size < filters.minSize) return false;
-      if (!item.isDirectory && filters.maxSize != null && item.size > filters.maxSize) return false;
-      if (
-        modifiedThreshold != null &&
-        item.modifiedAt &&
-        new Date(item.modifiedAt).getTime() < modifiedThreshold
-      ) {
-        return false;
-      }
-      if (
-        modifiedBeforeThreshold != null &&
-        item.modifiedAt &&
-        new Date(item.modifiedAt).getTime() > modifiedBeforeThreshold
-      ) {
-        return false;
-      }
-      return true;
-    });
-    const direction = filters.sortDirection === "desc" ? -1 : 1;
-    const sortBy = filters.sortBy ?? "relevance";
-    const extension = (value: SearchResult) =>
-      value.isDirectory ? "" : path.extname(value.name).toLocaleLowerCase();
-    filtered.sort((first, second) => {
-      let comparison = 0;
-      if (sortBy === "name") {
-        comparison = first.name.localeCompare(second.name, "zh-CN", {
-          numeric: true,
-          sensitivity: "base"
-        });
-      } else if (sortBy === "path") {
-        comparison = first.path.localeCompare(second.path, "zh-CN", {
-          numeric: true,
-          sensitivity: "base"
-        });
-      } else if (sortBy === "size") {
-        comparison = first.size - second.size;
-      } else if (sortBy === "modified") {
-        comparison =
-          (first.modifiedAt ? new Date(first.modifiedAt).getTime() : 0) -
-          (second.modifiedAt ? new Date(second.modifiedAt).getTime() : 0);
-      } else if (sortBy === "type") {
-        comparison = extension(first).localeCompare(extension(second));
-      } else {
-        comparison = second.score - first.score;
-        return comparison || first.path.length - second.path.length;
-      }
-      return comparison * direction || first.name.localeCompare(second.name, "zh-CN");
-    });
-      const fallbackOffset = Number.parseInt(options.cursor?.split(":").at(-1) ?? "0", 10) || 0;
-      totalMatches = filtered.length;
-      pageItems = filtered.slice(fallbackOffset, fallbackOffset + limit);
-      hasMore = fallbackOffset + pageItems.length < filtered.length;
-      nextCursor = hasMore ? `fallback:${fallbackOffset + pageItems.length}` : undefined;
-    }
+    if (!usingNative) return this.liveSearchPage(enriched, filters, options, limit);
     return {
-      items: pageItems,
+      items: enriched,
       hasMore,
       nextCursor,
       totalMatches,
       generation,
       cursorReset
+    };
+  }
+
+  private liveSearchPage(results: SearchResult[], filters: SearchFilters, options: SearchPageOptions, limit: number): SearchPage<SearchResult> {
+    const modifiedAfter = Date.parse(filters.modifiedAfter ?? "");
+    const modifiedBefore = Date.parse(filters.modifiedBefore ?? "");
+    const modifiedAt = (item: SearchResult) => Date.parse(item.modifiedAt ?? "");
+    const filtered = results.filter((item) =>
+      !(filters.minSize != null && item.size < filters.minSize) &&
+      !(filters.maxSize != null && item.size > filters.maxSize) &&
+      !(modifiedAt(item) < modifiedAfter) && !(modifiedAt(item) > modifiedBefore)
+    );
+    const direction = filters.sortDirection === "asc" ? 1 : -1;
+    const collator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+    const category = (item: SearchResult) => item.isDirectory ? "folder" : categoryByExtension.get(fileExtension(item.name)) ?? "other";
+    filtered.sort((first, second) => {
+      let comparison: number;
+      switch (filters.sortBy) {
+        case "name": comparison = collator.compare(first.name, second.name); break;
+        case "path": comparison = collator.compare(first.path, second.path); break;
+        case "size": comparison = first.size - second.size; break;
+        case "modified": comparison = modifiedAt(first) - modifiedAt(second); break;
+        case "type": comparison = category(first).localeCompare(category(second)) || fileExtension(first.name).localeCompare(fileExtension(second.name)); break;
+        default: comparison = first.score - second.score;
+      }
+      return comparison * direction || collator.compare(first.path, second.path);
+    });
+    const cursor = /^fallback:(\d{1,4})$/.exec(options.cursor ?? "");
+    const offset = cursor ? Number(cursor[1]) : 0;
+    const items = filtered.slice(offset, offset + limit);
+    const hasMore = offset + items.length < filtered.length;
+    return {
+      items,
+      hasMore,
+      nextCursor: hasMore ? `fallback:${offset + items.length}` : undefined,
+      generation: 0,
+      cursorReset: options.cursor != null && !cursor,
+      partial: true
     };
   }
 
@@ -958,65 +968,101 @@ export class SearchService {
 
   private async liveSearch(
     query: string,
-    root: string,
+    roots: string[],
     filters: SearchFilters,
     isCurrent: () => boolean
   ): Promise<SearchResult[]> {
-    const deadline = Date.now() + 2_500;
+    const deadline = Date.now() + LIVE_SEARCH_MS;
     const normalizedQuery = filters.caseSensitive ? query : query.toLocaleLowerCase();
     const rawTokens = filters.keywords?.length ? filters.keywords : filters.regex ? [query] : query.split(/\s+/).filter(Boolean);
     const tokens = rawTokens.map((token) => filters.caseSensitive ? token : token.toLocaleLowerCase());
     const expressions = filters.regex ? rawTokens.map((token) => new RegExp(token, filters.caseSensitive ? "u" : "iu")) : undefined;
-    const matches = (values: boolean[]) => values.some(Boolean);
-    const queue = root === "*" ? await getLocalDriveRoots() : [root];
+    const categories = new Set(filters.categories);
+    const extensions = new Set(filters.extensions?.map((value) => value.replace(/^\.+/, "").toLowerCase()));
+    const queue: string[] = [];
+    const queued = new Set<string>();
+    const addDirectory = (candidate: string) => {
+      const key = candidate.toLowerCase();
+      if (queue.length >= LIVE_DIRECTORY_LIMIT || queued.has(key)) return;
+      queued.add(key);
+      queue.push(candidate);
+    };
+    // Exact folders take precedence. With a broad scope the user's usual file locations
+    // are more useful than traversing Windows and Program Files before Downloads.
+    const driveRoot = /^[a-z]:\\$/i;
+    for (const root of roots) if (!driveRoot.test(root)) addDirectory(root);
+    for (const folder of ["downloads", "desktop", "documents"] as const) {
+      try {
+        const candidate = normalizeWindowsPath(app.getPath(folder));
+        if (roots.length ? roots.some((root) => isPathWithin(candidate, root)) : /^[a-z]:\\/i.test(candidate)) {
+          addDirectory(candidate);
+        }
+      } catch {
+        // A known folder may not exist on this Windows profile.
+      }
+    }
+    for (const root of roots) addDirectory(root);
+    if (roots.length === 0) {
+      void getLocalDriveRoots().then((drives) => {
+        for (const drive of drives) addDirectory(drive);
+      }).catch(() => undefined);
+      const homeDrive = path.win32.parse(app.getPath("home")).root;
+      if (driveRoot.test(homeDrive)) addDirectory(homeDrive);
+    }
     const results: SearchResult[] = [];
-    while (queue.length > 0 && Date.now() < deadline && results.length < 80) {
+    let visitedEntries = 0;
+    for (let offset = 0; offset < queue.length && Date.now() < deadline && results.length < LIVE_RESULT_LIMIT; offset++) {
       if (!isCurrent() || this.backgroundMode || this.stopping) throw new Error(SEARCH_SUPERSEDED);
-      const current = queue.shift()!;
+      const current = queue[offset];
       try {
         const entries = await readdir(current, { withFileTypes: true });
         for (const entry of entries) {
           if (!isCurrent() || this.backgroundMode || this.stopping) throw new Error(SEARCH_SUPERSEDED);
+          if (++visitedEntries > LIVE_ENTRY_LIMIT || Date.now() >= deadline) return results;
           if (entry.isSymbolicLink()) continue;
-          const entryPath = path.join(current, entry.name);
-          if (entry.isDirectory()) queue.push(entryPath);
-          const kindMatches =
-            filters.kind === "all" ||
-            (filters.kind === "folder" && entry.isDirectory()) ||
-            (filters.kind === "file" && entry.isFile());
+          const entryPath = path.win32.join(current, entry.name);
+          const isDirectory = entry.isDirectory();
+          if (isDirectory) addDirectory(entryPath);
+          if ((filters.kind === "folder" && !isDirectory) || (filters.kind === "file" && !entry.isFile())) continue;
+          if (categories.size || extensions.size) {
+            const extension = fileExtension(entry.name);
+            const category = isDirectory ? "folder" : categoryByExtension.get(extension) ?? "other";
+            if (categories.size && !categories.has(category)) continue;
+            if (extensions.size && (isDirectory || !extensions.has(extension))) continue;
+          }
           const originalTarget = filters.matchPath ? entryPath : entry.name;
           const target = filters.caseSensitive
             ? originalTarget
             : originalTarget.toLocaleLowerCase();
           let score: number | undefined;
-          if (expressions && matches(expressions.map((expression) => expression.test(originalTarget)))) {
+          if (expressions?.some((expression) => expression.test(originalTarget))) {
             score = 72;
           } else if (!expressions && filters.fuzzy) {
             const tokenScores = tokens.map((token) => fuzzySubsequenceScore(target, token));
-            if (matches(tokenScores.map((value) => value != null))) {
+            if (tokenScores.some((value) => value != null)) {
               score = tokenScores.reduce<number>((sum, value) => sum + (value ?? 0), 0) /
                 Math.max(1, tokenScores.length);
             }
           } else if (
             !expressions &&
             filters.wholeWord &&
-            matches(tokens.map((token) => containsCompleteWord(target, token)))
+            tokens.some((token) => containsCompleteWord(target, token))
           ) {
             score = 82;
           } else if (!expressions && !filters.fuzzy && !filters.wholeWord &&
-            matches(tokens.map((token) => target.includes(token)))) {
+            tokens.some((token) => target.includes(token))) {
             score = target === normalizedQuery ? 100 : target.startsWith(normalizedQuery) ? 92 : 70;
           }
-          if (kindMatches && score != null) {
+          if (score != null) {
             results.push({
               path: entryPath,
               name: entry.name,
-              isDirectory: entry.isDirectory(),
+              isDirectory,
               size: 0,
               score,
               source: "live-scan"
             });
-            if (results.length >= 80) break;
+            if (results.length >= LIVE_RESULT_LIMIT) return results;
           }
         }
       } catch (error) {
@@ -1024,7 +1070,7 @@ export class SearchService {
         // Access-denied directories are expected during fallback scanning.
       }
     }
-    return results.sort((a, b) => b.score - a.score);
+    return results;
   }
 
   private request(
@@ -1177,6 +1223,7 @@ export class SearchService {
       }
     }
     this.status = structuredClone(status);
+    if (status.state === "ready") this.hasReadyNameIndex = true;
     if (status.state !== previousState || status.mode !== previousMode) {
       logger.info("indexer.status_changed", {
         previousState,

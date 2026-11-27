@@ -60,6 +60,7 @@ export interface SearchPage<T> {
   totalMatches?: number;
   generation: number;
   cursorReset?: boolean;
+  partial?: boolean;
 }
 
 export type SearchCategory =

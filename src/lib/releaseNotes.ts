@@ -7,42 +7,42 @@ export interface BundledReleaseNote {
 }
 
 export const bundledReleaseNotes: BundledReleaseNote = {
-  "version": "0.2.5",
-  "summary": "新增 Windows 原生极速搜索窗口，降低大索引搜索时的内存占用。",
+  "version": "0.2.6",
+  "summary": "修复指定盘符或文件夹后漏搜文件的问题，索引就绪后自动更新当前搜索。",
   "sections": [
     {
-      "title": "独立极速搜索",
+      "title": "指定搜索位置",
       "items": [
-        "简体中文环境的托盘菜单和搜索快捷键打开 Windows 原生窗口，两套界面共用一个索引进程和搜索书签。",
-        "支持名称和正文搜索、多条件筛选及排序，可以携带当前筛选切换到完整搜索界面。"
+        "修复选择 C 盘等盘符，或所选文件夹路径以分隔符结尾时，名称搜索错误返回零条结果的问题。",
+        "支持同时选择多个范围，并区分名称前缀相同的相邻文件夹。"
       ]
     },
     {
-      "title": "索引占用与刷新",
+      "title": "索引准备期间",
       "items": [
-        "使用内存映射的紧凑路径表，复用相同目录前缀，减少索引常驻分配、查询解码和重启开销。",
-        "每日刷新可复用经过 NTFS 日志验证的未变更卷。"
+        "索引未就绪时显示有限的实时搜索结果，并标明结果尚未完整。",
+        "索引就绪后自动按当前关键词、位置和筛选重新查询，包括从上次会话恢复的搜索。"
       ]
     }
   ]
 };
 
 export const bundledReleaseNotesEnglish: BundledReleaseNote = {
-  "version": "0.2.5",
-  "summary": "Add a native Windows quick search window and reduce memory use with large indexes.",
+  "version": "0.2.6",
+  "summary": "Fix missing results in selected drives and folders, and refresh the current search when the index is ready.",
   "sections": [
     {
-      "title": "Native quick search",
+      "title": "Search locations",
       "items": [
-        "In Simplified Chinese, the tray menu and quick search shortcut open a native Windows window that shares the index process and saved searches with the main window.",
-        "Search file names or contents with filters and sorting, and carry the current search into the full interface."
+        "Fix empty name search results when a drive such as C: is selected or when a folder path ends with a separator.",
+        "Multiple locations can be searched together while keeping similarly named sibling folders separate."
       ]
     },
     {
-      "title": "Index memory and refresh",
+      "title": "Index startup",
       "items": [
-        "Memory-map compact path tables with shared directory prefixes to reduce private allocations, query decoding, and restart time.",
-        "Daily refreshes can reuse indexes for unchanged volumes when the NTFS journal confirms they are current."
+        "Show limited live results while the index is preparing and label those results as incomplete.",
+        "When the index becomes ready, rerun the current or restored search with its selected locations and filters."
       ]
     }
   ]

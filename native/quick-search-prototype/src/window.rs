@@ -876,6 +876,10 @@ impl State {
         SendMessageW(list, LVM_SETITEMCOUNT, self.rows.len(), 0);
         if !self.rows.is_empty() { SendMessageW(list, LVM_ENSUREVISIBLE, 0, 0); }
         InvalidateRect(list, null(), 0);
+        if page.partial == Some(true) {
+            self.label(&format!("当前显示 {} 条实时扫描结果，完整索引就绪后自动刷新", self.rows.len()));
+            return;
+        }
         let count = page.total_matches
             .map(|total| format!("{total} 个匹配结果"))
             .unwrap_or_else(|| "匹配结果".to_string());

@@ -220,6 +220,7 @@ export function SearchView({
   const [nameHasMore, setNameHasMore] = useState(false);
   const [contentHasMore, setContentHasMore] = useState(false);
   const [nameTotal, setNameTotal] = useState<number>();
+  const [namePagePartial, setNamePagePartial] = useState(false);
   const [contentTotal, setContentTotal] = useState<number>();
   const [loadingMore, setLoadingMore] = useState(false);
   const [columnWidths, setColumnWidths] = useState<SearchResultColumnWidths>({
@@ -273,6 +274,7 @@ export function SearchView({
   const [propertyPath, setPropertyPath] = useState("");
   const [forceDeletePath, setForceDeletePath] = useState("");
   const [liveIndexRevision, setLiveIndexRevision] = useState(0);
+  const previousNameIndexReady = useRef(indexer.state === "ready");
   const requestSequence = useRef(0);
   const pageRequestSequence = useRef(0);
   const loadingMoreRef = useRef(false);
@@ -306,6 +308,8 @@ export function SearchView({
   const categories = filters.categories ?? EMPTY_CATEGORIES;
   const scopes = filters.scopes ?? EMPTY_STRINGS;
   const extensions = filters.extensions ?? EMPTY_STRINGS;
+  const nameIndexReady = indexer.state === "ready";
+  const nameResultsIncomplete = mode === "name" && (!nameIndexReady || namePagePartial);
   const contentStatusMatchesScope =
     contentScope !== "*" &&
     normalizeScopePath(contentStatus.root) === normalizeScopePath(contentScope);
@@ -379,6 +383,15 @@ export function SearchView({
   useEffect(() => api.onContentIndexerStatus((status) => {
     if (document.visibilityState !== "hidden") setContentStatus(status);
   }), []);
+
+  useEffect(() => {
+    const becameReady = nameIndexReady && !previousNameIndexReady.current;
+    previousNameIndexReady.current = nameIndexReady;
+    if (becameReady && mode === "name" && workspaceReady && pageVisible && effectiveQuery) {
+      liveRefreshRef.current = true;
+      setLiveIndexRevision((revision) => revision + 1);
+    }
+  }, [nameIndexReady, mode, workspaceReady, pageVisible, effectiveQuery]);
 
   useEffect(() => {
     if (!effectiveQuery) return;
@@ -706,6 +719,7 @@ export function SearchView({
       setNameHasMore(false);
       setContentHasMore(false);
       setNameTotal(undefined);
+      setNamePagePartial(false);
       setContentTotal(undefined);
       setElapsed(undefined);
       setError("");
@@ -785,6 +799,7 @@ export function SearchView({
             setNameCursor(page.nextCursor);
             setNameHasMore(page.hasMore);
             setNameTotal(page.totalMatches);
+            setNamePagePartial(page.partial === true);
             setSelectedPath((current) =>
               current && next.some((item) => item.path === current)
                 ? current
@@ -803,6 +818,7 @@ export function SearchView({
             setNameCursor(undefined);
             setNameHasMore(false);
             setNameTotal(undefined);
+            setNamePagePartial(false);
           }
           if (!backgroundRefresh) setElapsed(performance.now() - started);
           });
@@ -927,6 +943,7 @@ export function SearchView({
         setNameCursor(page.nextCursor);
         setNameHasMore(page.hasMore);
         setNameTotal(page.totalMatches);
+        setNamePagePartial(page.partial === true);
       } else {
         const restoredBootstrap = !contentCursor && contentResultsRef.current.length > 0;
         const page = await api.searchContentPage(value, contentScope, {
@@ -1634,7 +1651,7 @@ export function SearchView({
   const count = activeResultCount;
   const totalCount = mode === "name" ? nameTotal : contentTotal;
   const resultCountLabel =
-    totalCount != null
+    totalCount != null && !nameResultsIncomplete
       ? ui(
           `已加载 ${count.toLocaleString()} / 共 ${totalCount.toLocaleString()} 个`,
           `Loaded ${formatNumber(count)} of ${formatNumber(totalCount)}`
@@ -2519,12 +2536,14 @@ export function SearchView({
                 <span className="spinner tiny" /> {ui("正在后台计算文件夹占用空间", "Calculating folder sizes in the background")}
               </span>
             )}
-            {mode === "name" && indexer.state !== "ready" && (
+            {nameResultsIncomplete && (
               <span className="inline-note">
-                <Info size={13} /> {ui("全盘索引未完成，结果会持续补全", "The index is still building; results will keep appearing")}
+                <Info size={13} /> {indexer.state === "error"
+                  ? ui("索引暂不可用，当前为限范围实时结果", "Index unavailable. Showing results from a limited live scan.")
+                  : ui("索引结果尚未完整，就绪后会自动刷新", "Results are incomplete and will refresh when the index is ready.")}
               </span>
             )}
-            {mode === "name" && indexer.state === "ready" && (
+            {mode === "name" && !nameResultsIncomplete && (
               <span className="inline-note live-search-note">
                 <Zap size={12} /> {ui("索引变更实时同步", "Index changes synchronized live")}
               </span>
@@ -2768,6 +2787,12 @@ export function SearchView({
                 )}
               </div>
             </>
+          ) : !loading && nameResultsIncomplete ? (
+            <EmptyState icon={<Database size={28} />} title={ui("当前还没有可显示的结果", "No results to display yet")}>
+              {indexer.state === "error"
+                ? ui("可缩小到具体目录，或重建名称索引后再搜索。", "Choose a specific folder or rebuild the name index and search again.")
+                : ui("索引就绪后会按当前关键词和搜索位置重新查询。", "The current query and locations will be searched again when the index is ready.")}
+            </EmptyState>
           ) : !loading ? (
             <EmptyState icon={<Search size={28} />} title={ui("没有找到匹配项", "No matching items")}>
               {mode === "name"
