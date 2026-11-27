@@ -11,6 +11,7 @@ const DRIVE_DISCOVERY_TTL_MS = 30_000;
 interface LocalDriveMetadata {
   root: string;
   fileSystem: string;
+  serial?: string;
 }
 
 let driveDiscoveryCache:
@@ -79,6 +80,10 @@ export function isHighRiskApplicationPath(candidate: string): boolean {
   return programFilesPaths.some((programPath) => isPathWithin(candidate, programPath));
 }
 
+export function invalidateDriveDiscovery(): void {
+  driveDiscoveryCache = undefined;
+}
+
 async function discoverLocalDrives(): Promise<LocalDriveMetadata[]> {
   const now = Date.now();
   if (driveDiscoveryCache && driveDiscoveryCache.expiresAt > now) {
@@ -87,30 +92,45 @@ async function discoverLocalDrives(): Promise<LocalDriveMetadata[]> {
   const promise = (async () => {
     try {
       const script =
-        "(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3 OR DriveType=2' | " +
-        "Select-Object DeviceID,FileSystem) | ConvertTo-Json -Compress";
+        "$volumeSerials=@{}; " +
+        "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3 OR DriveType=2' -ErrorAction SilentlyContinue | " +
+        "ForEach-Object {$volumeSerials[$_.DeviceID]=$_.VolumeSerialNumber}; " +
+        "@([IO.DriveInfo]::GetDrives() | ForEach-Object { try { " +
+        "if (($_.DriveType -eq 2 -or $_.DriveType -eq 3) -and $_.IsReady) { " +
+        "$driveId=$_.Name.TrimEnd('\\'); " +
+        "[pscustomobject]@{DeviceID=$driveId; FileSystem=$_.DriveFormat; VolumeSerialNumber=$volumeSerials[$driveId]} " +
+        "} } catch {} }) | ConvertTo-Json -Compress";
       const { stdout } = await execFileAsync(
         "powershell.exe",
         ["-NoProfile", "-NonInteractive", "-Command", script],
         { windowsHide: true, timeout: 8_000, maxBuffer: 256 * 1024 }
       );
       const parsed = JSON.parse(stdout.trim()) as
-        | { DeviceID?: unknown; FileSystem?: unknown }
-        | Array<{ DeviceID?: unknown; FileSystem?: unknown }>;
+        | { DeviceID?: unknown; FileSystem?: unknown; VolumeSerialNumber?: unknown }
+        | Array<{ DeviceID?: unknown; FileSystem?: unknown; VolumeSerialNumber?: unknown }>;
       const values = Array.isArray(parsed) ? parsed : [parsed];
       const drives = values
         .filter(
-          (item): item is { DeviceID: string; FileSystem?: unknown } =>
+          (item): item is { DeviceID: string; FileSystem?: unknown; VolumeSerialNumber?: unknown } =>
             typeof item?.DeviceID === "string" && /^[A-Z]:$/i.test(item.DeviceID)
         )
-        .map((item) => ({
+        .map((item): LocalDriveMetadata => ({
           root: `${item.DeviceID.toUpperCase()}\\`,
+          serial: typeof item.VolumeSerialNumber === "string" ? item.VolumeSerialNumber : undefined,
           fileSystem:
             typeof item.FileSystem === "string" && item.FileSystem.trim()
               ? item.FileSystem.trim()
               : "Unknown"
         }));
-      return drives.length ? drives : [{ root: "C:\\", fileSystem: "Unknown" }];
+      const readable = await Promise.all(drives.map(async (drive) => {
+        try {
+          await statfs(drive.root);
+          return drive;
+        } catch {
+          return undefined;
+        }
+      }));
+      return readable.filter((drive): drive is LocalDriveMetadata => drive != null);
     } catch {
       return [{ root: "C:\\", fileSystem: "Unknown" }];
     }
@@ -142,6 +162,11 @@ export async function getDriveInfo(root = "C:\\"): Promise<DriveInfo> {
 
 export async function getLocalDriveRoots(): Promise<string[]> {
   return (await discoverLocalDrives()).map((drive) => drive.root);
+}
+
+export async function getLocalDriveIdentity(): Promise<string> {
+  return JSON.stringify((await discoverLocalDrives())
+    .map((drive) => [drive.root, drive.serial ?? "", drive.fileSystem]).sort());
 }
 
 export async function isElevated(): Promise<boolean> {

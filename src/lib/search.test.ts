@@ -4,6 +4,7 @@ import {
   categoryOf,
   defaultFilters,
   deriveKind,
+  isSearchSupersededError,
   normalizeScopePath,
   searchKeywords,
   validateRegexPattern
@@ -23,6 +24,18 @@ function result(name: string, isDirectory = false): SearchResult {
 }
 
 describe("search helpers", () => {
+  it("recognizes superseded search work through Electron IPC without suppressing real failures", () => {
+    expect(isSearchSupersededError(new Error("搜索请求已被新输入取代"))).toBe(true);
+    expect(isSearchSupersededError("Error: 搜索请求已被新输入取代")).toBe(true);
+    for (const channel of ["query", "query-page", "content-query", "content-query-page", "directory-sizes"]) {
+      expect(isSearchSupersededError(new Error(`Error invoking remote method 'search:${channel}': Error: 搜索请求已被新输入取代`))).toBe(true);
+    }
+    expect(isSearchSupersededError(new Error("Error invoking remote method 'search:directory-sizes': Error: EACCES"))).toBe(false);
+    expect(isSearchSupersededError(new Error("索引请求超时"))).toBe(false);
+    expect(isSearchSupersededError(new Error("搜索请求已被新输入取代后写入失败"))).toBe(false);
+    expect(isSearchSupersededError(undefined)).toBe(false);
+  });
+
   it("combines committed keywords with a live draft without splitting phrases", () => {
     expect(searchKeywords([" dsh ", "alpha beta", "dsh", ""], " other ")).toEqual(["dsh", "alpha beta", "other"]);
     expect(searchKeywords(["报告", "日志"], "报告")).toEqual(["报告", "日志"]);

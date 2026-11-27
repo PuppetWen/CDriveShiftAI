@@ -795,6 +795,7 @@ const browserFallback: CDriveShiftApi = {
     mockMigrations = mockMigrations.filter((record) => !selected.has(record.id));
     return before - mockMigrations.length;
   },
+  onDrivesChanged: () => () => undefined,
   onIndexerStatus: () => () => undefined,
   onSearchIndexChanged: () => () => undefined,
   onContentIndexerStatus: () => () => undefined,

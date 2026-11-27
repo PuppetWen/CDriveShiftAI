@@ -8,6 +8,11 @@ import type {
 export type SearchMode = "name" | "content";
 export type DatePreset = "any" | "today" | "week" | "month" | "year" | "custom";
 
+export function isSearchSupersededError(reason: unknown): boolean {
+  const message = reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "";
+  return /^(?:Error invoking remote method 'search:(?:query|query-page|content-query|content-query-page|directory-sizes)': )?(?:Error: )?搜索请求已被新输入取代$/.test(message);
+}
+
 export function searchKeywords(keywords: readonly string[] = [], draft = ""): string[] {
   return [...new Set([...keywords, draft].map((term) => term.trim()).filter(Boolean))].slice(0, 32);
 }

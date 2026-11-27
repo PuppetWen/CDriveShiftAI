@@ -159,6 +159,11 @@ contextBridge.exposeInMainWorld("cDriveShiftAI", {
   rollbackMigration: (id: string) => ipcRenderer.invoke("migration:rollback", id),
   reapplyMigration: (id: string) => ipcRenderer.invoke("migration:reapply", id),
   deleteMigrations: (ids: string[]) => ipcRenderer.invoke("migration:delete", ids),
+  onDrivesChanged: (listener: () => void) => {
+    const handler = () => listener();
+    ipcRenderer.on("system:drives-changed", handler);
+    return () => ipcRenderer.removeListener("system:drives-changed", handler);
+  },
   onIndexerStatus: (listener: (status: IndexerStatus) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, status: IndexerStatus) => listener(status);
     ipcRenderer.on("indexer:status", handler);

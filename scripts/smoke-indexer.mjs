@@ -101,12 +101,16 @@ function normalizeWindowsPath(value) {
 }
 
 try {
-  await request({
+  const initialized = await request({
     op: "init",
     root: fixture,
     cachePath: path.join(indexState, "names.bin"),
     contentCacheDir: path.join(indexState, "content")
   });
+  if (initialized.indexedRoots?.length !== 1 ||
+      normalizeWindowsPath(initialized.indexedRoots[0]) !== normalizeWindowsPath(fixture)) {
+    throw new Error("Native initialization did not report the indexed roots");
+  }
   await waitForEvent(
     (message) => message.event === "status" && message.status?.state === "ready"
   );

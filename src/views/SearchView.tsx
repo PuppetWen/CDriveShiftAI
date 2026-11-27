@@ -69,6 +69,7 @@ import {
   categoryOf,
   defaultFilters,
   deriveKind,
+  isSearchSupersededError,
   normalizeScopePath,
   regexTemplates,
   regexTokens,
@@ -387,7 +388,7 @@ export function SearchView({
   useEffect(() => {
     const becameReady = nameIndexReady && !previousNameIndexReady.current;
     previousNameIndexReady.current = nameIndexReady;
-    if (becameReady && mode === "name" && workspaceReady && pageVisible && effectiveQuery) {
+    if (becameReady && workspaceReady && pageVisible && effectiveQuery) {
       liveRefreshRef.current = true;
       setLiveIndexRevision((revision) => revision + 1);
     }
@@ -824,7 +825,7 @@ export function SearchView({
           });
         })
         .catch((reason) => {
-          if (sequence !== requestSequence.current) return;
+          if (sequence !== requestSequence.current || isSearchSupersededError(reason)) return;
           setError(reason instanceof Error ? reason.message : String(reason));
         })
         .finally(() => {
@@ -874,8 +875,10 @@ export function SearchView({
     if (visibleSizePaths.length === 0) return;
     // Let typing and the first result paint finish before optional disk work.
     // Only size the visible rows, rather than recursively walking 180 folders.
-    const timer = window.setTimeout(() => {
-      if (document.visibilityState === "hidden") return;
+    let timer: number | undefined;
+    const measureVisibleFolders = () => {
+      timer = undefined;
+      if (sequence !== sizeSequence.current || document.visibilityState === "hidden") return;
       setDirectorySizesLoading(true);
       void api.directorySizes(visibleSizePaths)
         .then((items) => {
@@ -888,17 +891,23 @@ export function SearchView({
           }));
         })
         .catch((reason) => {
-          if (sequence === sizeSequence.current && document.visibilityState !== "hidden") {
-            notify("error", ui("部分文件夹大小计算失败：", "Some folder sizes could not be calculated: ") +
-              (reason instanceof Error ? reason.message : String(reason)));
+          if (sequence !== sizeSequence.current || document.visibilityState === "hidden") return;
+          if (isSearchSupersededError(reason)) {
+            // A background name refresh can cancel this batch while returning
+            // identical rows. Resume optional size work after the query settles.
+            timer = window.setTimeout(measureVisibleFolders, 700);
+            return;
           }
+          notify("error", ui("部分文件夹大小计算失败：", "Some folder sizes could not be calculated: ") +
+            (reason instanceof Error ? reason.message : String(reason)));
         })
         .finally(() => {
           if (sequence === sizeSequence.current) setDirectorySizesLoading(false);
         });
-    }, 700);
+    };
+    timer = window.setTimeout(measureVisibleFolders, 700);
     return () => {
-      window.clearTimeout(timer);
+      if (timer != null) window.clearTimeout(timer);
       if (sequence === sizeSequence.current) ++sizeSequence.current;
     };
   }, [effectiveQuery, error, filters, isComposing, loading, mode, notify, pageVisible, query, ui, visibleSizePaths, workspaceReady]);
@@ -973,7 +982,7 @@ export function SearchView({
         setContentTotal(page.totalMatches);
       }
     } catch (reason) {
-      if (sequence === pageRequestSequence.current) {
+      if (sequence === pageRequestSequence.current && !isSearchSupersededError(reason)) {
         setError(reason instanceof Error ? reason.message : String(reason));
       }
     } finally {

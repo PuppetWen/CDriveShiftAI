@@ -49,6 +49,7 @@ for (const method of ["access", "lstat", "opendir", "readdir", "realpath", "stat
 const main = path.join(workspace, "dist-electron");
 const system = require(path.join(main, "system.js"));
 system.getLocalDriveRoots = async () => [driveC, driveE];
+system.getLocalDriveIdentity = async () => "controlled-C-and-E-volumes";
 system.getDriveInfo = async (root) => ({ root, name: root.slice(0, 2), totalBytes: 1_000_000,
   freeBytes: 900_000, usedBytes: 100_000, fileSystem: "NTFS" });
 system.isElevated = async () => false;
@@ -62,6 +63,7 @@ const { UpdateService } = require(path.join(main, "update.js"));
 UpdateService.prototype.check = async function() { return this.getState(); };
 
 const { SearchService } = require(path.join(main, "search.js"));
+SearchService.prototype.refreshDrives = async () => false;
 let search;
 let ready = false;
 const calls = [];

@@ -3479,7 +3479,11 @@ mod ntfs {
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_HANDLE_EOF, INVALID_HANDLE_VALUE,
     };
-    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, GetDriveTypeW, GetLogicalDrives};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetFileAttributesW, GetLogicalDrives,
+        INVALID_FILE_ATTRIBUTES,
+    };
+    use windows_sys::Win32::System::Diagnostics::Debug::{SetThreadErrorMode, SEM_FAILCRITICALERRORS};
     use windows_sys::Win32::System::IO::DeviceIoControl;
 
     const GENERIC_READ: u32 = 0x8000_0000;
@@ -3518,6 +3522,10 @@ mod ntfs {
     }
 
     pub fn local_roots() -> Vec<String> {
+        // Empty removable readers must fail quietly instead of opening a
+        // Windows "insert disk" dialog during background drive discovery.
+        let mut previous_error_mode = 0;
+        let restore_error_mode = unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut previous_error_mode) } != 0;
         let mask = unsafe { GetLogicalDrives() };
         let mut roots = Vec::new();
         for index in 0..26u32 {
@@ -3529,10 +3537,14 @@ mod ntfs {
             let mut wide: Vec<u16> = root.encode_utf16().collect();
             wide.push(0);
             let drive_type = unsafe { GetDriveTypeW(wide.as_ptr()) };
-            if drive_type == DRIVE_FIXED || drive_type == DRIVE_REMOVABLE {
-                roots.push(root);
-            }
+            if drive_type != DRIVE_FIXED && drive_type != DRIVE_REMOVABLE { continue; }
+            let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+            if attributes == INVALID_FILE_ATTRIBUTES || attributes & FILE_ATTRIBUTE_DIRECTORY == 0 { continue; }
+            let mut free_bytes = 0;
+            if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_bytes, null_mut(), null_mut()) } == 0 { continue; }
+            roots.push(root);
         }
+        if restore_error_mode { unsafe { SetThreadErrorMode(previous_error_mode, null_mut()); } }
         roots
     }
 
@@ -4725,7 +4737,7 @@ fn run_server() -> io::Result<()> {
 
                 let force_rebuild = request.force_rebuild.unwrap_or(false);
                 state = Some(Arc::clone(&shared));
-                output.send(&json!({ "id": request.id, "ok": true }));
+                output.send(&json!({ "id": request.id, "ok": true, "indexedRoots": roots }));
                 // Cache parsing and in-memory index construction must not block
                 // the command loop; otherwise a minimize/background request
                 // cannot pause a large startup load until it has already ended.
@@ -5230,6 +5242,33 @@ mod tests {
                 }
             }
         }
+
+        let letter_entries = (b'A'..=b'Z').map(|letter| Entry {
+            path: format!("{}:\\Users\\Fixture\\Downloads\\nested\\CEV-deep-{}.exe", letter as char, letter as char),
+            is_directory: false,
+            size: 1,
+        }).collect::<Vec<_>>();
+        let letters_cache = root.join("letters.bin");
+        let letter_fresh = SearchIndex::from_entries_controlled(letter_entries.clone(), &backgrounded, &stopping).unwrap();
+        save_cache(&letters_cache, "*", &letter_entries, &backgrounded, &stopping).unwrap();
+        let (_, letter_mapped) = load_cache_index(&letters_cache, &backgrounded, &stopping).unwrap();
+        assert!(letter_mapped.mapped.is_some());
+        for index in [&letter_fresh, &letter_mapped] {
+            for (letter, expected) in (b'A'..=b'Z').zip(&letter_entries) {
+                let scopes = vec![format!("{}:\\", letter as char)];
+                let page = index.query("CEV", &[], true, "file", &scopes, &[], &[], false,
+                    false, false, false, false, "name", "asc", None, None, None, None, 0, 10).unwrap();
+                assert_eq!(page.total_matches, 1, "drive scope: {scopes:?}");
+                assert_eq!(page.results[0].path, expected.path, "drive scope: {scopes:?}");
+            }
+            let scopes = ["C:\\", "D:\\", "E:\\"].iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+            let page = index.query("CEV", &[], true, "file", &scopes, &[], &[], false,
+                false, false, false, false, "path", "asc", None, None, None, None, 0, 10).unwrap();
+            assert_eq!(page.total_matches, 3);
+            assert_eq!(page.results.iter().map(|result| result.path.as_str()).collect::<Vec<_>>(),
+                letter_entries[2..5].iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>());
+        }
+        drop(letter_mapped);
         drop(mapped);
         fs::remove_dir_all(root).unwrap();
     }

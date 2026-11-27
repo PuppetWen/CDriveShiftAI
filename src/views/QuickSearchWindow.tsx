@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Database, Palette, Search, Sparkles } from "lucide-react";
 import { BackgroundFX } from "../components/BackgroundFX";
 import { Toasts, type ToastItem } from "../components/ui";
@@ -39,6 +39,7 @@ export function QuickSearchWindow() {
   const [indexer, setIndexer] = useState(initialIndexer);
   const [settings, setSettings] = useState<AppSettings>();
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const searchWindowRef = useRef<HTMLElement>(null);
   const effectMode = settings?.effectMode ?? initialEffectMode();
 
   const notify = useCallback((type: ToastItem["type"], message: string) => {
@@ -50,33 +51,91 @@ export function QuickSearchWindow() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    let indexerChanged = false;
+    let settingsChanged = false;
     void Promise.allSettled([
       api.getOverview(),
       api.getSettings(),
       api.indexerStatus()
     ]).then(([overviewResult, settingsResult, indexerResult]) => {
+      if (!active) return;
       if (overviewResult.status === "fulfilled") {
-        setOverview(overviewResult.value);
-        setIndexer(overviewResult.value.indexer);
+        setOverview((current) => current ?? overviewResult.value);
+        if (!indexerChanged) setIndexer(overviewResult.value.indexer);
       }
-      if (settingsResult.status === "fulfilled") {
+      if (settingsResult.status === "fulfilled" && !settingsChanged) {
         setSettings(settingsResult.value);
         setAppLanguage(settingsResult.value.language);
         applyTextScale(settingsResult.value.uiScale);
       }
-      if (indexerResult.status === "fulfilled") setIndexer(indexerResult.value);
+      if (indexerResult.status === "fulfilled" && !indexerChanged) setIndexer(indexerResult.value);
     });
-    const offStatus = api.onIndexerStatus(setIndexer);
+    const offStatus = api.onIndexerStatus((status) => {
+      indexerChanged = true;
+      setIndexer(status);
+    });
     const offSettings = api.onSettingsChanged((updated) => {
+      settingsChanged = true;
       setSettings(updated);
       setAppLanguage(updated.language);
       applyTextScale(updated.uiScale);
     });
     const offTextScale = api.onTextScalePreview(applyTextScale);
     return () => {
+      active = false;
       offStatus();
       offSettings();
       offTextScale();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let timer = 0;
+    let revision = 0;
+    const refreshDrives = () => {
+      if (document.visibilityState === "hidden" || timer) return;
+      timer = window.setTimeout(() => {
+        timer = 0;
+        if (document.visibilityState === "hidden") return;
+        const requested = ++revision;
+        void api.getOverview().then((updated) => {
+          if (active && requested === revision) {
+            setOverview((current) => current ? { ...current, drives: updated.drives } : updated);
+          }
+        }).catch(() => undefined);
+      }, 120);
+    };
+    const offDrives = api.onDrivesChanged(refreshDrives);
+    window.addEventListener("focus", refreshDrives);
+    document.addEventListener("visibilitychange", refreshDrives);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      offDrives();
+      window.removeEventListener("focus", refreshDrives);
+      document.removeEventListener("visibilitychange", refreshDrives);
+    };
+  }, []);
+
+  useEffect(() => {
+    let frame = 0;
+    const focusSearch = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        searchWindowRef.current?.querySelector<HTMLInputElement>(".search-keyword-editor > input")?.focus();
+      });
+    };
+    focusSearch();
+    const offNavigation = api.onAppNavigation((event) => {
+      if (event.view === "search" && event.focus === "search-input") focusSearch();
+    });
+    window.addEventListener("focus", focusSearch);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      offNavigation();
+      window.removeEventListener("focus", focusSearch);
     };
   }, []);
 
@@ -115,7 +174,7 @@ export function QuickSearchWindow() {
   );
 
   return (
-    <main className="quick-search-window quick-search-workspace">
+    <main className="quick-search-window quick-search-workspace" ref={searchWindowRef}>
       <BackgroundFX mode={effectMode} />
       <header className="quick-search-titlebar">
         <span className="quick-search-brand">

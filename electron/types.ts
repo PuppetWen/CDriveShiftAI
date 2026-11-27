@@ -574,6 +574,7 @@ export interface NativeResponse {
   event?: string;
   ok?: boolean;
   error?: string;
+  indexedRoots?: string[];
   status?: IndexerStatus | ContentIndexerStatus;
   results?: SearchResult[] | ContentSearchResult[];
   changedCount?: number;

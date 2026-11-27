@@ -36,11 +36,10 @@ import {
   serializeError
 } from "./logger";
 import { MigrationService } from "./migration";
-import { NativeQuickSearchHost } from "./native-quick-search";
 import { SearchService } from "./search";
 import { readContentOptions, readSearchFilters, readSearchPage } from "./search-input";
 import { normalizeStoredUiScale } from "./settings-normalization";
-import { AppStore, sanitizeSearchWorkspace } from "./store";
+import { AppStore } from "./store";
 import { createTrayMenuIcon, type TrayIconKind } from "./tray-icons";
 import { applyWindowMaterial, getWindowMaterial } from "./window-material";
 import {
@@ -52,6 +51,8 @@ import { isVisibleUpdateWindow, waitForVisibleUpdateWindow } from "./update-star
 import {
   getDriveInfo,
   getLocalDriveRoots,
+  getLocalDriveIdentity,
+  invalidateDriveDiscovery,
   isElevated,
   isHighRiskApplicationPath,
   PROTECTED_PATHS,
@@ -96,8 +97,6 @@ process.on("unhandledRejection", (reason) => {
 
 let mainWindow: BrowserWindow | undefined;
 let quickSearchWindow: BrowserWindow | undefined;
-let nativeQuickSearch: NativeQuickSearchHost | undefined;
-const nativeResultPaths = new Map<number, Set<string>>();
 let uninstallRestoreWindow: BrowserWindow | undefined;
 let forceDeleteWindow: BrowserWindow | undefined;
 let searchService: SearchService | undefined;
@@ -182,7 +181,7 @@ function applyLoginSettings(settings: AppSettings): void {
 }
 
 function syncSearchBackgroundMode(force = false): void {
-  const hasVisibleWindow = nativeQuickSearch?.visible || [mainWindow, quickSearchWindow, uninstallRestoreWindow].some(
+  const hasVisibleWindow = [mainWindow, quickSearchWindow, uninstallRestoreWindow].some(
     (window) =>
       window != null &&
       !window.isDestroyed() &&
@@ -190,6 +189,32 @@ function syncSearchBackgroundMode(force = false): void {
       !window.isMinimized()
   );
   searchService?.setBackgroundMode(!hasVisibleWindow, force);
+}
+
+let driveRefreshTimer: NodeJS.Timeout | undefined;
+let driveRefreshRevision = 0;
+let lastDriveIdentity: string | undefined;
+
+function refreshAvailableDrives(): void {
+  if (isQuitting) return;
+  const revision = ++driveRefreshRevision;
+  if (driveRefreshTimer) clearTimeout(driveRefreshTimer);
+  driveRefreshTimer = setTimeout(() => {
+    driveRefreshTimer = undefined;
+    if (isQuitting) return;
+    invalidateDriveDiscovery();
+    for (const window of [mainWindow, quickSearchWindow]) {
+      if (window && !window.isDestroyed()) window.webContents.send("system:drives-changed");
+    }
+    void getLocalDriveIdentity().then(async (identity) => {
+      if (isQuitting || revision !== driveRefreshRevision) return;
+      const changed = lastDriveIdentity != null && lastDriveIdentity !== identity;
+      lastDriveIdentity = identity;
+      await searchService?.refreshDrives(changed);
+    }).catch((error) => {
+      if (!isQuitting) logger.warn("indexer.drive_refresh_failed", { error: serializeError(error) });
+    });
+  }, 250);
 }
 
 function trackWindowActivity(window: BrowserWindow, role: "main" | "quick" | "force-delete"): void {
@@ -205,6 +230,15 @@ function trackWindowActivity(window: BrowserWindow, role: "main" | "quick" | "fo
   window.on("minimize", sync);
   window.on("restore", sync);
   window.on("closed", sync);
+  if (role !== "force-delete") {
+    window.on("focus", refreshAvailableDrives);
+    if (process.platform === "win32") {
+      window.hookWindowMessage(0x0219, (wParam) => {
+        const change = wParam.readUInt32LE(0);
+        if (change === 0x8000 || change === 0x8004 || change === 0x0007) refreshAvailableDrives();
+      });
+    }
+  }
   window.on("unresponsive", () => {
     logger.warn("window.unresponsive", {
       title: window.getTitle(),
@@ -769,6 +803,7 @@ function showMainView(
 
 function createQuickSearchWindow(): BrowserWindow {
   if (quickSearchWindow && !quickSearchWindow.isDestroyed()) {
+    if (quickSearchWindow.isMinimized()) quickSearchWindow.restore();
     quickSearchWindow.show();
     quickSearchWindow.focus();
     sendNavigation(quickSearchWindow, { view: "search", focus: "search-input" });
@@ -827,133 +862,7 @@ function createQuickSearchWindow(): BrowserWindow {
 
 function openQuickSearch(): void {
   if (isQuitting) return;
-  // If startup fails, the host opens the existing browser window instead.
-  if (resolveNativeLanguage(store.getSettings().language) === "zh-CN" && nativeQuickSearch?.open()) return;
   createQuickSearchWindow();
-}
-
-async function dispatchNativeQuickSearch(owner: number, request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (isQuitting || !searchService) throw new Error("应用即将关闭");
-  switch (request.op) {
-    case "query":
-    case "contentQuery": {
-      const text = assertString(request.query, "搜索词", 33_000);
-      await searchService.start();
-      const page = request.op === "query"
-        ? await searchService.searchPage(text, readSearchFilters(request), readSearchPage(request, 120), owner)
-        : await searchService.searchContentPage(
-            text,
-            assertString(request.scope, "内容搜索目录"),
-            { ...readContentOptions(request), ...readSearchPage(request, 80) },
-            owner
-          );
-      // Store only the latest page for operations originating from this window.
-      if (nativeResultPaths.has(owner)) nativeResultPaths.set(owner, new Set(page.items.map((item) => item.path)));
-      return {
-        results: page.items.map((item) => ({
-          ...item,
-          size: item.size ?? 0,
-          modifiedAtMs: item.modifiedAt ? Date.parse(item.modifiedAt) || undefined : undefined
-        })),
-        hasMore: page.hasMore,
-        nextCursor: page.nextCursor ?? null,
-        totalMatches: page.totalMatches ?? null,
-        generation: page.generation,
-        partial: page.partial === true,
-        cursorReset: page.cursorReset === true
-      };
-    }
-    case "contentIndex":
-      await searchService.start();
-      await searchService.indexContent(assertString(request.scope, "内容索引目录"));
-      return {};
-    case "contentStatus": {
-      await searchService.start();
-      const status = await searchService.contentIndexStatus(assertString(request.scope, "内容索引目录"));
-      return { status: { ...status, message: status.message ?? "" } };
-    }
-    case "bookmarksList":
-      return { bookmarks: store.listSearchBookmarks() };
-    case "bookmarkFoldersList":
-      return { folders: store.listSearchBookmarkFolders() };
-    case "bookmarkSave": {
-      if (!request.value || typeof request.value !== "object" || Array.isArray(request.value)) {
-        throw new Error("搜索书签无效");
-      }
-      const value = request.value as Record<string, unknown>;
-      return { bookmark: await store.saveSearchBookmark({
-        ...value,
-        filters: readSearchFilters(value.filters),
-        id: typeof value.id === "string" ? value.id : randomUUID()
-      }) };
-    }
-    case "bookmarkDelete":
-      return { deleted: await store.deleteSearchBookmark(assertString(request.bookmarkId, "搜索书签 ID", 128)) };
-    case "openFullSearch": {
-      const value = request.value && typeof request.value === "object" && !Array.isArray(request.value)
-        ? request.value as Record<string, unknown> : undefined;
-      const searchWorkspace = value && sanitizeSearchWorkspace({ ...value, version: 1, filters: readSearchFilters(value.filters) });
-      if (searchWorkspace && (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading())) {
-        await store.saveSearchWorkspace(searchWorkspace);
-      }
-      showMainView("search", { focus: "search-input", searchWorkspace });
-      return {};
-    }
-    case "fileAction": {
-      const target = assertString(request.path, "路径");
-      if (!nativeResultPaths.get(owner)?.has(target)) throw new Error("请先在当前搜索结果中选中该路径");
-      const stats = await lstat(target);
-      switch (request.action) {
-        case "open": {
-          const error = await shell.openPath(target);
-          if (error) throw new Error(error);
-          return { action: "opened" };
-        }
-        case "reveal":
-          shell.showItemInFolder(target);
-          return { action: "revealed" };
-        case "copyPath":
-          clipboard.writeText(target);
-          return { action: "copied", message: "已复制完整路径" };
-        case "menu": {
-          showMainView("search");
-          const result = await showSearchContextMenu(mainWindow!, target, stats.isDirectory());
-          if (result.action === "analyze") showMainView("analyze", { path: target });
-          if (result.action === "error") throw new Error(result.message);
-          return { ...result };
-        }
-        case "forceDelete":
-          forceDeleteLaunches.enqueue(target);
-          showForceDeleteRequests();
-          return { action: "review" };
-        default:
-          throw new Error("文件操作无效");
-      }
-    }
-    default:
-      throw new Error("原生搜索操作无效");
-  }
-}
-
-function createNativeQuickSearchHost(): NativeQuickSearchHost {
-  return new NativeQuickSearchHost({
-    executable: app.isPackaged
-      ? path.join(process.resourcesPath, "bin", "cshift-quick-search.exe")
-      : path.resolve(__dirname, "..", "native", "quick-search-prototype", "target", "release", "cshift-quick-search-prototype.exe"),
-    cwd: applicationDataRoot,
-    dispatch: dispatchNativeQuickSearch,
-    visibilityChanged: (owner, visible) => {
-      if (visible && !nativeResultPaths.has(owner)) nativeResultPaths.set(owner, new Set());
-      if (!visible) searchService?.cancelWindowSearch(owner);
-      syncSearchBackgroundMode();
-      if (visible && searchService) nativeQuickSearch?.sendEvent("indexStatus", searchService.getStatus());
-    },
-    closed: (owner) => {
-      nativeResultPaths.delete(owner);
-      if (!isQuitting && !store.getSettings().minimizeToTray && BrowserWindow.getAllWindows().length === 0) app.quit();
-    },
-    fallback: () => { if (!isQuitting) createQuickSearchWindow(); }
-  });
 }
 
 function createUninstallRestoreWindow(): BrowserWindow {
@@ -1403,8 +1312,9 @@ function showSearchContextMenu(
 function registerIpc(): void {
   ipcMain.handle("system:overview", async () => {
     const roots = await getLocalDriveRoots();
+    const drives = await Promise.allSettled(roots.map((root) => getDriveInfo(root)));
     return {
-      drives: await Promise.all(roots.map((root) => getDriveInfo(root))),
+      drives: drives.flatMap((result) => result.status === "fulfilled" ? [result.value] : []),
       protectedPaths: PROTECTED_PATHS,
       isElevated: await isElevated(),
       ...systemIdentity(),
@@ -2331,7 +2241,6 @@ if (!singleInstance) {
     const currentSettings = store.getSettings();
     searchService = new SearchService(
       (status) => {
-        nativeQuickSearch?.sendEvent("indexStatus", status);
         for (const window of [mainWindow, quickSearchWindow]) {
           if (window && !window.isDestroyed()) {
             window.webContents.send("indexer:status", status);
@@ -2339,7 +2248,6 @@ if (!singleInstance) {
         }
       },
       (status) => {
-        nativeQuickSearch?.sendEvent("contentStatus", { ...status, message: status.message ?? "" });
         for (const window of [mainWindow, quickSearchWindow]) {
           if (window && !window.isDestroyed()) {
             window.webContents.send("content-indexer:status", status);
@@ -2347,7 +2255,6 @@ if (!singleInstance) {
         }
       },
       (event) => {
-        if (nativeQuickSearch?.visible) nativeQuickSearch.sendEvent("indexChanged", event);
         for (const window of [mainWindow, quickSearchWindow]) {
           if (
             window &&
@@ -2371,7 +2278,6 @@ if (!singleInstance) {
         height: currentSettings.magnifierHeight
       }
     );
-    nativeQuickSearch = createNativeQuickSearchHost();
     migrationService = new MigrationService(store, (record, message) => {
       for (const window of [mainWindow, uninstallRestoreWindow]) {
         if (window && !window.isDestroyed()) window.webContents.send("migration:progress", { record, message });
@@ -2447,11 +2353,15 @@ app.on("window-all-closed", () => {
     store.getSettings().minimizeToTray &&
     tray != null &&
     !tray.isDestroyed();
-  if (process.platform !== "darwin" && !keepInTray && !nativeQuickSearch?.opened) app.quit();
+  if (process.platform !== "darwin" && !keepInTray) app.quit();
 });
 
 app.on("before-quit", (event) => {
   isQuitting = true;
+  if (driveRefreshTimer) {
+    clearTimeout(driveRefreshTimer);
+    driveRefreshTimer = undefined;
+  }
   if (visibleUpdateCheckTimer) {
     clearTimeout(visibleUpdateCheckTimer);
     visibleUpdateCheckTimer = undefined;
@@ -2468,7 +2378,6 @@ app.on("before-quit", (event) => {
   if (!shutdownPromise) {
     shutdownPromise = (async () => {
       try {
-        await nativeQuickSearch?.stop();
         await migrationService?.whenIdle();
         await forceDeleteService?.whenIdle();
         await Promise.allSettled([...pendingFileMutations]);

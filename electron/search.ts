@@ -149,6 +149,14 @@ export class SearchService {
   private restartTimer?: NodeJS.Timeout;
   private startPromise?: Promise<void>;
   private stopPromise?: Promise<void>;
+  private childStopPromise?: Promise<void>;
+  private driveRefreshPromise?: Promise<boolean>;
+  private driveRefreshRequested = false;
+  private driveRefreshForced = false;
+  private driveRefreshRestarted = false;
+  private restartingForDrives = false;
+  private indexedRoots?: string[];
+  private forceNextInitialization = false;
   private hasReadyNameIndex = false;
   private lastFullRefreshRequestedAt = 0;
   private refreshDue = false;
@@ -185,6 +193,7 @@ export class SearchService {
   }
 
   start(): Promise<void> {
+    if (this.restartingForDrives) return this.driveRefreshPromise?.then(() => undefined) ?? Promise.resolve();
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startIndexer().finally(() => { this.startPromise = undefined; });
     return this.startPromise;
@@ -215,12 +224,13 @@ export class SearchService {
     });
     this.child = child;
     this.hasReadyNameIndex = false;
+    this.indexedRoots = undefined;
     logger.info("indexer.spawn_requested", {
       executable,
       backgroundMode: this.backgroundMode
     });
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    lines.on("line", (line) => this.handleLine(line));
+    lines.on("line", (line) => { if (this.child === child) this.handleLine(line); });
     child.stderr.on("data", (chunk) => {
       const message = chunk.toString("utf8").trim();
       if (message) this.status.message = message.slice(-300);
@@ -239,14 +249,14 @@ export class SearchService {
         stopping: this.stopping,
         error: serializeError(error)
       });
-      if (this.child === child) this.rejectPending(error);
+      if (this.child === child) this.rejectPending(this.restartingForDrives ? new Error(SEARCH_SUPERSEDED) : error);
     });
     child.on("error", (error) => {
       logger.error("indexer.process_error", {
         stopping: this.stopping,
         error: serializeError(error)
       });
-      if (this.child === child) this.rejectPending(error);
+      if (this.child === child) this.rejectPending(this.restartingForDrives ? new Error(SEARCH_SUPERSEDED) : error);
     });
     child.on("exit", (code, signal) => {
       logger.info("indexer.exited", {
@@ -256,9 +266,10 @@ export class SearchService {
         restartCount: this.restartCount
       });
       lines.close();
-      if (this.child === child) this.child = undefined;
-      this.rejectPending(new Error(`索引进程已退出（${code ?? "unknown"}）`));
-      if (!this.stopping && this.restartCount < 2) {
+      if (this.child !== child) return;
+      this.child = undefined;
+      this.rejectPending(new Error(this.restartingForDrives ? SEARCH_SUPERSEDED : `索引进程已退出（${code ?? "unknown"}）`));
+      if (!this.stopping && !this.restartingForDrives && this.restartCount < 2) {
         this.restartCount += 1;
         this.updateStatus({ ...this.status, state: "error", message: "索引核心意外退出，正在重启" });
         this.restartTimer = setTimeout(() => {
@@ -267,7 +278,7 @@ export class SearchService {
             // The child lifecycle handlers already publish the degraded state.
           });
         }, 1_500 * this.restartCount);
-      } else if (!this.stopping) {
+      } else if (!this.stopping && !this.restartingForDrives) {
         this.updateStatus({
           ...this.status,
           mode: "unavailable",
@@ -291,10 +302,11 @@ export class SearchService {
       // A missing cache is the normal first-run case; the native indexer builds it.
       this.refreshDue = false;
     }
-    await this.request(
+    const initialized = await this.request(
       {
         op: "init",
         root: "*",
+        forceRebuild: this.forceNextInitialization,
         cachePath,
         contentCacheDir,
         background: this.backgroundMode,
@@ -307,6 +319,8 @@ export class SearchService {
       },
       90_000
     );
+    this.forceNextInitialization = false;
+    this.indexedRoots = initialized.indexedRoots?.map((root) => normalizeWindowsPath(root));
     if (this.backgroundMode) {
       // An indexer that starts directly in tray mode does not observe a later
       // foreground-to-background transition. Re-send the background command
@@ -328,7 +342,65 @@ export class SearchService {
       hasChild: this.child != null,
       pendingRequests: this.pending.size
     });
-    this.stopPromise = (async () => {
+    this.stopPromise = this.closeIndexer(new Error("索引服务已停止"));
+    return this.stopPromise;
+  }
+
+  refreshDrives(force = false): Promise<boolean> {
+    if (this.stopping) return Promise.resolve(false);
+    this.driveRefreshRequested = true;
+    // Repeated device notifications for the same insertion share one restart.
+    if (!this.driveRefreshRestarted) this.driveRefreshForced ||= force;
+    if (!this.driveRefreshPromise) {
+      this.driveRefreshPromise = this.refreshDriveSet().catch((error) => {
+        if (this.stopping) return false;
+        throw error;
+      }).finally(() => {
+        this.driveRefreshPromise = undefined;
+        this.driveRefreshRestarted = false;
+      });
+    }
+    return this.driveRefreshPromise;
+  }
+
+  private async refreshDriveSet(): Promise<boolean> {
+    let restarted = false;
+    while (this.driveRefreshRequested && !this.stopping) {
+      this.driveRefreshRequested = false;
+      if (this.startPromise) await this.startPromise;
+      const roots = await getLocalDriveRoots();
+      // Focus can race the deferred initial start while drive discovery awaits.
+      if (this.startPromise) await this.startPromise;
+      if (this.stopping) break;
+      const rootKey = (values: string[]) => [...new Set(values.map((root) => normalizeWindowsPath(root).toLowerCase()))].sort().join("|");
+      const force = this.driveRefreshForced;
+      this.driveRefreshForced = false;
+      if (!force && this.child && this.indexedRoots && rootKey(roots) === rootKey(this.indexedRoots)) continue;
+
+      this.restartingForDrives = true;
+      this.driveRefreshRestarted = true;
+      this.hasReadyNameIndex = false;
+      this.queryScheduler.cancelAll();
+      this.clearResultCaches();
+      this.updateStatus({ mode: "loading", state: "idle", entries: 0, progress: 0,
+        root: "本机所有磁盘", message: "检测到磁盘变化，正在更新名称索引" });
+      try {
+        await this.closeIndexer(new Error(SEARCH_SUPERSEDED));
+      } finally {
+        this.restartingForDrives = false;
+      }
+      if (this.stopping) break;
+      this.restartCount = 0;
+      this.forceNextInitialization ||= force;
+      await this.start();
+      restarted = true;
+    }
+    return restarted;
+  }
+
+  private closeIndexer(reason: Error): Promise<void> {
+    if (this.childStopPromise) return this.childStopPromise;
+    this.childStopPromise = (async () => {
       if (this.dailyRefreshTimer) {
         clearTimeout(this.dailyRefreshTimer);
         this.dailyRefreshTimer = undefined;
@@ -338,7 +410,12 @@ export class SearchService {
         this.restartTimer = undefined;
       }
       const child = this.child;
-      if (!child || child.exitCode != null) return;
+      if (!child) return;
+      if (child.exitCode != null || child.signalCode != null) {
+        this.child = undefined;
+        this.rejectPending(reason);
+        return;
+      }
       const exited = once(child, "exit").then(() => true).catch(() => true);
       try {
         await this.requestWithChild(child, { op: "quit" }, 1_500);
@@ -359,11 +436,12 @@ export class SearchService {
           new Promise<void>((resolve) => setTimeout(resolve, 500))
         ]);
       }
+      if (child.exitCode == null && child.signalCode == null) throw new Error("索引进程尚未退出，稍后重试磁盘刷新");
       if (this.child === child) this.child = undefined;
-      this.rejectPending(new Error("索引服务已停止"));
+      this.rejectPending(reason);
       logger.info("indexer.stop_completed", { childPid: child.pid });
-    })();
-    return this.stopPromise;
+    })().finally(() => { this.childStopPromise = undefined; });
+    return this.childStopPromise;
   }
 
   getStatus(): IndexerStatus {
@@ -389,7 +467,7 @@ export class SearchService {
             ? "全局鼠标监听可用；短按不会被拦截"
             : "鼠标监听暂不可用"
     };
-    if (this.child) {
+    if (this.child && !this.restartingForDrives) {
       const response = (await this.request(
         { op: "setMouseShortcut", mouseButton: button, mouseHoldMs: holdMs },
         3_000
@@ -410,7 +488,7 @@ export class SearchService {
   }
 
   async setMagnifierCapture(active: boolean): Promise<boolean> {
-    if (this.child) {
+    if (this.child && !this.restartingForDrives) {
       await this.request(
         { op: "setMagnifierCapture", magnifierCaptureActive: active },
         3_000
@@ -435,7 +513,7 @@ export class SearchService {
         ? "按住组合键时显示局部放大镜，滚动滚轮可调倍率"
         : "全屏局部放大镜已关闭"
     };
-    if (this.child) {
+    if (this.child && !this.restartingForDrives) {
       const response = (await this.request(
         {
           op: "setMagnifier",
@@ -465,7 +543,7 @@ export class SearchService {
     } else if (this.refreshDue && this.status.state === "ready" && !this.dailyRefreshTimer) {
       this.scheduleRefreshTimer(FOREGROUND_REFRESH_DELAY_MS);
     }
-    if (!this.child) return;
+    if (!this.child || this.restartingForDrives) return;
     void this.request(
       { op: "setBackground", background, processId: process.pid },
       3_000
@@ -953,6 +1031,7 @@ export class SearchService {
     for (let offset = 0; offset < roots.length; offset += 2) {
       await Promise.all(roots.slice(offset, offset + 2).map(scanRoot));
     }
+    if (!isCurrent() || this.backgroundMode || this.stopping) throw new Error(SEARCH_SUPERSEDED);
     const results = [...normalizedTargets.values()];
     if (epoch === this.resultCacheEpoch && !this.backgroundMode && !this.stopping) {
       for (const result of results) {
@@ -1148,6 +1227,7 @@ export class SearchService {
     } catch {
       return;
     }
+    if (this.restartingForDrives && response.event) return;
     if (response.event === "status" && response.status) {
       this.updateStatus(response.status as IndexerStatus);
       return;

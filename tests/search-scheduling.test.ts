@@ -156,6 +156,26 @@ describe("latest search scheduling and idle filesystem work", () => {
     expect(filesystem.readdir).toHaveBeenCalledTimes(2);
   });
 
+  it("does not cache directory counts canceled during the final file stat", async () => {
+    const { value, internals } = service();
+    const metadata = deferred<{ size: number }>();
+    filesystem.readdir.mockResolvedValueOnce([entry("alpha.txt")]);
+    filesystem.lstat.mockReturnValueOnce(metadata.promise);
+    const sizes = value.directorySizes(["E:\\fixture"], 7).catch(error => error);
+    await vi.waitFor(() => expect(filesystem.lstat).toHaveBeenCalledOnce());
+
+    internals.request.mockResolvedValueOnce({ results: [], hasMore: false, generation: 1 });
+    await value.searchPage("alpha", filters, {}, 7);
+    metadata.resolve({ size: 3 });
+    expect((await sizes).message).toBe(SEARCH_SUPERSEDED);
+
+    const cache = (value as unknown as { directorySizeCache: Map<string, unknown> }).directorySizeCache;
+    expect(cache.size).toBe(0);
+    const refreshed = await value.directorySizes(["E:\\fixture"], 7);
+    expect(refreshed[0].bytes).toBe(0);
+    expect(filesystem.readdir).toHaveBeenCalledTimes(2);
+  });
+
   it("does not reuse a partial search count for an explicitly opened properties dialog", async () => {
     const { value } = service();
     const cache = (value as unknown as { directorySizeCache: Map<string, unknown> }).directorySizeCache;

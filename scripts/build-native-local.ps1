@@ -32,7 +32,7 @@ Write-Host "Read-only SDK: $SdkRoot"
 Write-Host "Project dependency cache: $cargoCache"
 Write-Host "Project temporary files: $temporaryPath"
 New-Item -ItemType Directory -Path $cargoCache, $temporaryPath -Force | Out-Null
-$projects = if ($Project -eq "all") { @("indexer", "updater", "quick-search-prototype") } else { @($Project) }
+$projects = if ($Project -eq "all") { @("indexer", "updater") } else { @($Project) }
 
 # Seed only locked package archives. Cargo extracts sources into the project cache.
 $seedIndex = Join-Path $CacheSeedRoot "registry\index"

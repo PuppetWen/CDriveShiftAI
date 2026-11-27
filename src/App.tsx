@@ -172,7 +172,7 @@ export default function App() {
       const { ui } = localization.current;
       const failures: string[] = [];
       if (overviewResult.status === "fulfilled") {
-        setOverview(overviewResult.value);
+        setOverview((current) => current ?? overviewResult.value);
         if (!indexerChanged) setIndexer(overviewResult.value.indexer);
       } else {
         failures.push(`${ui("系统信息", "System overview")}: ${String(overviewResult.reason)}`);
@@ -266,6 +266,35 @@ export default function App() {
       offUpdate();
     };
   }, [notify]);
+
+  useEffect(() => {
+    let active = true;
+    let timer = 0;
+    let revision = 0;
+    const refreshDrives = () => {
+      if (document.visibilityState === "hidden" || timer) return;
+      timer = window.setTimeout(() => {
+        timer = 0;
+        if (document.visibilityState === "hidden") return;
+        const requested = ++revision;
+        void api.getOverview().then((updated) => {
+          if (active && requested === revision) {
+            setOverview((current) => current ? { ...current, drives: updated.drives } : updated);
+          }
+        }).catch(() => undefined);
+      }, 120);
+    };
+    const offDrives = api.onDrivesChanged(refreshDrives);
+    window.addEventListener("focus", refreshDrives);
+    document.addEventListener("visibilitychange", refreshDrives);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      offDrives();
+      window.removeEventListener("focus", refreshDrives);
+      document.removeEventListener("visibilitychange", refreshDrives);
+    };
+  }, []);
 
   const refreshUpdate = useCallback(async () => {
     const result = await api.checkForUpdates(true);

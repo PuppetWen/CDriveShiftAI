@@ -754,6 +754,7 @@ export interface CDriveShiftApi {
   rollbackMigration(id: string): Promise<MigrationRecord>;
   reapplyMigration(id: string): Promise<MigrationRecord>;
   deleteMigrations(ids: string[]): Promise<number>;
+  onDrivesChanged(listener: () => void): () => void;
   onIndexerStatus(listener: (status: IndexerStatus) => void): () => void;
   onSearchIndexChanged(listener: (event: SearchIndexChangedEvent) => void): () => void;
   onContentIndexerStatus(listener: (status: ContentIndexerStatus) => void): () => void;
